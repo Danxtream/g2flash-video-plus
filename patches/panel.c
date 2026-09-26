@@ -95,6 +95,11 @@ static void panel_watchdog(void *unused) {
     /* Only schedule: SPI is never touched from the timer thread. */
     FW_DISPLAY_QUEUE(0,0,0,0,PANEL_W,PANEL_H);
 }
+/* Keep the callback-address relocation beside panel_watchdog (see
+ * cfw_create_buzzer_timer): panel_queue inlines into far-away callers. */
+__attribute__((noinline)) uint32_t panel_create_watchdog(void) {
+    return FW_TIMER_NEW((void *)&panel_watchdog,1,0,0);
+}
 /* The image mutex is held; the display gate is released by the stock task.
  * Only copy request bytes here: no SPI calls from BLE/bridge task contexts. */
 static int panel_queue(const uint8_t *src, uint32_t size, uint8_t origin) {
@@ -106,7 +111,7 @@ static int panel_queue(const uint8_t *src, uint32_t size, uint8_t origin) {
     FW_DISPLAY_WAIT();
     if (ctx->direct_pending || ctx->panel.pending) return -1;
     if (src[0]!=23) {
-        if (!ctx->panel.watchdog) ctx->panel.watchdog=FW_TIMER_NEW((void *)&panel_watchdog,1,0,0);
+        if (!ctx->panel.watchdog) ctx->panel.watchdog=panel_create_watchdog();
         if (!ctx->panel.watchdog || FW_TIMER_START(ctx->panel.watchdog,1000)!=0) {
             FW_DISPLAY_SIGNAL(); return -1;
         }

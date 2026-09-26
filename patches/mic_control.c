@@ -59,9 +59,13 @@
  *   field 104 (TX)  ['M','C', ver=1, active, src, chanMask, codec, fmt,
  *                    rateLo, rateHi, brLo, brHi, flags, hwArmed, sideId,
  *                    framesLo..framesHi(32), effRateLo, effRateHi]
+ *                    + diagnostics extension (19 bytes, see mic_status_body):
+ *                    tapCalls u32, tapLastBytes u16, tapLastSlot, skipIdle u16,
+ *                    skipLease u16, skipAlloc u16, regRet s8, unregRet s8,
+ *                    notifyRet s8, slotTable, leaseRemainingS u16
  *     `rate`/`br` echo the REQUESTED values; `effRate` is what capture actually
  *     runs at (see EFFECTIVE vs REQUESTED below). `sideId`: 1 = right temple,
- *     2 = left temple.
+ *     2 = left temple. Older parsers read only the first 21 bytes.
  *
  * The phone sends an IDENTICAL CONFIGURE to both temples for a consistent array;
  * each temple answers field 104 on its own link so SybilSight can confirm they
@@ -83,12 +87,13 @@
  * `tick` gives coarse host-side L/R alignment; `angle`/`ssr` are this temple's
  * own-pair estimate (only computed when MIC_FLAG_BEAMFORM is set AND the frame
  * is 2-channel 16-bit -- the recovered algo object expects interleaved stereo
- * 16-bit input). CHANNEL LAYOUT CAVEAT: the recovered stereo production callback
- * dispatches the two channels as back-to-back 400-byte blocks (concatenated, not
- * interleaved) when channel extraction is enabled, and forwards the raw source
- * buffer when it is not. The payload is the dispatched buffer verbatim; which
- * layout a live session produces is a validation-gate item -- confirm on
- * hardware and pin it in the SybilSight demuxer.
+ * 16-bit input). CHANNEL LAYOUT: the payload is the slot-0 dispatch buffer
+ * verbatim, which is INTERLEAVED stereo s16 (ch0, ch1, ch0, ch1, ...): the stock
+ * empty-slot fallback hands that same buffer to service_algo_process, whose
+ * preprocessing (2.3.0.24 0x5b0f56) reads ch0 = pcm[4i], ch1 = pcm[4i+2] for
+ * 800 frames (3200 bytes, 50 ms at 16 kHz). Which physical mic is ch0 is not yet
+ * confirmed on hardware. A PDM session forwards the slot-1 dispatch buffer
+ * instead, whose layout has not been checked.
  *
  * EFFECTIVE vs REQUESTED. The recovered init entries take no rate/width/bitrate
  * arguments -- stock capture runs the LC3 voice pipeline's fixed 16 kHz. The
@@ -114,9 +119,10 @@
  * the configuration -- it touches no audio hardware and cannot fault. The capture
  * + streaming path (mic_session_start / mic_pcm_tap / mic_session_stop) is
  * compiled in but runs ONLY when the phone sets MIC_FLAG_ARM_HW, and every
- * firmware entry it uses is an address-pinned but ABI-INFERRED seam (the tap
- * callback signature, the codec-init channel selector, and the streaming-notify
- * sender args are recovered behaviourally, not to register level). Those seams
+ * firmware entry it uses is address-pinned. The PCM slot register/unregister,
+ * tap callback and service_algo_process ABIs are confirmed by disassembly; the
+ * codec-init channel selector and the streaming-notify sender args are still
+ * recovered behaviourally, not to register level. Those seams
  * MUST be confirmed on sacrificial hardware before a phone build ships with
  * ARM_HW enabled. Self-contained: no external symbols, no writable globals;
  * state lives in the customCfwContext singleton, guarded by magic + bounds.
@@ -126,15 +132,20 @@
  * ABI-INFERRED where noted; every use is gated behind MIC_FLAG_ARM_HW. --- */
 typedef void (*mic_sel_fn)(uint32_t selector);
 typedef void (*mic_void_fn)(void);
-/* SVC_PcmAppRegister(slot, app_id, callback) — recovery: "registers one callback
- * and application ID in either of two PCM source slots"; SVC_PcmAppProcessData
- * dispatches to the registered callback INSTEAD of the stock mono-average
- * fallback. Argument order is inferred. */
-typedef int  (*pcm_register_fn)(uint32_t slot, uint32_t app_id, void *cb);
-typedef int  (*pcm_unregister_fn)(uint32_t slot, uint32_t app_id);
-/* service_algo_process(interleaved2ch16, &ssr, &angle) — recovery: "preprocesses
- * one frame and returns SSR and angle results through two shorts". */
-typedef void (*algo_process_fn)(const void *pcm, int16_t *ssr, int16_t *angle);
+/* SVC_PcmAppRegister(owner_id, slot, callback) — one callback per PCM source
+ * slot; SVC_PcmAppProcessData (2.3.0.24 0x599780) dispatches to it as
+ * cb(slot, pcm, bytes) INSTEAD of the stock mono-average fallback. Confirmed by
+ * disassembly (2.3.0.24): register rejects slot >= 2 and stores {owner, slot, cb};
+ * re-registering an occupied slot overwrites it. Unregister(owner_id, slot)
+ * returns 0 when it clears the slot or the slot is already empty, and -1 on an
+ * owner mismatch. */
+typedef int  (*pcm_register_fn)(uint32_t owner_id, uint32_t slot, void *cb);
+typedef int  (*pcm_unregister_fn)(uint32_t owner_id, uint32_t slot);
+/* service_algo_process(interleaved2ch16, bytes, &ssr, &angle) — "preprocesses
+ * one frame and returns SSR and angle results through two shorts". Four
+ * arguments, confirmed from the stock fallback call site (2.3.0.24 0x599812);
+ * it rejects bytes > 3200 or not a multiple of 4. */
+typedef void (*algo_process_fn)(const void *pcm, uint32_t bytes, int16_t *ssr, int16_t *angle);
 /* Thread_MsgStreamingNotifyByBle @ 0x0047f17c — the facade the stock fallback
  * path forwards its completed LC3 packet through ("transport-one subtype-one
  * wrapper"). ABI inferred as (buf, len). */
@@ -145,9 +156,9 @@ typedef uint32_t (*lens_side_fn2)(void);
 #define FW_CODEC_MIC_DEINIT  ((mic_void_fn)0x005aefe3U)     /* production_codec_mic_func_deinit */
 #define FW_PDM_MIC_INIT      ((mic_sel_fn)0x005af049U)      /* production_pdm_mic_func_init    */
 #define FW_PDM_MIC_DEINIT    ((mic_void_fn)0x005af09fU)     /* production_pdm_mic_func_deinit  */
-#define FW_PCM_REGISTER      ((pcm_register_fn)0x00599501U) /* SVC_PcmAppRegister   (ABI inferred) */
-#define FW_PCM_UNREGISTER    ((pcm_unregister_fn)0x00599659U)/* SVC_PcmAppUnregister (ABI inferred) */
-#define FW_ALGO_PROCESS      ((algo_process_fn)0x005b1581U) /* service_algo_process (ABI inferred) */
+#define FW_PCM_REGISTER      ((pcm_register_fn)0x00599501U) /* SVC_PcmAppRegister   */
+#define FW_PCM_UNREGISTER    ((pcm_unregister_fn)0x00599659U)/* SVC_PcmAppUnregister */
+#define FW_ALGO_PROCESS      ((algo_process_fn)0x005b1581U) /* service_algo_process */
 #define FW_AUDIO_NOTIFY      ((audio_notify_fn)0x0047f17dU) /* streaming notify     (ABI inferred) */
 #define FW_MIC_SIDE          ((lens_side_fn2)0x00465d4dU)   /* 1 = right temple, 2 = left temple */
 /* Future validation-gate seam, unused until its ABI is confirmed: on-device LC3
@@ -181,15 +192,36 @@ typedef uint32_t (*lens_side_fn2)(void);
 #define MIC_STREAM_MAGIC0    'S'
 #define MIC_STREAM_MAGIC1    'M'
 #define MIC_STREAM_HDR_BYTES 21u
-/* The recovered production callbacks work in 400-byte per-channel chunks (the
- * stereo callback dispatches 2x400 B); the algo work buffer is 1600 B. Anything
- * larger than that is not a plausible capture chunk — truncate and flag it. */
+/* A stereo dispatch is 3200 B (800 interleaved frames), so this cap keeps the
+ * first 400 frames (25 ms) and flags the frame truncated. Interleaving keeps the
+ * truncated payload a valid stereo buffer. */
 #define MIC_STREAM_MAX_PAY   1600u
-/* PCM app slot the CFW tap registers on (slot 0 = the slot the stock stereo
- * callback dispatches into and whose empty-slot fallback is the mono-average
- * LC3 path; registering here suppresses that fallback). */
-#define MIC_PCM_SLOT         0u
-#define MIC_APP_ID           0x4643u  /* "FC"-ish CFW owner id */
+/* PCM app slots, one per front end (2.3.0.24): the codec capture dispatches
+ * into slot 0 (0x5596fe), whose empty-slot fallback is the stock mono-average
+ * LC3 path; PDM capture dispatches into slot 1 (0x55973a). The production
+ * inits register their stock callback in the same slot, and the tap takes it
+ * over. */
+#define MIC_PCM_SLOT_CODEC   0u
+#define MIC_PCM_SLOT_PDM     1u
+/* Owner id the stock production mic inits register under (2.3.0.24 0x5aef7e
+ * codec: SVC_PcmAppRegister(0x10B, 0, cb); 0x5af086 PDM: (0x10B, 1, cb)). The
+ * tap reuses it so the stock deinits' SVC_PcmAppUnregister(0x10B, slot) still
+ * matches: on an owner mismatch the codec deinit returns early and leaves the
+ * hardware running. */
+#define MIC_PCM_OWNER_ID     0x10Bu
+/* SVC_PcmAppRegister's table (2.3.0.24, literal at 0x599d78): two 12-byte
+ * entries {owner u32, slot u8 @4, callback @8}, indexed by slot. Read only, for
+ * diagnostics. */
+#define FW_PCM_APP_TABLE     ((volatile const uint8_t *)0x20076d4cU)
+#define FW_PCM_APP_ENTRY     12u
+/* Diagnostic result byte for a firmware call that has not happened yet. */
+#define MIC_RET_NONE         127
+#define MIC_STATUS_BASE_BYTES 21u
+#define MIC_STATUS_BYTES     40u
+
+static uint32_t mic_pcm_slot(const customCfwContext *ctx) {
+    return ctx->mic_source == MIC_SRC_PDM ? MIC_PCM_SLOT_PDM : MIC_PCM_SLOT_CODEC;
+}
 
 static uint8_t mic_popcount2(uint8_t mask) {
     return (uint8_t)((mask & 1u) + ((mask >> 1) & 1u));
@@ -217,35 +249,77 @@ static int mic_lease_live(const customCfwContext *ctx) {
            (int32_t)(ctx->mic_lease_deadline - FW_MS_TICK) > 0;
 }
 
+/* Clamp a firmware int result into a diagnostic byte (MIC_RET_NONE is reserved). */
+static int8_t mic_ret8(int ret) {
+    if (ret >= MIC_RET_NONE) return MIC_RET_NONE - 1;
+    if (ret < -128) return -128;
+    return (int8_t)ret;
+}
+
+__attribute__((used, noinline)) void mic_pcm_tap(uint32_t source, const void *pcm, uint32_t bytes);
+
+/* Two bits per PCM slot from the stock app table: 0 empty, 1 another
+ * callback, 2 our tap (slot 0 in bits 0-1, slot 1 in bits 2-3). Non-static
+ * and noinline so it is emitted here, beside mic_pcm_tap: the Thumb MOVW/MOVT
+ * relocation for &mic_pcm_tap has a signed 16-bit addend (see
+ * cfw_create_buzzer_timer). */
+__attribute__((noinline)) uint8_t mic_slot_table_state(void) {
+    uint8_t state = 0;
+    for (uint32_t slot = 0; slot < 2u; slot++) {
+        uint32_t cb = *(volatile const uint32_t *)(FW_PCM_APP_TABLE + slot * FW_PCM_APP_ENTRY + 8u);
+        uint8_t value = cb == 0 ? 0u : cb == (uint32_t)(uintptr_t)&mic_pcm_tap ? 2u : 1u;
+        state |= (uint8_t)(value << (slot * 2u));
+    }
+    return state;
+}
+
+/* Whole seconds left on the streaming lease (0 = none or lapsed). */
+static uint32_t mic_lease_remaining_s(const customCfwContext *ctx) {
+    if (!mic_lease_live(ctx)) return 0;
+    return (ctx->mic_lease_deadline - FW_MS_TICK + 999u) / 1000u;
+}
+
 /* ---- capture + streaming (GATED behind MIC_FLAG_ARM_HW) -------------------- */
 
 /* The registered PCM tap. Receives this temple's capture dispatch, packs a
  * stream frame with the timestamp and on-device angle/SSR, and hands it to the
- * streaming-notify facade. Runs on the audio service's thread. ABI
- * (source, pcm, bytes) is INFERRED — do not enable ARM_HW until it is confirmed
- * on hardware. Nonstatic + noinline: registered by address via `&`. */
+ * streaming-notify facade. Runs on the audio service's thread. The dispatcher
+ * calls it as (slot, pcm, bytes). Nonstatic + noinline: registered by address
+ * via `&`. */
 __attribute__((used, noinline)) void mic_pcm_tap(uint32_t source, const void *pcm, uint32_t bytes) {
-    (void)source;
     customCfwContext *ctx = peekCustomCfwContext();
-    if (!ctx || !ctx->mic_active || !ctx->mic_hw_armed || pcm == 0 || bytes == 0) return;
+    if (!ctx) return;
+    ctx->mic_tap_calls++;
+    ctx->mic_tap_last_bytes = (uint16_t)(bytes > 0xffffu ? 0xffffu : bytes);
+    ctx->mic_tap_last_slot = (uint8_t)source;
+    if (!ctx->mic_active || !ctx->mic_hw_armed || pcm == 0 || bytes == 0) {
+        ctx->mic_skip_idle++;
+        return;
+    }
     /* Fail-open: the phone stopped renewing — stop emitting immediately. The
      * watchdog timer does the actual hardware teardown from the timer thread
      * (deinit from inside the capture callback would be re-entrant). */
-    if (!mic_lease_live(ctx)) return;
+    if (!mic_lease_live(ctx)) {
+        ctx->mic_skip_lease++;
+        return;
+    }
 
     uint8_t nch = mic_effective_channels(ctx);
     int16_t ssr = 0, angle = 0;
     /* The recovered algo object splits 800 interleaved stereo 16-bit frames;
      * feeding it anything else would return garbage bearings. */
     if ((ctx->mic_flags & MIC_FLAG_BEAMFORM) && nch == 2u && ctx->mic_format == 0u)
-        FW_ALGO_PROCESS(pcm, &ssr, &angle);
+        FW_ALGO_PROCESS(pcm, bytes, &ssr, &angle);
 
     uint8_t flags = ctx->mic_flags;
     uint32_t pay = bytes;
     if (pay > MIC_STREAM_MAX_PAY) { pay = MIC_STREAM_MAX_PAY; flags |= MIC_STREAM_TRUNC; }
 
     uint8_t *f = (uint8_t *)cfw_malloc(MIC_STREAM_HDR_BYTES + pay);
-    if (!f) return;
+    if (!f) {
+        ctx->mic_skip_alloc++;
+        return;
+    }
     uint32_t tick = FW_MS_TICK;
     uint16_t seq = (uint16_t)ctx->mic_frames;
     uint16_t rate = mic_effective_rate(ctx);
@@ -263,7 +337,7 @@ __attribute__((used, noinline)) void mic_pcm_tap(uint32_t source, const void *pc
     f[19] = (uint8_t)pay;   f[20] = (uint8_t)(pay >> 8);
     memcpy(f + MIC_STREAM_HDR_BYTES, pcm, pay);
 
-    FW_AUDIO_NOTIFY(f, MIC_STREAM_HDR_BYTES + pay);
+    ctx->mic_notify_ret = mic_ret8(FW_AUDIO_NOTIFY(f, MIC_STREAM_HDR_BYTES + pay));
     ctx->mic_frames++;
     FW_FREE(f);
 }
@@ -281,14 +355,14 @@ static void mic_session_start(customCfwContext *ctx) {
         FW_PDM_MIC_DEINIT();
         FW_CODEC_MIC_INIT(mic_effective_channels(ctx) == 2u ? 1u : 0u);
     }
-    FW_PCM_REGISTER(MIC_PCM_SLOT, MIC_APP_ID, (void *)&mic_pcm_tap);
+    ctx->mic_reg_ret = mic_ret8(FW_PCM_REGISTER(MIC_PCM_OWNER_ID, mic_pcm_slot(ctx), (void *)&mic_pcm_tap));
     ctx->mic_hw_armed = 1;
 }
 
 static void mic_session_stop(customCfwContext *ctx) {
     if (!ctx->mic_hw_armed) return;
     ctx->mic_hw_armed = 0;                  /* silence the tap before teardown */
-    FW_PCM_UNREGISTER(MIC_PCM_SLOT, MIC_APP_ID);
+    ctx->mic_unreg_ret = mic_ret8(FW_PCM_UNREGISTER(MIC_PCM_OWNER_ID, mic_pcm_slot(ctx)));
     FW_CODEC_MIC_DEINIT();
     FW_PDM_MIC_DEINIT();
 }
@@ -389,6 +463,11 @@ void mic_apply_control(const uint8_t *data, uint32_t len) {
         ctx->mic_channels = mic_popcount2(ctx->mic_chan_mask);
         ctx->mic_active = 1;
         ctx->mic_frames = 0;
+        ctx->mic_tap_calls = 0;
+        ctx->mic_tap_last_bytes = 0;
+        ctx->mic_tap_last_slot = 0;
+        ctx->mic_skip_idle = ctx->mic_skip_lease = ctx->mic_skip_alloc = 0;
+        ctx->mic_notify_ret = MIC_RET_NONE;
         mic_session_start(ctx);              /* no-op unless MIC_FLAG_ARM_HW set */
         mic_lease_renew(ctx);
         mic_send_status_notify(ctx);         /* confirm the applied config */
@@ -402,7 +481,7 @@ void mic_apply_control(const uint8_t *data, uint32_t len) {
     }
 }
 
-/* Serialize the field-104 status body (21 bytes; see the contract above). */
+/* Serialize the field-104 status body (MIC_STATUS_BYTES; see the contract above). */
 static unsigned mic_status_body(customCfwContext *ctx, unsigned char *body) {
     unsigned n = 0;
     body[n++] = 'M'; body[n++] = 'C'; body[n++] = (unsigned char)MIC_PROTO_VERSION;
@@ -425,6 +504,27 @@ static unsigned mic_status_body(customCfwContext *ctx, unsigned char *body) {
     uint16_t eff = mic_effective_rate(ctx);
     body[n++] = (unsigned char)eff;
     body[n++] = (unsigned char)(eff >> 8);
+    /* Diagnostics extension. */
+    body[n++] = (unsigned char)ctx->mic_tap_calls;
+    body[n++] = (unsigned char)(ctx->mic_tap_calls >> 8);
+    body[n++] = (unsigned char)(ctx->mic_tap_calls >> 16);
+    body[n++] = (unsigned char)(ctx->mic_tap_calls >> 24);
+    body[n++] = (unsigned char)ctx->mic_tap_last_bytes;
+    body[n++] = (unsigned char)(ctx->mic_tap_last_bytes >> 8);
+    body[n++] = ctx->mic_tap_last_slot;
+    body[n++] = (unsigned char)ctx->mic_skip_idle;
+    body[n++] = (unsigned char)(ctx->mic_skip_idle >> 8);
+    body[n++] = (unsigned char)ctx->mic_skip_lease;
+    body[n++] = (unsigned char)(ctx->mic_skip_lease >> 8);
+    body[n++] = (unsigned char)ctx->mic_skip_alloc;
+    body[n++] = (unsigned char)(ctx->mic_skip_alloc >> 8);
+    body[n++] = (unsigned char)ctx->mic_reg_ret;
+    body[n++] = (unsigned char)ctx->mic_unreg_ret;
+    body[n++] = (unsigned char)ctx->mic_notify_ret;
+    body[n++] = mic_slot_table_state();
+    uint32_t lease_s = mic_lease_remaining_s(ctx);
+    body[n++] = (unsigned char)lease_s;
+    body[n++] = (unsigned char)(lease_s >> 8);
     return n;
 }
 
@@ -435,14 +535,73 @@ static unsigned mic_status_body(customCfwContext *ctx, unsigned char *body) {
  * fit in the settings response buffer. */
 unsigned mic_append_status(unsigned char *buf, unsigned len, unsigned capacity) {
     customCfwContext *ctx = peekCustomCfwContext();
-    unsigned char body[24];
+    unsigned char body[MIC_STATUS_BYTES];
     unsigned n;
     if (ctx) {
         n = mic_status_body(ctx, body);
     } else {
         n = 0;
         body[n++] = 'M'; body[n++] = 'C'; body[n++] = (unsigned char)MIC_PROTO_VERSION;
-        while (n < 21u) body[n++] = 0;
+        while (n < MIC_STATUS_BASE_BYTES) body[n++] = 0;
     }
     return pb_append_bytes_field(buf, len, capacity, 104u, body, n);
+}
+
+/* Debug overlay line (debug.c): this temple's mic session state and tap
+ * counters, so each lens shows its own even though only one temple can send
+ * status to the phone. Example:
+ *   mic R arm pdm reg 0 tbl -T lease 87s tap 120 3200B@1 skip 0/0/0 fr 120 ntf 0 unreg - */
+/* Out-of-line wrappers: the string helpers inline at every call site, which
+ * made the ~25-call overlay formatter below over 13 KB. */
+static __attribute__((noinline)) void mic_cat(char *out, const char *text, uint32_t maxlen) {
+    strlcat(out, text, maxlen);
+}
+
+static __attribute__((noinline)) void mic_dec(char *out, uint32_t value, uint32_t maxlen) {
+    u_to_dec(out, value, maxlen);
+}
+
+static __attribute__((noinline)) void mic_append_signed(char *out, int value, uint32_t maxlen) {
+    if (value == MIC_RET_NONE) { mic_cat(out, "-", maxlen); return; }
+    if (value < 0) { mic_cat(out, "-", maxlen); value = -value; }
+    mic_dec(out, (uint32_t)value, maxlen);
+}
+
+/* Noinline: debug.c's overlay is inlined into display_copy_hook, and inlining
+ * this formatter there roughly doubled that function's size. */
+static __attribute__((noinline)) void mic_append_overlay(char *line, uint32_t maxlen) {
+    customCfwContext *ctx = peekCustomCfwContext();
+    uint32_t side = FW_MIC_SIDE();
+    mic_cat(line, side == 1u ? "mic R " : side == 2u ? "mic L " : "mic ? ", maxlen);
+    if (!ctx) { mic_cat(line, "no ctx", maxlen); return; }
+    mic_cat(line, ctx->mic_hw_armed ? "arm " : ctx->mic_active ? "cfg " : "off ", maxlen);
+    mic_cat(line, ctx->mic_source == MIC_SRC_PDM ? "pdm" : "codec", maxlen);
+    mic_cat(line, " reg ", maxlen);
+    mic_append_signed(line, ctx->mic_reg_ret, maxlen);
+    mic_cat(line, " tbl ", maxlen);
+    uint8_t table = mic_slot_table_state();
+    for (uint32_t slot = 0; slot < 2u; slot++) {
+        uint8_t value = (uint8_t)((table >> (slot * 2u)) & 3u);
+        mic_cat(line, value == 2u ? "T" : value == 1u ? "S" : "-", maxlen);
+    }
+    mic_cat(line, " lease ", maxlen);
+    mic_dec(line, mic_lease_remaining_s(ctx), maxlen);
+    mic_cat(line, "s tap ", maxlen);
+    mic_dec(line, ctx->mic_tap_calls, maxlen);
+    mic_cat(line, " ", maxlen);
+    mic_dec(line, ctx->mic_tap_last_bytes, maxlen);
+    mic_cat(line, "B@", maxlen);
+    mic_dec(line, ctx->mic_tap_last_slot, maxlen);
+    mic_cat(line, " skip ", maxlen);
+    mic_dec(line, ctx->mic_skip_idle, maxlen);
+    mic_cat(line, "/", maxlen);
+    mic_dec(line, ctx->mic_skip_lease, maxlen);
+    mic_cat(line, "/", maxlen);
+    mic_dec(line, ctx->mic_skip_alloc, maxlen);
+    mic_cat(line, " fr ", maxlen);
+    mic_dec(line, ctx->mic_frames, maxlen);
+    mic_cat(line, " ntf ", maxlen);
+    mic_append_signed(line, ctx->mic_notify_ret, maxlen);
+    mic_cat(line, " unreg ", maxlen);
+    mic_append_signed(line, ctx->mic_unreg_ret, maxlen);
 }

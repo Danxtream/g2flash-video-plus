@@ -5,12 +5,12 @@
     (((uintptr_t)(ctx) & 3) == 0 && (uintptr_t)(ctx) - 0x20000000u < 0x00800000u)
 #endif
 
-/* Return the singleton only if it already exists and passes the slot/magic checks.
+/* Return the singleton only if it already exists and passes the slot/magic/size checks.
  * Ordinary stock refreshes pass through display_copy_hook, so that hook must never
  * allocate CFW state. */
 static customCfwContext *peekCustomCfwContext(void) {
     customCfwContext *ctx = __atomic_load_n((customCfwContext **)CFW_CTX_SLOT, __ATOMIC_ACQUIRE);
-    if (CFW_CONTEXT_POINTER_VALID(ctx) && ctx->magic == CFW_CTX_MAGIC)
+    if (CFW_CONTEXT_POINTER_VALID(ctx) && CFW_CTX_IS_VALID(ctx))
         return ctx;
     return 0;
 }
@@ -33,7 +33,9 @@ static customCfwContext *getCustomCfwContext(void) {
         if (!ctx) return 0;
         bzero((uint8_t *)ctx, sizeof(customCfwContext));
         ctx->magic = CFW_CTX_MAGIC;
+        ctx->ctx_size = (uint32_t)sizeof(customCfwContext);
         ctx->diag_hide = 1; /* Overlay off until mode 7/subcommand 2. */
+        ctx->mic_reg_ret = ctx->mic_unreg_ret = ctx->mic_notify_ret = 127; /* MIC_RET_NONE: not called yet */
         for (uint32_t i = 0; i < CFW_FID_RING; i++) ctx->recent_fids[i] = 0xffff; /* Sentinel. */
         if (__atomic_compare_exchange_n((customCfwContext **)CFW_CTX_SLOT, &expected,
                                          ctx, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED))

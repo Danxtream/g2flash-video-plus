@@ -106,7 +106,7 @@ static customCfwContext *faceclaw_context_if_valid(void) {
     customCfwContext *ctx = *(customCfwContext **)CFW_CTX_SLOT;
     if (((uintptr_t)ctx & 3u) != 0 ||
         (uintptr_t)ctx - 0x20000000u >= 0x00800000u) return 0;
-    return ctx->magic == CFW_CTX_MAGIC ? ctx : 0;
+    return CFW_CTX_IS_VALID(ctx) ? ctx : 0;
 }
 
 /* Signed subtraction makes the comparison safe across the 32-bit millisecond

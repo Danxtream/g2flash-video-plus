@@ -9,9 +9,9 @@ static int image_worker(const uint8_t *src, uint32_t srclen, uint8_t origin);
 
 /* The stream parser owns data until this synchronous handler returns. */
 int cfw_message_received(const uint8_t *data, uint16_t size, uint16_t checksum, uint8_t origin) {
+    (void)checksum;
     customCfwContext *ctx = getCustomCfwContext();
     if (!ctx) return -1;
-    ctx->message_probe.snapshot = (uint32_t)size | ((uint32_t)checksum << 16);
     return image_worker(data, size, origin);
 }
 

@@ -101,7 +101,8 @@
       "0x005aefe3": 1,
       "0x005af049": 1,
       "0x005af09f": 1,
-      "0x005b1581": 1
+      "0x005b1581": 1,
+      "0x20076d4c": 1
     },
     "panel.c": {
       "0x00442b2b": 1,
@@ -3537,6 +3538,19 @@
         }
       ],
       "stock_guard_size": 4
+    },
+    {
+      "old": null,
+      "new": "0x20076d4c",
+      "method": "donor-disassembly: mic PCM slot table",
+      "uses": [
+        {
+          "file": "mic_control.c",
+          "address": "0x20076d4c",
+          "count": 1
+        }
+      ],
+      "evidence": "SVC_PcmAppRegister 0x599500, SVC_PcmAppUnregister 0x599658 and SVC_PcmAppProcessData 0x599780 all index 12-byte {owner, slot, callback} entries from the pool literal at 0x599d78; read-only diagnostic use"
     }
   ],
   "guards": [
@@ -4109,6 +4123,11 @@
       "address": "0x0047a88e",
       "bytes": "0dd1002001900020009001aa69460a98f5f7dffd009a01990a9869f077fa",
       "label": "brightness: display event 4 conversion/provider calling convention"
+    },
+    {
+      "address": "0x00599d78",
+      "bytes": "4c6d0720",
+      "label": "Mic diagnostics: PCM app table literal = 20076d4c"
     }
   ],
   "patch_sites": [

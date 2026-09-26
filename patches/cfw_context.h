@@ -20,15 +20,12 @@ typedef struct {
     uint8_t accuracy, anomalies, source, flags;
 } cfw_compass_sample;
 
-/* One aligned word publishes a consistent size/CRC pair across the BLE and
- * display tasks. The firmware target is little-endian. */
-typedef union {
-    struct { uint16_t size, checksum; } fields;
-    uint32_t snapshot;
-} cfw_message_probe;
-
 typedef struct {
     uint32_t magic;      /* CFW_CTX_MAGIC when valid */
+    /* sizeof(customCfwContext) of the build that created this context. The context
+     * outlives warm resets and reflashes, so a build with a different layout must
+     * recreate it rather than read a stale one through the new struct. */
+    uint32_t ctx_size;
     /* --- diagnostics, overlaid as a text line (verify the fix; should stay clear). Mode
      * 7 clears the flags / toggles the overlay visibility (diag_hide). --- */
     uint16_t last_fid;   /* last frame id seen (mode-3 messages) */
@@ -96,7 +93,18 @@ typedef struct {
     uint32_t mic_frames;                    /* stream frames emitted since session start */
     uint32_t mic_lease_deadline;            /* FW_MS_TICK streaming-lease deadline; 0 = none */
     uint32_t mic_watchdog_timer;            /* one-shot osTimer tearing down a lapsed session */
-    uint8_t  mic_notify_buf[32];            /* stable storage for the field-104 sid-0x09 notify */
+    uint8_t  mic_notify_buf[48];            /* stable storage for the field-104 sid-0x09 notify */
+    /* Mic tap diagnostics (debug overlay line 2 and the field-104 status
+     * extension). Counters reset on each CONFIGURE. */
+    uint32_t mic_tap_calls;                 /* mic_pcm_tap entries with a valid context */
+    uint16_t mic_tap_last_bytes;            /* buffer size of the most recent tap call */
+    uint8_t  mic_tap_last_slot;             /* slot argument of the most recent tap call */
+    int8_t   mic_reg_ret;                   /* last SVC_PcmAppRegister result */
+    int8_t   mic_unreg_ret;                 /* last SVC_PcmAppUnregister result (MIC_RET_NONE = never) */
+    int8_t   mic_notify_ret;                /* last streaming-notify result (MIC_RET_NONE = never) */
+    uint16_t mic_skip_idle;                 /* tap calls dropped: session inactive/unarmed or empty buffer */
+    uint16_t mic_skip_lease;                /* tap calls dropped: streaming lease lapsed */
+    uint16_t mic_skip_alloc;                /* tap calls dropped: frame buffer allocation failed */
     /* --- Ambient light sensor (mode 16, als_sensor.c). Passive mode redirects
      * the sensor-hub's ALS timer message to als_hub_handler through the RAM
      * dispatch table and polls the OPT3001 itself, so the stock adjuster never
@@ -117,7 +125,6 @@ typedef struct {
      * field-102 notify of its own, since wake_notify_buf may still be queued
      * for a deferred double-tap wake when a tap or release follows it. */
     uint8_t  gesture_notify_buf[16];
-    volatile cfw_message_probe message_probe; /* latest valid SID-f0 payload */
     uint32_t image_mutex; /* serializes commands from BLE and bridge */
     uint8_t *composition_buffer; /* owned 640x480 packed 4bpp; released by mode 11 */
     cfw_message_stream message_streams[2]; /* index = BLE ingress lens bit - 1 */
@@ -147,8 +154,11 @@ typedef struct {
 #define CFW_ALLOC_DIAG_MAGIC 0xA110CA7EU
 
 // Marker used to validate that the CFW context pointer hasn't been clobbered.
-// Does not need updating.
+// Layout changes are caught by ctx_size, so this only needs bumping for a layout
+// change that leaves sizeof(customCfwContext) unchanged.
 #define CFW_CTX_MAGIC 0xC0FFEE6CU
+#define CFW_CTX_IS_VALID(ctx) \
+    ((ctx)->magic == CFW_CTX_MAGIC && (ctx)->ctx_size == (uint32_t)sizeof(customCfwContext))
 
 #define FW_MS_TICK  (*(volatile uint32_t *)0x20077e4cU)  /* firmware 1 ms OS tick (SysTick chain) */
 

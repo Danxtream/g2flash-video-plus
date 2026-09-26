@@ -135,7 +135,7 @@ static void append_heap_kib(char *out, cfw_heap_stats stats, uint32_t maxlen) {
 /* Terminus 6x12 diagnostic overlay at the top-left of the packed framebuffer.
  * First line: sticky REORDER/SKIP/DUP/ALLOC flags and previous worker/present
  * durations and rolling last-ten timer-paint average (t10), in microseconds.
- * Second: last received message size and CRC.
+ * Second: microphone session state and tap counters (mic_append_overlay).
  * Third: total free / maximum malloc request for each heap, in whole KiB.
  * Heap snapshots are approximate; failed validation displays ?/?. Suppressed
  * when diag_hide is set (mode 7). */
@@ -169,19 +169,8 @@ static void cfw_draw_flags(uint8_t *disp, uint32_t w, uint32_t h) {
 
     draw_string(disp, w, h, IMAGE_X + 2, IMAGE_Y + 2, line, 15, 0);
 
-    /* The BLE task publishes both fields with one aligned 32-bit store. Keep
-     * the probe on its own line so sticky flags cannot truncate it. */
-    uint32_t probe = ctx->message_probe.snapshot;
-    strlcpy(line, "rx ", sizeof(line));
-    u_to_dec(line, probe & 0xffffu, sizeof(line));
-    strlcat(line, " crc ", sizeof(line));
-    char hex[5];
-    for (unsigned i = 0; i < 4; ++i) {
-        unsigned digit = (probe >> (28 - 4 * i)) & 15u;
-        hex[i] = (char)(digit < 10 ? '0' + digit : 'A' + digit - 10);
-    }
-    hex[4] = 0;
-    strlcat(line, hex, sizeof(line));
+    line[0] = 0;
+    mic_append_overlay(line, sizeof(line));
     draw_string(disp, w, h, IMAGE_X + 2, IMAGE_Y + 14, line, 15, 0);
 
     cfw_heap_stats heap_13 = heap_object_stats(0x20000358u, 0x2013519cu, 0x000cd000u);
