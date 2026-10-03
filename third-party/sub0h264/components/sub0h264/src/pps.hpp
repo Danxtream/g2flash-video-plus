@@ -17,7 +17,12 @@
 namespace sub0h264 {
 
 /** Maximum supported PPS count (spec allows 0-255). */
-inline constexpr uint32_t cMaxPpsCount = 256U;
+#ifndef SUB0H264_MAX_PPS_COUNT
+#define SUB0H264_MAX_PPS_COUNT 256U
+#endif
+inline constexpr uint32_t cMaxPpsCount = SUB0H264_MAX_PPS_COUNT;
+static_assert(cMaxPpsCount > 0U && cMaxPpsCount <= 256U,
+              "SUB0H264_MAX_PPS_COUNT must be in the range 1..256");
 
 /** Parsed Picture Parameter Set. */
 struct Pps

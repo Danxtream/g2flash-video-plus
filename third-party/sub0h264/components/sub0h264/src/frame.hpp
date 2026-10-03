@@ -8,6 +8,7 @@
 #ifndef CROG_SUB0H264_FRAME_HPP
 #define CROG_SUB0H264_FRAME_HPP
 
+#include "allocation_preflight.hpp"
 #include "sps.hpp"
 
 #include <cstdint>
@@ -43,6 +44,18 @@ public:
 
         uint32_t ySize  = static_cast<uint32_t>(yStride_) * height_;
         uint32_t uvSize = static_cast<uint32_t>(uvStride_) * (height_ / 2U);
+
+        const AllocationRequest requests[] = {
+            { AllocationTag::FrameY, ySize },
+            { AllocationTag::FrameU, uvSize },
+            { AllocationTag::FrameV, uvSize },
+        };
+        allocationFailure_ = {};
+        if (!allocationPreflight(requests, 3U, &allocationFailure_))
+        {
+            width_ = height_ = yStride_ = uvStride_ = 0U;
+            return false;
+        }
 
         yPlane_.resize(ySize, 0U);
         uPlane_.resize(uvSize, 0U);
@@ -116,8 +129,10 @@ public:
     uint8_t* vData() noexcept { return vPlane_.data(); }
 
     bool isAllocated() const noexcept { return !yPlane_.empty(); }
+    AllocationFailure allocationFailure() const noexcept { return allocationFailure_; }
 
 private:
+    AllocationFailure allocationFailure_{};
     uint16_t width_ = 0U;
     uint16_t height_ = 0U;
     uint16_t yStride_ = 0U;
