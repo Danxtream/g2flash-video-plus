@@ -26,6 +26,7 @@ set(SUB0H264_TEST_SOURCES
     test_cavlc.cpp
     test_cavlc_levels.cpp
     test_iframe.cpp
+    test_dpb.cpp
     test_pframe.cpp
     test_deblock.cpp
     test_cabac.cpp

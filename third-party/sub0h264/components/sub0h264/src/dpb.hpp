@@ -72,16 +72,16 @@ public:
         // Need at least 2 entries: one for current decode target + one reference.
         // With numRefFrames=0, the stream still needs a reference for P-frames.
         // §A.3.1: maxDpbFrames = Max(1, max_num_ref_frames).
+        // Keep the SPS-sized metadata table, but allocate each large I420
+        // frame only when that slot is first selected as a decode target.
+        // Embedded decoders commonly receive SPS values that advertise more
+        // references than a short stream actually uses; eager allocation here
+        // needlessly consumed (and could exhaust) the firmware heap.
+        entries_.clear();
         entries_.resize(entryCount);
-        for (auto& e : entries_)
-        {
-            e = DpbEntry{};
-            if (!e.frame.allocate(width, height))
-            {
-                allocationFailure_ = e.frame.allocationFailure();
-                return false;
-            }
-        }
+        currentEntry_ = nullptr;
+        refListL0Built_ = false;
+        refListL0_.clear();
         return true;
     }
 
@@ -101,9 +101,7 @@ public:
         {
             if (!e.occupied)
             {
-                e.occupied = true;
-                currentEntry_ = &e;
-                return &e.frame;
+                return selectDecodeTarget(e);
             }
         }
 
@@ -114,8 +112,7 @@ public:
         {
             if (e.occupied && !e.isReference)
             {
-                currentEntry_ = &e;
-                return &e.frame;
+                return selectDecodeTarget(e);
             }
         }
 
@@ -132,15 +129,17 @@ public:
 
         if (oldest)
         {
+            Frame* frame = selectDecodeTarget(*oldest);
+            if (!frame)
+                return nullptr;
             oldest->isReference = false;
-            oldest->occupied = true;
-            currentEntry_ = oldest;
-            return &oldest->frame;
+            return frame;
         }
 
         // Last resort: use first entry
-        currentEntry_ = &entries_[0];
-        return &entries_[0].frame;
+        if (entries_.empty())
+            return nullptr;
+        return selectDecodeTarget(entries_[0]);
     }
 
     /** Mark the current frame as a short-term reference. */
@@ -587,7 +586,44 @@ public:
         return static_cast<uint32_t>(entries_.size());
     }
 
+    /** @return Number of DPB slots whose I420 storage has been allocated. */
+    uint32_t allocatedFrameCount() const noexcept
+    {
+        uint32_t count = 0U;
+        for (const auto& e : entries_)
+            if (e.frame.isAllocated())
+                ++count;
+        return count;
+    }
+
+    /** @return Bytes occupied by allocated I420 frame planes. */
+    uint32_t allocatedFrameBytes() const noexcept
+    {
+        const uint32_t pixels =
+            static_cast<uint32_t>(width_) * static_cast<uint32_t>(height_);
+        const uint32_t bytesPerFrame = pixels + (pixels / 2U);
+        return allocatedFrameCount() * bytesPerFrame;
+    }
+
 private:
+    Frame* selectDecodeTarget(DpbEntry& entry) noexcept
+    {
+        if (!entry.frame.isAllocated() ||
+            entry.frame.width() != width_ ||
+            entry.frame.height() != height_)
+        {
+            if (!entry.frame.allocate(width_, height_))
+            {
+                allocationFailure_ = entry.frame.allocationFailure();
+                return nullptr;
+            }
+        }
+
+        entry.occupied = true;
+        currentEntry_ = &entry;
+        return &entry.frame;
+    }
+
     std::vector<DpbEntry> entries_;
     DpbEntry* currentEntry_ = nullptr;
     uint16_t width_ = 0U;

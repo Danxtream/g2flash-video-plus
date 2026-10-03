@@ -158,6 +158,10 @@ public:
     /** @return Number of frames decoded so far. */
     uint32_t frameCount() const noexcept { return frameCount_; }
 
+    /** DPB memory diagnostics for constrained integrations. */
+    uint32_t dpbFrameCapacity() const noexcept { return dpb_.frameCapacity(); }
+    uint32_t dpbAllocatedFrameCount() const noexcept { return dpb_.allocatedFrameCount(); }
+    uint32_t dpbAllocatedFrameBytes() const noexcept { return dpb_.allocatedFrameBytes(); }
     uint32_t allocationFailedTag() const noexcept
     {
         return static_cast<uint32_t>(allocationFailure_.tag);
@@ -618,19 +622,32 @@ private:
             dpbInitialized_ = true;
         }
 
-        // Get a frame buffer from the DPB to decode into
+        // IDR resets all previous DPB state before selecting the decode target.
+        if (isIdr)
+        {
+            dpb_.flush();
+            prevRefFrameNum_ = sh.frameNum_; // §8.2.5.2: reset at IDR
+        }
+
+        // Get exactly one frame buffer for this picture.
         Frame* decodeTarget = dpb_.getDecodeTarget();
         if (!decodeTarget)
+        {
+            allocationFailure_ = dpb_.allocationFailure();
             return DecodeStatus::Error;
+        }
 
         //TODO: We should reason about the best way to manage the active frame buffer for decoding. Currently we call dpb_.getDecodeTarget() to get a frame to decode into, and we also have a separate currentFrame_ that we use for backwards compatibility. We need to ensure that we are correctly managing the lifecycle of these frames, especially when it comes to reference counting and ensuring that we don't overwrite frames that are still needed as references. We might want to consider having a clear ownership model where the DPB manages all frame buffers and we only have pointers or references to those frames in the decoder, rather than having a separate currentFrame_ that is allocated independently. This would help avoid confusion and potential bugs related to frame management.
-        // Also keep a reference in currentFrame_ for backwards compatibility
+        // Also keep a reference in currentFrame_ for backwards compatibility.
+        // Memory-constrained integrations can rely exclusively on the DPB frame.
+#ifndef SUB0H264_DISABLE_LEGACY_CURRENT_FRAME
         if (!currentFrame_.isAllocated() ||
             currentFrame_.width() != sps->width() ||
             currentFrame_.height() != sps->height())
         {
             currentFrame_.allocate(sps->width(), sps->height());
         }
+#endif
 
         // Reserve every context-array growth as one batch before std::vector
         // mutates decoder state. Embedded integrations can reject the batch
@@ -685,15 +702,6 @@ private:
         mbTransform8x8_.resize(totalMbs, 0U);
         mbMotion_.resize(totalMbs * 16U); // 16 MVs per MB (per-4x4-block)
         mbIntra4x4Modes_.resize(totalMbs * 16U, 2U); // Default DC(2)
-
-        // Clear context for new frame
-        if (isIdr)
-        {
-            dpb_.flush();
-            prevRefFrameNum_ = sh.frameNum_; // §8.2.5.2: reset at IDR
-            // Re-get decode target after flush
-            decodeTarget = dpb_.getDecodeTarget();
-        }
 
         // TODO; We should reason over if these all need to be zeroed - document if they do or don't etc.
         //TODO: We should consider using a more efficient way to clear these large context arrays, such as std::fill or memset, instead of a loop. For example, we could use std::fill(nnzLuma_.begin(), nnzLuma_.end(), 0U) to set all values to zero in one call, which is likely optimized and more efficient than a manual loop. This would also improve readability by clearly indicating that we are initializing the entire array to zero.
