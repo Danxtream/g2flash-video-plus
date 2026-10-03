@@ -10,3 +10,8 @@ __pycache__/
 # Build intermediates (build.py writes .o / .text.bin here).
 /obj/
 *.o
+
+# Sub0h264 test clips (71 MB, stored with Git LFS upstream) are not committed.
+# Fetch tests/fixtures from https://github.com/CraigHutchinson/Sub0h264 at the
+# commit named in the vendoring commit message.
+/third-party/sub0h264/tests/fixtures/
