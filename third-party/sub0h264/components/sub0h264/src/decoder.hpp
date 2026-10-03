@@ -157,6 +157,11 @@ public:
 
     /** @return Number of frames decoded so far. */
     uint32_t frameCount() const noexcept { return frameCount_; }
+    // TEMP H.264 firmware diagnostic.
+    uint32_t diagStage() const noexcept { return diagStage_; }
+    uint32_t diagMbEntered() const noexcept { return diagMbEntered_; }
+    uint32_t diagMbCompleted() const noexcept { return diagMbCompleted_; }
+    uint32_t diagBitOffset() const noexcept { return diagBitOffset_; }
 
     /** DPB memory diagnostics for constrained integrations. */
     uint32_t dpbFrameCapacity() const noexcept { return dpb_.frameCapacity(); }
@@ -203,6 +208,11 @@ private:
     bool dpbInitialized_ = false;
     AllocationFailure allocationFailure_{};
 
+    // TEMP H.264 firmware diagnostic.
+    volatile uint32_t diagStage_ = 0U;
+    volatile uint32_t diagMbEntered_ = UINT32_MAX;
+    volatile uint32_t diagMbCompleted_ = UINT32_MAX;
+    volatile uint32_t diagBitOffset_ = 0U;
     // Per-frame MB context: non-zero coefficient counts for CAVLC context
     std::vector<uint8_t> nnzLuma_;    // [mbIdx * 16 + blkIdx]
     std::vector<uint8_t> nnzCb_;      // [mbIdx * 4 + blkIdx]
@@ -581,6 +591,10 @@ private:
     DecodeStatus decodeSlice(BitReader& br, const NalUnit& nal) noexcept
     {
         allocationFailure_ = {};
+        diagStage_ = 1U;
+        diagMbEntered_ = UINT32_MAX;
+        diagMbCompleted_ = UINT32_MAX;
+        diagBitOffset_ = 0U;
 
         bool isIdr = (nal.type == NalType::SliceIdr);
 
@@ -605,6 +619,9 @@ private:
         SliceHeader sh;
         if (parseSliceHeader(br, *sps, *pps, isIdr, nal.refIdc, sh) != Result::Ok)
             return DecodeStatus::Error;
+
+        diagStage_ = 2U;
+        diagBitOffset_ = static_cast<uint32_t>(br.bitOffset());
 
         // Initialize DPB and allocate context on first SPS use
         widthInMbs_ = sps->widthInMbs_;
@@ -817,8 +834,18 @@ private:
                 else
                 {
                     int64_t intraT0 = profile_ ? sub0h264TimerUs() : 0;
+
+                    diagStage_ = 3U;
+                    diagMbEntered_ = mbAddr;
+                    diagBitOffset_ = static_cast<uint32_t>(br.bitOffset());
+
                     if (!decodeIntraMb(br, *sps, *pps, sh, mbQp, mbX, mbY))
                         break;
+
+                    diagMbCompleted_ = mbAddr;
+                    diagBitOffset_ = static_cast<uint32_t>(br.bitOffset());
+                    diagStage_ = 4U;
+
                     if (profile_) profile_->intraPredUs += sub0h264TimerUs() - intraT0;
                 }
                 // Trace per-MB bit offset for alignment debugging (type 201)
@@ -1020,7 +1047,8 @@ private:
                 "B-slices (§7.3.4), SI-slices, SP-slices are not supported.");
             return DecodeStatus::Error;
         }
-
+        diagStage_ = 5U;
+        diagBitOffset_ = static_cast<uint32_t>(br.bitOffset());
 
         // Deblocking filter pass (entire frame, after all MBs decoded)
         // Per-MB QP is used; boundary edges use (qpP + qpQ + 1) >> 1 per §8.7.2.2.
@@ -1090,6 +1118,8 @@ private:
         if (profile_) profile_->overheadUs += sub0h264TimerUs() - syncT0;
 
         //TODO: We should reason about when frames are marked as reference and when they are output. Currently we mark as reference here after decoding, but before output. This means that the current frame is available as a reference for the next frame before it is output. This is necessary for correct reference management, but we should consider if there are any implications for output latency or memory management, especially if we want to support low-latency streaming or real-time applications.
+        diagStage_ = 6U;
+
         // Mark as reference for future P-frames — §8.2.5
         if (nal.refIdc != 0U)
         {
@@ -1106,9 +1136,9 @@ private:
                                sh.decRefPicMarking_.mmcoCommands_);
             }
         }
-
         ++frameCount_;
         if (profile_) ++profile_->frameCount;
+        diagStage_ = 7U;
         return DecodeStatus::FrameDecoded;
     }
 
