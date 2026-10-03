@@ -16,7 +16,12 @@
 namespace sub0h264 {
 
 /** Maximum supported SPS count (spec allows 0-31). */
-inline constexpr uint32_t cMaxSpsCount = 32U;
+#ifndef SUB0H264_MAX_SPS_COUNT
+#define SUB0H264_MAX_SPS_COUNT 32U
+#endif
+inline constexpr uint32_t cMaxSpsCount = SUB0H264_MAX_SPS_COUNT;
+static_assert(cMaxSpsCount > 0U && cMaxSpsCount <= 32U,
+              "SUB0H264_MAX_SPS_COUNT must be in the range 1..32");
 
 /** Maximum reference frames in DPB. */
 inline constexpr uint32_t cMaxRefFrames = 16U;
