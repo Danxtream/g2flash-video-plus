@@ -158,6 +158,15 @@ public:
     /** @return Number of frames decoded so far. */
     uint32_t frameCount() const noexcept { return frameCount_; }
 
+    uint32_t allocationFailedTag() const noexcept
+    {
+        return static_cast<uint32_t>(allocationFailure_.tag);
+    }
+    uint32_t allocationFailedSize() const noexcept
+    {
+        return static_cast<uint32_t>(allocationFailure_.size);
+    }
+
     /** Set trace filter for debugging. Printf requires SUB0H264_TRACE=1 build.
      *  Callback tracing is always available. */
     void setTrace(const DecodeTrace& t) noexcept { trace_ = t; }
@@ -188,6 +197,7 @@ private:
     Dpb dpb_;
     uint32_t frameCount_ = 0U;
     bool dpbInitialized_ = false;
+    AllocationFailure allocationFailure_{};
 
     // Per-frame MB context: non-zero coefficient counts for CAVLC context
     std::vector<uint8_t> nnzLuma_;    // [mbIdx * 16 + blkIdx]
@@ -566,6 +576,8 @@ private:
     /** Decode a slice (IDR or non-IDR). */
     DecodeStatus decodeSlice(BitReader& br, const NalUnit& nal) noexcept
     {
+        allocationFailure_ = {};
+
         bool isIdr = (nal.type == NalType::SliceIdr);
 
         // Peek at PPS ID to find the right parameter sets
@@ -598,7 +610,11 @@ private:
         //TODO: We should reason about the best way to manage DPB initialization and resizing. Currently we check if dpbInitialized_ is false, and if so we call dpb_.init() with the width, height, and numRefFrames from the SPS. This means that the DPB will be initialized on the first frame that uses a valid SPS. However, we should also consider what happens if we encounter a new SPS with different dimensions or reference frame requirements later in the stream. In that case, we might need to reinitialize or resize the DPB to accommodate the new parameters. We should ensure that our DPB implementation can handle such changes gracefully, either by allowing dynamic resizing or by enforcing that all frames use the same SPS parameters. Additionally, we should consider how this interacts with frame buffers that are currently in use as references in the DPB when reinitializing or resizing.
         if (!dpbInitialized_)
         {
-            dpb_.init(sps->width(), sps->height(), sps->numRefFrames_);
+            if (!dpb_.init(sps->width(), sps->height(), sps->numRefFrames_))
+            {
+                allocationFailure_ = dpb_.allocationFailure();
+                return DecodeStatus::Error;
+            }
             dpbInitialized_ = true;
         }
 
@@ -614,6 +630,48 @@ private:
             currentFrame_.height() != sps->height())
         {
             currentFrame_.allocate(sps->width(), sps->height());
+        }
+
+        // Reserve every context-array growth as one batch before std::vector
+        // mutates decoder state. Embedded integrations can reject the batch
+        // cleanly when the firmware heap cannot hold all of it concurrently.
+        AllocationRequest contextRequests[7];
+        size_t contextRequestCount = 0U;
+        const size_t lumaCount = static_cast<size_t>(totalMbs) * 16U;
+        const size_t chromaCount = static_cast<size_t>(totalMbs) * 4U;
+        const size_t motionCount = static_cast<size_t>(totalMbs) * 16U;
+
+        if (nnzLuma_.capacity() < lumaCount)
+            contextRequests[contextRequestCount++] =
+                { AllocationTag::NnzLuma, lumaCount * sizeof(uint8_t) };
+        if (nnzCb_.capacity() < chromaCount)
+            contextRequests[contextRequestCount++] =
+                { AllocationTag::NnzCb, chromaCount * sizeof(uint8_t) };
+        if (nnzCr_.capacity() < chromaCount)
+            contextRequests[contextRequestCount++] =
+                { AllocationTag::NnzCr, chromaCount * sizeof(uint8_t) };
+        if (mbQps_.capacity() < totalMbs)
+            contextRequests[contextRequestCount++] =
+                { AllocationTag::MbQps,
+                  static_cast<size_t>(totalMbs) * sizeof(int32_t) };
+        if (mbTransform8x8_.capacity() < totalMbs)
+            contextRequests[contextRequestCount++] =
+                { AllocationTag::MbTransform8x8,
+                  static_cast<size_t>(totalMbs) * sizeof(uint8_t) };
+        if (mbMotion_.capacity() < motionCount)
+            contextRequests[contextRequestCount++] =
+                { AllocationTag::MbMotion,
+                  motionCount * sizeof(MbMotionInfo) };
+        if (mbIntra4x4Modes_.capacity() < lumaCount)
+            contextRequests[contextRequestCount++] =
+                { AllocationTag::MbIntra4x4Modes,
+                  lumaCount * sizeof(uint8_t) };
+
+        if (contextRequestCount != 0U) {
+            allocationFailure_ = {};
+            if (!allocationPreflight(
+                    contextRequests, contextRequestCount, &allocationFailure_))
+                return DecodeStatus::Error;
         }
 
         // Resize context arrays
@@ -692,7 +750,10 @@ private:
             ++cabacSliceCount_;
 
             // Initialize per-MB CABAC neighbor context
-            cabacNeighbor_.init(widthInMbs_, heightInMbs_);
+            if (!cabacNeighbor_.init(widthInMbs_, heightInMbs_)) {
+                allocationFailure_ = cabacNeighbor_.allocationFailure();
+                return DecodeStatus::Error;
+            }
 
             // Bind the syntax element parser to engine + contexts + neighbors
             cabacParser_.bind(cabacEngine_, cabacCtx_, cabacNeighbor_);

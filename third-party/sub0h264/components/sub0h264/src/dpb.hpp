@@ -20,6 +20,7 @@
 #ifndef CROG_SUB0H264_DPB_HPP
 #define CROG_SUB0H264_DPB_HPP
 
+#include "allocation_preflight.hpp"
 #include "frame.hpp"
 #include "sps.hpp"
 
@@ -51,20 +52,42 @@ class Dpb
 {
 public:
     /** Initialize DPB for given SPS parameters. */
-    void init(uint16_t width, uint16_t height, uint8_t numRefFrames) noexcept
+    bool init(uint16_t width, uint16_t height, uint8_t numRefFrames) noexcept
     {
+        const size_t entryCount = std::max(numRefFrames + 1U, 2U);
+        if (entries_.capacity() < entryCount)
+        {
+            const AllocationRequest request = {
+                AllocationTag::DpbEntries,
+                entryCount * sizeof(DpbEntry),
+            };
+            allocationFailure_ = {};
+            if (!allocationPreflight(&request, 1U, &allocationFailure_))
+                return false;
+        }
+
         width_ = width;
         height_ = height;
         maxRefFrames_ = numRefFrames;
         // Need at least 2 entries: one for current decode target + one reference.
         // With numRefFrames=0, the stream still needs a reference for P-frames.
         // §A.3.1: maxDpbFrames = Max(1, max_num_ref_frames).
-        entries_.resize(std::max(numRefFrames + 1U, 2U));
+        entries_.resize(entryCount);
         for (auto& e : entries_)
         {
             e = DpbEntry{};
-            e.frame.allocate(width, height);
+            if (!e.frame.allocate(width, height))
+            {
+                allocationFailure_ = e.frame.allocationFailure();
+                return false;
+            }
         }
+        return true;
+    }
+
+    AllocationFailure allocationFailure() const noexcept
+    {
+        return allocationFailure_;
     }
 
     /** Get a free slot for the next decoded frame.
@@ -558,12 +581,19 @@ public:
         return count;
     }
 
+    /** @return Number of frame slots allowed by the active SPS. */
+    uint32_t frameCapacity() const noexcept
+    {
+        return static_cast<uint32_t>(entries_.size());
+    }
+
 private:
     std::vector<DpbEntry> entries_;
     DpbEntry* currentEntry_ = nullptr;
     uint16_t width_ = 0U;
     uint16_t height_ = 0U;
     uint8_t maxRefFrames_ = 0U;
+    AllocationFailure allocationFailure_{};
 
     /// Cached L0 reference list — built by buildRefListL0(), used by getReference().
     mutable std::vector<const DpbEntry*> refListL0_;
