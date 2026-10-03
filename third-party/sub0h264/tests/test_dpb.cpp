@@ -14,7 +14,7 @@ TEST_CASE("DPB allocates frame storage lazily and reuses it after flush")
     CHECK(dpb.allocatedFrameCount() == 0U);
     CHECK(dpb.allocatedFrameBytes() == 0U);
 
-    Frame* first = dpb.getDecodeTarget();
+    Frame* first = dpb.getDecodeTarget(0U, 16U);
     REQUIRE(first != nullptr);
     CHECK(first->isAllocated());
     CHECK(first->width() == 128U);
@@ -24,7 +24,7 @@ TEST_CASE("DPB allocates frame storage lazily and reuses it after flush")
 
     dpb.flush();
 
-    Frame* reused = dpb.getDecodeTarget();
+    Frame* reused = dpb.getDecodeTarget(0U, 16U);
     REQUIRE(reused != nullptr);
     CHECK(reused == first);
     CHECK(dpb.allocatedFrameCount() == 1U);
@@ -36,11 +36,11 @@ TEST_CASE("DPB allocates an additional frame only for a simultaneous target")
     Dpb dpb;
     dpb.init(128U, 128U, 3U);
 
-    Frame* reference = dpb.getDecodeTarget();
+    Frame* reference = dpb.getDecodeTarget(0U, 16U);
     REQUIRE(reference != nullptr);
     dpb.markAsReference(0U);
 
-    Frame* current = dpb.getDecodeTarget();
+    Frame* current = dpb.getDecodeTarget(0U, 16U);
     REQUIRE(current != nullptr);
     CHECK(current != reference);
     CHECK(dpb.frameCapacity() == 4U);

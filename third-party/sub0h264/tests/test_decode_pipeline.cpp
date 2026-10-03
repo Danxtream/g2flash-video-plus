@@ -4,7 +4,7 @@
 
 #include <memory>
 #include <vector>
-
+#include <chrono>
 using namespace sub0h264;
 
 /** Compute a simple checksum of a frame's Y plane (sum of all bytes). */
@@ -231,4 +231,38 @@ TEST_CASE("Pipeline: baseline IDR — MB(9,0) pixel spot-checks")
     // IDR pixel-level checks are done via CRC and PSNR quality tests.
     // Verify the frame has valid content (non-zero at a known position).
     CHECK(frame->y(cMb9X + 12U, 8U) > 0U);
+}
+TEST_CASE("Pipeline: G2 320x180 700k test stream")
+{
+    auto data = getFixture("g2_10s_700k.h264");
+    REQUIRE_FALSE(data.empty());
+
+    auto decoder = std::make_unique<H264Decoder>();
+
+    const auto start = std::chrono::high_resolution_clock::now();
+
+    int32_t frames =
+        decoder->decodeStream(
+            data.data(),
+            static_cast<uint32_t>(data.size())
+        );
+
+    const auto end = std::chrono::high_resolution_clock::now();
+
+    const double elapsedMs =
+        std::chrono::duration<double, std::milli>(end - start).count();
+
+    MESSAGE("G2 stream decoded frames=" << frames);
+    MESSAGE("Total decode time=" << elapsedMs << " ms");
+
+    if (frames > 0)
+        MESSAGE("Average decode time=" << elapsedMs / frames << " ms/frame");
+
+    CHECK(frames == 300);
+
+    const Frame* frame = decoder->currentFrame();
+    REQUIRE(frame != nullptr);
+
+    CHECK(frame->width() == 320U);
+    CHECK(frame->height() == 192U);
 }

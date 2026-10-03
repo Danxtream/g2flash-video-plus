@@ -630,7 +630,8 @@ private:
         }
 
         // Get exactly one frame buffer for this picture.
-        Frame* decodeTarget = dpb_.getDecodeTarget();
+        uint32_t maxFrameNumForDpb = 1U << sps->bitsInFrameNum_;
+        Frame* decodeTarget = dpb_.getDecodeTarget(sh.frameNum_, maxFrameNumForDpb);
         if (!decodeTarget)
         {
             allocationFailure_ = dpb_.allocationFailure();

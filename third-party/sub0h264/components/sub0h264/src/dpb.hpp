@@ -94,7 +94,7 @@ public:
      *  If DPB is full, bumps the oldest short-term reference.
      *  @return Pointer to the frame buffer to decode into.
      */
-    Frame* getDecodeTarget() noexcept
+    Frame* getDecodeTarget(uint16_t currFrameNum, uint32_t maxFrameNum) noexcept
     {
         // Find a free slot
         for (auto& e : entries_)
@@ -122,8 +122,25 @@ public:
         {
             if (e.occupied && e.isReference && !e.isLongTerm)
             {
-                if (!oldest || e.frameNum < oldest->frameNum)
+                const int32_t eWrap =
+                    (e.frameNum > currFrameNum)
+                        ? static_cast<int32_t>(e.frameNum) - static_cast<int32_t>(maxFrameNum)
+                        : static_cast<int32_t>(e.frameNum);
+
+                if (!oldest)
+                {
                     oldest = &e;
+                }
+                else
+                {
+                    const int32_t oldestWrap =
+                        (oldest->frameNum > currFrameNum)
+                            ? static_cast<int32_t>(oldest->frameNum) - static_cast<int32_t>(maxFrameNum)
+                            : static_cast<int32_t>(oldest->frameNum);
+
+                    if (eWrap < oldestWrap)
+                        oldest = &e;
+                }
             }
         }
 
@@ -305,7 +322,7 @@ public:
     /** §8.2.5.3: Sliding window decoded reference picture marking.
      *  If the number of short-term + long-term references >= maxRefFrames,
      *  evict the oldest (smallest frameNum) short-term reference. */
-    void applySlidingWindow() noexcept
+    void applySlidingWindow(uint16_t currFrameNum, uint32_t maxFrameNum) noexcept
     {
         uint32_t numRefs = 0U;
         for (const auto& e : entries_)
@@ -319,8 +336,25 @@ public:
             {
                 if (e.occupied && e.isReference && !e.isLongTerm)
                 {
-                    if (!oldest || e.frameNum < oldest->frameNum)
+                    const int32_t eWrap =
+                        (e.frameNum > currFrameNum)
+                            ? static_cast<int32_t>(e.frameNum) - static_cast<int32_t>(maxFrameNum)
+                            : static_cast<int32_t>(e.frameNum);
+
+                    if (!oldest)
+                    {
                         oldest = &e;
+                    }
+                    else
+                    {
+                        const int32_t oldestWrap =
+                            (oldest->frameNum > currFrameNum)
+                                ? static_cast<int32_t>(oldest->frameNum) - static_cast<int32_t>(maxFrameNum)
+                                : static_cast<int32_t>(oldest->frameNum);
+
+                        if (eWrap < oldestWrap)
+                            oldest = &e;
+                    }
                 }
             }
             if (oldest)
@@ -350,7 +384,7 @@ public:
         while (fn != currFrameNum)
         {
             // §8.2.5.3: sliding window marking before adding the non-existing frame
-            applySlidingWindow();
+            applySlidingWindow(static_cast<uint16_t>(fn), maxFrameNum);
 
             // Allocate a DPB slot for the non-existing frame
             DpbEntry* slot = nullptr;
@@ -423,8 +457,10 @@ public:
 
         // Short-term: descending PicNum (=FrameNumWrap for frames)
         std::sort(shortTerm.begin(), shortTerm.end(),
-                  [](const DpbEntry* a, const DpbEntry* b) {
-                      return a->frameNum > b->frameNum;
+                  [currFrameNum, maxFrameNum](const DpbEntry* a, const DpbEntry* b) {
+                      const int32_t aWrap = (a->frameNum > currFrameNum) ? static_cast<int32_t>(a->frameNum) - static_cast<int32_t>(maxFrameNum) : static_cast<int32_t>(a->frameNum);
+                      const int32_t bWrap = (b->frameNum > currFrameNum) ? static_cast<int32_t>(b->frameNum) - static_cast<int32_t>(maxFrameNum) : static_cast<int32_t>(b->frameNum);
+                      return aWrap > bWrap;
                   });
         // Long-term: ascending LongTermPicNum
         std::sort(longTerm.begin(), longTerm.end(),
