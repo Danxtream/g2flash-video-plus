@@ -157,6 +157,24 @@ public:
 
     /** @return Number of frames decoded so far. */
     uint32_t frameCount() const noexcept { return frameCount_; }
+    // TEMP H.264 firmware diagnostic.
+    uint32_t diagStage() const noexcept { return diagStage_; }
+    uint32_t diagMbEntered() const noexcept { return diagMbEntered_; }
+    uint32_t diagMbCompleted() const noexcept { return diagMbCompleted_; }
+    uint32_t diagBitOffset() const noexcept { return diagBitOffset_; }
+
+    /** DPB memory diagnostics for constrained integrations. */
+    uint32_t dpbFrameCapacity() const noexcept { return dpb_.frameCapacity(); }
+    uint32_t dpbAllocatedFrameCount() const noexcept { return dpb_.allocatedFrameCount(); }
+    uint32_t dpbAllocatedFrameBytes() const noexcept { return dpb_.allocatedFrameBytes(); }
+    uint32_t allocationFailedTag() const noexcept
+    {
+        return static_cast<uint32_t>(allocationFailure_.tag);
+    }
+    uint32_t allocationFailedSize() const noexcept
+    {
+        return static_cast<uint32_t>(allocationFailure_.size);
+    }
 
     /** Set trace filter for debugging. Printf requires SUB0H264_TRACE=1 build.
      *  Callback tracing is always available. */
@@ -188,7 +206,13 @@ private:
     Dpb dpb_;
     uint32_t frameCount_ = 0U;
     bool dpbInitialized_ = false;
+    AllocationFailure allocationFailure_{};
 
+    // TEMP H.264 firmware diagnostic.
+    volatile uint32_t diagStage_ = 0U;
+    volatile uint32_t diagMbEntered_ = UINT32_MAX;
+    volatile uint32_t diagMbCompleted_ = UINT32_MAX;
+    volatile uint32_t diagBitOffset_ = 0U;
     // Per-frame MB context: non-zero coefficient counts for CAVLC context
     std::vector<uint8_t> nnzLuma_;    // [mbIdx * 16 + blkIdx]
     std::vector<uint8_t> nnzCb_;      // [mbIdx * 4 + blkIdx]
@@ -566,6 +590,12 @@ private:
     /** Decode a slice (IDR or non-IDR). */
     DecodeStatus decodeSlice(BitReader& br, const NalUnit& nal) noexcept
     {
+        allocationFailure_ = {};
+        diagStage_ = 1U;
+        diagMbEntered_ = UINT32_MAX;
+        diagMbCompleted_ = UINT32_MAX;
+        diagBitOffset_ = 0U;
+
         bool isIdr = (nal.type == NalType::SliceIdr);
 
         // Peek at PPS ID to find the right parameter sets
@@ -590,6 +620,9 @@ private:
         if (parseSliceHeader(br, *sps, *pps, isIdr, nal.refIdc, sh) != Result::Ok)
             return DecodeStatus::Error;
 
+        diagStage_ = 2U;
+        diagBitOffset_ = static_cast<uint32_t>(br.bitOffset());
+
         // Initialize DPB and allocate context on first SPS use
         widthInMbs_ = sps->widthInMbs_;
         heightInMbs_ = sps->heightInMbs_;
@@ -598,22 +631,82 @@ private:
         //TODO: We should reason about the best way to manage DPB initialization and resizing. Currently we check if dpbInitialized_ is false, and if so we call dpb_.init() with the width, height, and numRefFrames from the SPS. This means that the DPB will be initialized on the first frame that uses a valid SPS. However, we should also consider what happens if we encounter a new SPS with different dimensions or reference frame requirements later in the stream. In that case, we might need to reinitialize or resize the DPB to accommodate the new parameters. We should ensure that our DPB implementation can handle such changes gracefully, either by allowing dynamic resizing or by enforcing that all frames use the same SPS parameters. Additionally, we should consider how this interacts with frame buffers that are currently in use as references in the DPB when reinitializing or resizing.
         if (!dpbInitialized_)
         {
-            dpb_.init(sps->width(), sps->height(), sps->numRefFrames_);
+            if (!dpb_.init(sps->width(), sps->height(), sps->numRefFrames_))
+            {
+                allocationFailure_ = dpb_.allocationFailure();
+                return DecodeStatus::Error;
+            }
             dpbInitialized_ = true;
         }
 
-        // Get a frame buffer from the DPB to decode into
-        Frame* decodeTarget = dpb_.getDecodeTarget();
+        // IDR resets all previous DPB state before selecting the decode target.
+        if (isIdr)
+        {
+            dpb_.flush();
+            prevRefFrameNum_ = sh.frameNum_; // §8.2.5.2: reset at IDR
+        }
+
+        // Get exactly one frame buffer for this picture.
+        uint32_t maxFrameNumForDpb = 1U << sps->bitsInFrameNum_;
+        Frame* decodeTarget = dpb_.getDecodeTarget(sh.frameNum_, maxFrameNumForDpb);
         if (!decodeTarget)
+        {
+            allocationFailure_ = dpb_.allocationFailure();
             return DecodeStatus::Error;
+        }
 
         //TODO: We should reason about the best way to manage the active frame buffer for decoding. Currently we call dpb_.getDecodeTarget() to get a frame to decode into, and we also have a separate currentFrame_ that we use for backwards compatibility. We need to ensure that we are correctly managing the lifecycle of these frames, especially when it comes to reference counting and ensuring that we don't overwrite frames that are still needed as references. We might want to consider having a clear ownership model where the DPB manages all frame buffers and we only have pointers or references to those frames in the decoder, rather than having a separate currentFrame_ that is allocated independently. This would help avoid confusion and potential bugs related to frame management.
-        // Also keep a reference in currentFrame_ for backwards compatibility
+        // Also keep a reference in currentFrame_ for backwards compatibility.
+        // Memory-constrained integrations can rely exclusively on the DPB frame.
+#ifndef SUB0H264_DISABLE_LEGACY_CURRENT_FRAME
         if (!currentFrame_.isAllocated() ||
             currentFrame_.width() != sps->width() ||
             currentFrame_.height() != sps->height())
         {
             currentFrame_.allocate(sps->width(), sps->height());
+        }
+#endif
+
+        // Reserve every context-array growth as one batch before std::vector
+        // mutates decoder state. Embedded integrations can reject the batch
+        // cleanly when the firmware heap cannot hold all of it concurrently.
+        AllocationRequest contextRequests[7];
+        size_t contextRequestCount = 0U;
+        const size_t lumaCount = static_cast<size_t>(totalMbs) * 16U;
+        const size_t chromaCount = static_cast<size_t>(totalMbs) * 4U;
+        const size_t motionCount = static_cast<size_t>(totalMbs) * 16U;
+
+        if (nnzLuma_.capacity() < lumaCount)
+            contextRequests[contextRequestCount++] =
+                { AllocationTag::NnzLuma, lumaCount * sizeof(uint8_t) };
+        if (nnzCb_.capacity() < chromaCount)
+            contextRequests[contextRequestCount++] =
+                { AllocationTag::NnzCb, chromaCount * sizeof(uint8_t) };
+        if (nnzCr_.capacity() < chromaCount)
+            contextRequests[contextRequestCount++] =
+                { AllocationTag::NnzCr, chromaCount * sizeof(uint8_t) };
+        if (mbQps_.capacity() < totalMbs)
+            contextRequests[contextRequestCount++] =
+                { AllocationTag::MbQps,
+                  static_cast<size_t>(totalMbs) * sizeof(int32_t) };
+        if (mbTransform8x8_.capacity() < totalMbs)
+            contextRequests[contextRequestCount++] =
+                { AllocationTag::MbTransform8x8,
+                  static_cast<size_t>(totalMbs) * sizeof(uint8_t) };
+        if (mbMotion_.capacity() < motionCount)
+            contextRequests[contextRequestCount++] =
+                { AllocationTag::MbMotion,
+                  motionCount * sizeof(MbMotionInfo) };
+        if (mbIntra4x4Modes_.capacity() < lumaCount)
+            contextRequests[contextRequestCount++] =
+                { AllocationTag::MbIntra4x4Modes,
+                  lumaCount * sizeof(uint8_t) };
+
+        if (contextRequestCount != 0U) {
+            allocationFailure_ = {};
+            if (!allocationPreflight(
+                    contextRequests, contextRequestCount, &allocationFailure_))
+                return DecodeStatus::Error;
         }
 
         // Resize context arrays
@@ -627,15 +720,6 @@ private:
         mbTransform8x8_.resize(totalMbs, 0U);
         mbMotion_.resize(totalMbs * 16U); // 16 MVs per MB (per-4x4-block)
         mbIntra4x4Modes_.resize(totalMbs * 16U, 2U); // Default DC(2)
-
-        // Clear context for new frame
-        if (isIdr)
-        {
-            dpb_.flush();
-            prevRefFrameNum_ = sh.frameNum_; // §8.2.5.2: reset at IDR
-            // Re-get decode target after flush
-            decodeTarget = dpb_.getDecodeTarget();
-        }
 
         // TODO; We should reason over if these all need to be zeroed - document if they do or don't etc.
         //TODO: We should consider using a more efficient way to clear these large context arrays, such as std::fill or memset, instead of a loop. For example, we could use std::fill(nnzLuma_.begin(), nnzLuma_.end(), 0U) to set all values to zero in one call, which is likely optimized and more efficient than a manual loop. This would also improve readability by clearly indicating that we are initializing the entire array to zero.
@@ -692,7 +776,10 @@ private:
             ++cabacSliceCount_;
 
             // Initialize per-MB CABAC neighbor context
-            cabacNeighbor_.init(widthInMbs_, heightInMbs_);
+            if (!cabacNeighbor_.init(widthInMbs_, heightInMbs_)) {
+                allocationFailure_ = cabacNeighbor_.allocationFailure();
+                return DecodeStatus::Error;
+            }
 
             // Bind the syntax element parser to engine + contexts + neighbors
             cabacParser_.bind(cabacEngine_, cabacCtx_, cabacNeighbor_);
@@ -747,8 +834,18 @@ private:
                 else
                 {
                     int64_t intraT0 = profile_ ? sub0h264TimerUs() : 0;
+
+                    diagStage_ = 3U;
+                    diagMbEntered_ = mbAddr;
+                    diagBitOffset_ = static_cast<uint32_t>(br.bitOffset());
+
                     if (!decodeIntraMb(br, *sps, *pps, sh, mbQp, mbX, mbY))
                         break;
+
+                    diagMbCompleted_ = mbAddr;
+                    diagBitOffset_ = static_cast<uint32_t>(br.bitOffset());
+                    diagStage_ = 4U;
+
                     if (profile_) profile_->intraPredUs += sub0h264TimerUs() - intraT0;
                 }
                 // Trace per-MB bit offset for alignment debugging (type 201)
@@ -950,7 +1047,8 @@ private:
                 "B-slices (§7.3.4), SI-slices, SP-slices are not supported.");
             return DecodeStatus::Error;
         }
-
+        diagStage_ = 5U;
+        diagBitOffset_ = static_cast<uint32_t>(br.bitOffset());
 
         // Deblocking filter pass (entire frame, after all MBs decoded)
         // Per-MB QP is used; boundary edges use (qpP + qpQ + 1) >> 1 per §8.7.2.2.
@@ -1020,6 +1118,8 @@ private:
         if (profile_) profile_->overheadUs += sub0h264TimerUs() - syncT0;
 
         //TODO: We should reason about when frames are marked as reference and when they are output. Currently we mark as reference here after decoding, but before output. This means that the current frame is available as a reference for the next frame before it is output. This is necessary for correct reference management, but we should consider if there are any implications for output latency or memory management, especially if we want to support low-latency streaming or real-time applications.
+        diagStage_ = 6U;
+
         // Mark as reference for future P-frames — §8.2.5
         if (nal.refIdc != 0U)
         {
@@ -1036,9 +1136,9 @@ private:
                                sh.decRefPicMarking_.mmcoCommands_);
             }
         }
-
         ++frameCount_;
         if (profile_) ++profile_->frameCount;
+        diagStage_ = 7U;
         return DecodeStatus::FrameDecoded;
     }
 

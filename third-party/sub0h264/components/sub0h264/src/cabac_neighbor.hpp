@@ -18,6 +18,8 @@
 #ifndef CROG_SUB0H264_CABAC_NEIGHBOR_HPP
 #define CROG_SUB0H264_CABAC_NEIGHBOR_HPP
 
+#include "allocation_preflight.hpp"
+
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -86,14 +88,31 @@ public:
      *  @param widthMbs   Picture width in macroblocks
      *  @param heightMbs  Picture height in macroblocks
      */
-    void init(uint32_t widthMbs, uint32_t heightMbs) noexcept
+    bool init(uint32_t widthMbs, uint32_t heightMbs) noexcept
     {
-        widthMbs_ = widthMbs;
         uint32_t total = widthMbs * heightMbs;
+        if (mbs_.capacity() < total)
+        {
+            const AllocationRequest request = {
+                AllocationTag::CabacNeighbors,
+                static_cast<size_t>(total) * sizeof(MbCabacInfo),
+            };
+            allocationFailure_ = {};
+            if (!allocationPreflight(&request, 1U, &allocationFailure_))
+                return false;
+        }
+
+        widthMbs_ = widthMbs;
         mbs_.resize(total);
         // Reset to "unavailable" defaults — cbp=0x2F means all coded
         MbCabacInfo defaultInfo = cMbCabacUnavailable;
         std::fill(mbs_.begin(), mbs_.end(), defaultInfo);
+        return true;
+    }
+
+    AllocationFailure allocationFailure() const noexcept
+    {
+        return allocationFailure_;
     }
 
     /** @return Mutable reference to the MB info at (mbX, mbY). */
@@ -259,6 +278,7 @@ public:
     uint32_t totalMbs() const noexcept { return static_cast<uint32_t>(mbs_.size()); }
 
 private:
+    AllocationFailure allocationFailure_{};
     uint32_t widthMbs_ = 0U;
     std::vector<MbCabacInfo> mbs_;
 };

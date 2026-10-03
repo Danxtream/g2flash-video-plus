@@ -105,6 +105,13 @@ inline CoeffToken matchCoeffTokenTable(BitReader& br, uint32_t tableIdx) noexcep
         }
     }
 
+    if (bestSize == 255U)
+    {
+        // Invalid coeff_token VLC: bounded fallback.
+        br.skipBits(1U);
+        return { 0U, 0U };
+    }
+
     br.skipBits(bestSize);
     return best;
 }
@@ -148,6 +155,13 @@ inline CoeffToken decodeCoeffToken(BitReader& br, int32_t nC) noexcept
                 }
             }
         }
+        if (bestSize == 255U)
+        {
+            // Invalid chroma-DC coeff_token VLC: bounded fallback.
+            br.skipBits(1U);
+            return { 0U, 0U };
+        }
+
         br.skipBits(bestSize);
         return best;
     }
@@ -205,6 +219,10 @@ inline int32_t decodeLevel(BitReader& br, uint32_t suffixLen) noexcept
 {
     /// Count leading zeros → level_prefix — ITU-T H.264 §9.2.2.1, Table 9-6.
     /// Use CLZ on peeked bits to avoid per-bit loop.
+    // Malformed/truncated CAVLC must not underflow remaining-bit arithmetic.
+    if (br.bitOffset() >= br.totalBits())
+        return 0;
+
     uint32_t remaining = br.totalBits() - br.bitOffset();
     uint32_t peekN = (remaining < 32U) ? remaining : 32U;
     uint32_t bits = br.peekBits(peekN);
@@ -235,6 +253,10 @@ inline int32_t decodeLevel(BitReader& br, uint32_t suffixLen) noexcept
     ///   Normal:            levelSuffixSize = suffixLength
     ///   prefix==14, sL==0: levelSuffixSize = 4
     ///   prefix>=15:        levelSuffixSize = prefix - 3
+    // Reject malformed level_prefix values before 32-bit shift arithmetic.
+    if (prefix > 31U)
+        return 0;
+
     uint32_t suffixSize;
     if (prefix == 14U && suffixLen == 0U)
         suffixSize = 4U;
