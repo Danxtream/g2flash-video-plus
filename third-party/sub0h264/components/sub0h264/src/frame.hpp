@@ -34,16 +34,23 @@ class Frame
 public:
     Frame() = default;
 
-    /** Allocate frame for given dimensions. */
-    bool allocate(uint16_t width, uint16_t height) noexcept
+    /** Allocate frame planes; omit U/V storage for a luma-only decoder. */
+    bool allocate(uint16_t width, uint16_t height, bool skipChroma = false) noexcept
     {
         width_ = width;
         height_ = height;
         yStride_ = width;
-        uvStride_ = width / 2U;
+        uvStride_ = skipChroma ? 0U : width / 2U;
 
         uint32_t ySize  = static_cast<uint32_t>(yStride_) * height_;
         uint32_t uvSize = static_cast<uint32_t>(uvStride_) * (height_ / 2U);
+
+        if (skipChroma)
+        {
+            // clear() retains capacity and stale pixels when a frame is reused.
+            std::vector<uint8_t>().swap(uPlane_);
+            std::vector<uint8_t>().swap(vPlane_);
+        }
 
         const AllocationRequest requests[] = {
             { AllocationTag::FrameY, ySize },
@@ -51,15 +58,18 @@ public:
             { AllocationTag::FrameV, uvSize },
         };
         allocationFailure_ = {};
-        if (!allocationPreflight(requests, 3U, &allocationFailure_))
+        if (!allocationPreflight(requests, skipChroma ? 1U : 3U, &allocationFailure_))
         {
             width_ = height_ = yStride_ = uvStride_ = 0U;
             return false;
         }
 
         yPlane_.resize(ySize, 0U);
-        uPlane_.resize(uvSize, 0U);
-        vPlane_.resize(uvSize, 0U);
+        if (!skipChroma)
+        {
+            uPlane_.resize(uvSize, 0U);
+            vPlane_.resize(uvSize, 0U);
+        }
         return true;
     }
 
@@ -120,13 +130,22 @@ public:
     uint16_t yStride() const noexcept { return yStride_; }
     uint16_t uvStride() const noexcept { return uvStride_; }
 
+    /** @return Whether chroma sample/row/MB access is valid. */
+    bool hasChroma() const noexcept { return !uPlane_.empty(); }
+
+    /** @return Bytes held by frame plane allocations, excluding metadata. */
+    uint32_t allocatedBytes() const noexcept
+    {
+        return static_cast<uint32_t>(yPlane_.capacity() + uPlane_.capacity() + vPlane_.capacity());
+    }
+
     const uint8_t* yData() const noexcept { return yPlane_.data(); }
-    const uint8_t* uData() const noexcept { return uPlane_.data(); }
-    const uint8_t* vData() const noexcept { return vPlane_.data(); }
+    const uint8_t* uData() const noexcept { return uPlane_.empty() ? nullptr : uPlane_.data(); }
+    const uint8_t* vData() const noexcept { return vPlane_.empty() ? nullptr : vPlane_.data(); }
 
     uint8_t* yData() noexcept { return yPlane_.data(); }
-    uint8_t* uData() noexcept { return uPlane_.data(); }
-    uint8_t* vData() noexcept { return vPlane_.data(); }
+    uint8_t* uData() noexcept { return uPlane_.empty() ? nullptr : uPlane_.data(); }
+    uint8_t* vData() noexcept { return vPlane_.empty() ? nullptr : vPlane_.data(); }
 
     bool isAllocated() const noexcept { return !yPlane_.empty(); }
     AllocationFailure allocationFailure() const noexcept { return allocationFailure_; }
