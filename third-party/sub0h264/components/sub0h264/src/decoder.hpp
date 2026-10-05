@@ -78,7 +78,18 @@ enum class DecodeStatus : int32_t
 class H264Decoder
 {
 public:
+    struct Settings
+    {
+        bool skipChroma = false; ///< Parse chroma syntax without rebuilding/storing U/V.
+    };
+
     H264Decoder() = default;
+
+    /** Choose reconstruction before feeding any NAL; create a new decoder to change it. */
+    explicit H264Decoder(Settings settings) noexcept : skipChroma_(settings.skipChroma) {}
+
+    /** @return Whether chroma reconstruction and frame storage are disabled. */
+    bool skipChroma() const noexcept { return skipChroma_; }
 
     /** Feed a complete Annex-B byte stream and decode all frames.
      *
@@ -198,6 +209,7 @@ public:
     }
 
 private:
+    bool skipChroma_ = false;
     DecodeTrace trace_;
     SectionProfile* profile_ = nullptr;
     ParamSets paramSets_;
@@ -631,7 +643,7 @@ private:
         //TODO: We should reason about the best way to manage DPB initialization and resizing. Currently we check if dpbInitialized_ is false, and if so we call dpb_.init() with the width, height, and numRefFrames from the SPS. This means that the DPB will be initialized on the first frame that uses a valid SPS. However, we should also consider what happens if we encounter a new SPS with different dimensions or reference frame requirements later in the stream. In that case, we might need to reinitialize or resize the DPB to accommodate the new parameters. We should ensure that our DPB implementation can handle such changes gracefully, either by allowing dynamic resizing or by enforcing that all frames use the same SPS parameters. Additionally, we should consider how this interacts with frame buffers that are currently in use as references in the DPB when reinitializing or resizing.
         if (!dpbInitialized_)
         {
-            if (!dpb_.init(sps->width(), sps->height(), sps->numRefFrames_))
+            if (!dpb_.init(sps->width(), sps->height(), sps->numRefFrames_, skipChroma()))
             {
                 allocationFailure_ = dpb_.allocationFailure();
                 return DecodeStatus::Error;
@@ -663,7 +675,7 @@ private:
             currentFrame_.width() != sps->width() ||
             currentFrame_.height() != sps->height())
         {
-            currentFrame_.allocate(sps->width(), sps->height());
+            currentFrame_.allocate(sps->width(), sps->height(), skipChroma());
         }
 #endif
 
@@ -1090,7 +1102,7 @@ private:
                               nnzLuma_.data(), mbMotion_.data(),
                               mbQps_.data(), mbTransform8x8_.data(),
                               pps->chromaQpIndexOffset_,
-                              widthInMbs_, heightInMbs_);
+                              widthInMbs_, heightInMbs_, skipChroma());
                 }
             }
             if (profile_) profile_->deblockUs += sub0h264TimerUs() - dbT0;
@@ -1109,10 +1121,13 @@ private:
             // Fallback: activeFrame_ was currentFrame_ → copy to DPB
             std::memcpy(decodeTarget->yData(), activeFrame_->yData(),
                         activeFrame_->yStride() * activeFrame_->height());
-            std::memcpy(decodeTarget->uData(), activeFrame_->uData(),
-                        activeFrame_->uvStride() * (activeFrame_->height() / 2U));
-            std::memcpy(decodeTarget->vData(), activeFrame_->vData(),
-                        activeFrame_->uvStride() * (activeFrame_->height() / 2U));
+            if (!skipChroma())
+            {
+                std::memcpy(decodeTarget->uData(), activeFrame_->uData(),
+                            activeFrame_->uvStride() * (activeFrame_->height() / 2U));
+                std::memcpy(decodeTarget->vData(), activeFrame_->vData(),
+                            activeFrame_->uvStride() * (activeFrame_->height() / 2U));
+            }
         }
 
         if (profile_) profile_->overheadUs += sub0h264TimerUs() - syncT0;
@@ -1771,113 +1786,78 @@ private:
             std::printf("[DBG] MB(%lu,0) chromaMb START bitOff=%lu cbpC=%u\n",
                 (unsigned long)mbX, (unsigned long)br.bitOffset(), cbpChroma);
 #endif
-        auto chromaMode = static_cast<IntraChromaMode>(chromaPredMode);
-
-        // Generate chroma predictions (8x8 for each plane)
-        uint8_t predU[64], predV[64];
-        intraPredChroma8x8(chromaMode, *activeFrame_, mbX, mbY, true, predU);
-        intraPredChroma8x8(chromaMode, *activeFrame_, mbX, mbY, false, predV);
-
-        // §7.4.2.2 Chroma QP (FM-10: must use chromaQp, not luma QP)
-        int32_t chromaQp = computeChromaQp(qp, pps.chromaQpIndexOffset_);
-
-        // Decode chroma DC if cbpChroma >= 1
+        uint32_t mbIdx = mbY * widthInMbs_ + mbX;
         int16_t dcCb[4] = {}, dcCr[4] = {};
+        ResidualBlock4x4 cbAc[4]{}, crAc[4]{};
         if (cbpChroma >= 1U)
         {
             ResidualBlock4x4 dcBlockCb, dcBlockCr;
             decodeResidualBlock4x4(br, -1, 4U, 0U, dcBlockCb);
             decodeResidualBlock4x4(br, -1, 4U, 0U, dcBlockCr);
-
             for (uint32_t i = 0U; i < 4U; ++i)
             {
                 dcCb[i] = dcBlockCb.coeffs[i];
                 dcCr[i] = dcBlockCr.coeffs[i];
             }
-
-            // Trace raw CAVLC-decoded DC coefficients (before Hadamard)
             if (trace_.shouldTrace(mbX, mbY))
-            {
                 trace_.onChromaDcRaw(mbX, mbY, dcCb, dcCr);
-            }
+        }
 
+        // Chroma syntax is required even when the display only consumes luma.
+        // Preserve Cb-then-Cr ordering and every neighbor-context update.
+        if (cbpChroma >= 2U)
+        {
+            for (uint32_t bi = 0U; bi < 4U; ++bi)
+            {
+                int32_t nc = getChromaNc(mbX, mbY, bi, true);
+                decodeResidualBlock4x4(br, nc, 15U, 1U, cbAc[bi]);
+                nnzCb_[mbIdx * 4U + bi] = cbAc[bi].totalCoeff;
+            }
+            for (uint32_t bi = 0U; bi < 4U; ++bi)
+            {
+                int32_t nc = getChromaNc(mbX, mbY, bi, false);
+                decodeResidualBlock4x4(br, nc, 15U, 1U, crAc[bi]);
+                nnzCr_[mbIdx * 4U + bi] = crAc[bi].totalCoeff;
+            }
+        }
+
+        if (skipChroma())
+            return;
+
+        uint8_t predU[64], predV[64];
+        auto chromaMode = static_cast<IntraChromaMode>(chromaPredMode);
+        intraPredChroma8x8(chromaMode, *activeFrame_, mbX, mbY, true, predU);
+        intraPredChroma8x8(chromaMode, *activeFrame_, mbX, mbY, false, predV);
+        int32_t chromaQp = computeChromaQp(qp, pps.chromaQpIndexOffset_);
+        if (cbpChroma >= 1U)
+        {
             inverseHadamard2x2(dcCb);
             inverseHadamard2x2(dcCr);
-
-            // Dequantize chroma DC — ITU-T H.264 §8.5.12.1. decodeChromaMb is
-            // called from the intra path only → use CbIntra/CrIntra
-            // weightScale[0][0] for the scaled variant.
             dequantChromaDcValues(dcCb, chromaQp, scalingLists_.list4x4[1][0]);
             dequantChromaDcValues(dcCr, chromaQp, scalingLists_.list4x4[2][0]);
-
             if (trace_.shouldTrace(mbX, mbY))
                 trace_.onChromaDcDequant(mbX, mbY, dcCb, dcCr);
         }
 
-        // ITU-T H.264 §7.3.5 residual_cavlc: all Cb AC blocks first, then all Cr AC blocks.
-        // The outer loop over iCbCr (0=Cb, 1=Cr) is separate from the reconstruction loop.
-        uint32_t mbIdx = mbY * widthInMbs_ + mbX;
-
-        // Stash per-block AC coefficients so we can separate decode from reconstruct.
-        int16_t cbCoeffsBuf[4][16] = {};
-        int16_t crCoeffsBuf[4][16] = {};
-
-        // DC-only init from Hadamard output
-        for (uint32_t blkIdx = 0U; blkIdx < 4U; ++blkIdx)
+        Frame& chromaFrame = *activeFrame_;
+        uint32_t uvStride = chromaFrame.uvStride();
+        for (uint32_t bi = 0U; bi < 4U; ++bi)
         {
-            cbCoeffsBuf[blkIdx][0] = dcCb[blkIdx];
-            crCoeffsBuf[blkIdx][0] = dcCr[blkIdx];
-        }
-
-        // Decode all Cb AC blocks (iCbCr=0), then all Cr AC blocks (iCbCr=1).
-        // Reference: ITU-T H.264 §7.3.5 residual_cavlc() syntax table.
-        if (cbpChroma >= 2U)
-        {
-            for (uint32_t blkIdx = 0U; blkIdx < 4U; ++blkIdx)
+            uint32_t blkX = (bi & 1U) * 4U;
+            uint32_t blkY = (bi >> 1U) * 4U;
+            int16_t* cbCoeffs = cbAc[bi].coeffs;
+            int16_t* crCoeffs = crAc[bi].coeffs;
+            if (cbpChroma >= 2U)
             {
-                int32_t ncCb = getChromaNc(mbX, mbY, blkIdx, true);
-                ResidualBlock4x4 acBlock;
-                decodeResidualBlock4x4(br, ncCb, 15U, 1U, acBlock);
-                for (uint32_t i = 1U; i < 16U; ++i)
-                    cbCoeffsBuf[blkIdx][i] = acBlock.coeffs[i];
-                nnzCb_[mbIdx * 4U + blkIdx] = acBlock.totalCoeff;
-                // Save DC (already dequanted by Hadamard path), dequant AC, restore DC.
-                // ITU-T H.264 §8.5.12.1: DC was scaled in the Hadamard dequant above.
-                int16_t savedDcCb = cbCoeffsBuf[blkIdx][0];
-                dequantize4x4(cbCoeffsBuf[blkIdx], chromaQp, Block4x4Plane::CbIntra);
-                cbCoeffsBuf[blkIdx][0] = savedDcCb;
+                dequantize4x4(cbCoeffs, chromaQp, Block4x4Plane::CbIntra);
+                dequantize4x4(crCoeffs, chromaQp, Block4x4Plane::CrIntra);
             }
-            for (uint32_t blkIdx = 0U; blkIdx < 4U; ++blkIdx)
-            {
-                int32_t ncCr = getChromaNc(mbX, mbY, blkIdx, false);
-                ResidualBlock4x4 acBlock;
-                decodeResidualBlock4x4(br, ncCr, 15U, 1U, acBlock);
-                for (uint32_t i = 1U; i < 16U; ++i)
-                    crCoeffsBuf[blkIdx][i] = acBlock.coeffs[i];
-                nnzCr_[mbIdx * 4U + blkIdx] = acBlock.totalCoeff;
-                int16_t savedDcCr = crCoeffsBuf[blkIdx][0];
-                dequantize4x4(crCoeffsBuf[blkIdx], chromaQp, Block4x4Plane::CrIntra);
-                crCoeffsBuf[blkIdx][0] = savedDcCr;
-            }
-        }
-
-        // Reconstruct chroma 4x4 blocks using buffered coefficients.
-        uint8_t* mbU = activeFrame_->uMb(mbX, mbY);
-        uint8_t* mbV = activeFrame_->vMb(mbX, mbY);
-        uint32_t uvStride = activeFrame_->uvStride();
-
-        for (uint32_t blkIdx = 0U; blkIdx < 4U; ++blkIdx)
-        {
-            uint32_t blkX = (blkIdx & 1U) * 4U;
-            uint32_t blkY = (blkIdx >> 1U) * 4U;
-
-            uint8_t* predCbPtr = predU + blkY * 8U + blkX;
-            uint8_t* outCbPtr  = mbU + blkY * uvStride + blkX;
-            inverseDct4x4AddPred(cbCoeffsBuf[blkIdx], predCbPtr, 8U, outCbPtr, uvStride);
-
-            uint8_t* predCrPtr = predV + blkY * 8U + blkX;
-            uint8_t* outCrPtr  = mbV + blkY * uvStride + blkX;
-            inverseDct4x4AddPred(crCoeffsBuf[blkIdx], predCrPtr, 8U, outCrPtr, uvStride);
+            cbCoeffs[0] = dcCb[bi];
+            crCoeffs[0] = dcCr[bi];
+            inverseDct4x4AddPred(cbCoeffs, predU + blkY * 8U + blkX, 8U,
+                                 chromaFrame.uMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
+            inverseDct4x4AddPred(crCoeffs, predV + blkY * 8U + blkX, 8U,
+                                 chromaFrame.vMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
         }
     }
 
@@ -2030,29 +2010,37 @@ private:
                         target.yMb(mbX, mbY), target.yStride());
 
         // Chroma — derive from luma MV (divide by 2, eighth-pel)
-        int32_t chromaRefX = static_cast<int32_t>(mbX * cChromaBlockSize) + (skipMv.x >> 3);
-        int32_t chromaRefY = static_cast<int32_t>(mbY * cChromaBlockSize) + (skipMv.y >> 3);
-        uint32_t cdx = static_cast<uint32_t>(skipMv.x) & 7U;
-        uint32_t cdy = static_cast<uint32_t>(skipMv.y) & 7U;
-
-        // Diagnostic: verify ref frame chroma at MC position for debugging
-        chromaMotionComp(ref, chromaRefX, chromaRefY, cdx, cdy,
-                         cChromaBlockSize, cChromaBlockSize, true,
-                         target.uMb(mbX, mbY), target.uvStride());
-        chromaMotionComp(ref, chromaRefX, chromaRefY, cdx, cdy,
-                         cChromaBlockSize, cChromaBlockSize, false,
-                         target.vMb(mbX, mbY), target.uvStride());
-
-        // Weighted prediction — §8.4.2.3.1 (P_Skip uses ref_idx=0)
         if (sh.hasWeightTable_)
         {
             const auto& w = sh.weightL0_[0];
             applyWeightedPred(target.yMb(mbX, mbY), target.yStride(), cMbSize, cMbSize,
                               sh.lumaLog2WeightDenom_, w.lumaWeight, w.lumaOffset, w.lumaWeightFlag);
-            applyWeightedPred(target.uMb(mbX, mbY), target.uvStride(), cChromaBlockSize, cChromaBlockSize,
-                              sh.chromaLog2WeightDenom_, w.chromaWeight[0], w.chromaOffset[0], w.chromaWeightFlag);
-            applyWeightedPred(target.vMb(mbX, mbY), target.uvStride(), cChromaBlockSize, cChromaBlockSize,
-                              sh.chromaLog2WeightDenom_, w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
+        }
+
+        if (!skipChroma())
+        {
+            int32_t chromaRefX = static_cast<int32_t>(mbX * cChromaBlockSize) + (skipMv.x >> 3);
+            int32_t chromaRefY = static_cast<int32_t>(mbY * cChromaBlockSize) + (skipMv.y >> 3);
+            uint32_t cdx = static_cast<uint32_t>(skipMv.x) & 7U;
+            uint32_t cdy = static_cast<uint32_t>(skipMv.y) & 7U;
+
+            // Diagnostic: verify ref frame chroma at MC position for debugging
+            chromaMotionComp(ref, chromaRefX, chromaRefY, cdx, cdy,
+                             cChromaBlockSize, cChromaBlockSize, true,
+                             target.uMb(mbX, mbY), target.uvStride());
+            chromaMotionComp(ref, chromaRefX, chromaRefY, cdx, cdy,
+                             cChromaBlockSize, cChromaBlockSize, false,
+                             target.vMb(mbX, mbY), target.uvStride());
+
+            // Weighted prediction — §8.4.2.3.1 (P_Skip uses ref_idx=0)
+            if (sh.hasWeightTable_)
+            {
+                const auto& w = sh.weightL0_[0];
+                applyWeightedPred(target.uMb(mbX, mbY), target.uvStride(), cChromaBlockSize, cChromaBlockSize,
+                                  sh.chromaLog2WeightDenom_, w.chromaWeight[0], w.chromaOffset[0], w.chromaWeightFlag);
+                applyWeightedPred(target.vMb(mbX, mbY), target.uvStride(), cChromaBlockSize, cChromaBlockSize,
+                                  sh.chromaLog2WeightDenom_, w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
+            }
         }
 
         // NNZ = 0 for skip MBs
@@ -2369,24 +2357,32 @@ private:
                            static_cast<uint32_t>(mv.y) & 3U,
                            cMbSize, cMbSize, predLuma, cMbSize);
 
-            int32_t cRefX = static_cast<int32_t>(mbX * cChromaBlockSize) + (mv.x >> 3);
-            int32_t cRefY = static_cast<int32_t>(mbY * cChromaBlockSize) + (mv.y >> 3);
-            chromaMotionComp(ref, cRefX, cRefY, static_cast<uint32_t>(mv.x) & 7U,
-                             static_cast<uint32_t>(mv.y) & 7U,
-                             cChromaBlockSize, cChromaBlockSize, true, predU, cChromaBlockSize);
-            chromaMotionComp(ref, cRefX, cRefY, static_cast<uint32_t>(mv.x) & 7U,
-                             static_cast<uint32_t>(mv.y) & 7U,
-                             cChromaBlockSize, cChromaBlockSize, false, predV, cChromaBlockSize);
-            // Weighted prediction — §8.4.2.3.1
             if (sh.hasWeightTable_)
             {
                 const auto& w = sh.weightL0_[refIdxL0[0]];
                 applyWeightedPred(predLuma, cMbSize, cMbSize, cMbSize,
                                   sh.lumaLog2WeightDenom_, w.lumaWeight, w.lumaOffset, w.lumaWeightFlag);
-                applyWeightedPred(predU, cChromaBlockSize, cChromaBlockSize, cChromaBlockSize,
-                                  sh.chromaLog2WeightDenom_, w.chromaWeight[0], w.chromaOffset[0], w.chromaWeightFlag);
-                applyWeightedPred(predV, cChromaBlockSize, cChromaBlockSize, cChromaBlockSize,
-                                  sh.chromaLog2WeightDenom_, w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
+            }
+
+            if (!skipChroma())
+            {
+                int32_t cRefX = static_cast<int32_t>(mbX * cChromaBlockSize) + (mv.x >> 3);
+                int32_t cRefY = static_cast<int32_t>(mbY * cChromaBlockSize) + (mv.y >> 3);
+                chromaMotionComp(ref, cRefX, cRefY, static_cast<uint32_t>(mv.x) & 7U,
+                                 static_cast<uint32_t>(mv.y) & 7U,
+                                 cChromaBlockSize, cChromaBlockSize, true, predU, cChromaBlockSize);
+                chromaMotionComp(ref, cRefX, cRefY, static_cast<uint32_t>(mv.x) & 7U,
+                                 static_cast<uint32_t>(mv.y) & 7U,
+                                 cChromaBlockSize, cChromaBlockSize, false, predV, cChromaBlockSize);
+                // Weighted prediction — §8.4.2.3.1
+                if (sh.hasWeightTable_)
+                {
+                    const auto& w = sh.weightL0_[refIdxL0[0]];
+                    applyWeightedPred(predU, cChromaBlockSize, cChromaBlockSize, cChromaBlockSize,
+                                      sh.chromaLog2WeightDenom_, w.chromaWeight[0], w.chromaOffset[0], w.chromaWeightFlag);
+                    applyWeightedPred(predV, cChromaBlockSize, cChromaBlockSize, cChromaBlockSize,
+                                      sh.chromaLog2WeightDenom_, w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
+                }
             }
         }
         else if (mbTypeRaw == 1U)
@@ -2407,28 +2403,36 @@ private:
                                predLuma + partOffY * cMbSize, cMbSize);
 
                 uint32_t cPartOffY = p * 4U;
-                int32_t cRefX = static_cast<int32_t>(mbX * cChromaBlockSize) + (mv.x >> 3);
-                int32_t cRefY = static_cast<int32_t>(mbY * cChromaBlockSize + cPartOffY) + (mv.y >> 3);
-                chromaMotionComp(ref, cRefX, cRefY,
-                                 static_cast<uint32_t>(mv.x) & 7U,
-                                 static_cast<uint32_t>(mv.y) & 7U,
-                                 8U, 4U, true,
-                                 predU + cPartOffY * cChromaBlockSize, cChromaBlockSize);
-                chromaMotionComp(ref, cRefX, cRefY,
-                                 static_cast<uint32_t>(mv.x) & 7U,
-                                 static_cast<uint32_t>(mv.y) & 7U,
-                                 8U, 4U, false,
-                                 predV + cPartOffY * cChromaBlockSize, cChromaBlockSize);
-                // Weighted prediction — §8.4.2.3.1 (per 16x8 partition)
                 if (sh.hasWeightTable_)
                 {
                     const auto& w = sh.weightL0_[refIdxL0[p]];
                     applyWeightedPred(predLuma + partOffY * cMbSize, cMbSize, 16U, 8U,
                                       sh.lumaLog2WeightDenom_, w.lumaWeight, w.lumaOffset, w.lumaWeightFlag);
-                    applyWeightedPred(predU + cPartOffY * cChromaBlockSize, cChromaBlockSize, 8U, 4U,
-                                      sh.chromaLog2WeightDenom_, w.chromaWeight[0], w.chromaOffset[0], w.chromaWeightFlag);
-                    applyWeightedPred(predV + cPartOffY * cChromaBlockSize, cChromaBlockSize, 8U, 4U,
-                                      sh.chromaLog2WeightDenom_, w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
+                }
+
+                if (!skipChroma())
+                {
+                    int32_t cRefX = static_cast<int32_t>(mbX * cChromaBlockSize) + (mv.x >> 3);
+                    int32_t cRefY = static_cast<int32_t>(mbY * cChromaBlockSize + cPartOffY) + (mv.y >> 3);
+                    chromaMotionComp(ref, cRefX, cRefY,
+                                     static_cast<uint32_t>(mv.x) & 7U,
+                                     static_cast<uint32_t>(mv.y) & 7U,
+                                     8U, 4U, true,
+                                     predU + cPartOffY * cChromaBlockSize, cChromaBlockSize);
+                    chromaMotionComp(ref, cRefX, cRefY,
+                                     static_cast<uint32_t>(mv.x) & 7U,
+                                     static_cast<uint32_t>(mv.y) & 7U,
+                                     8U, 4U, false,
+                                     predV + cPartOffY * cChromaBlockSize, cChromaBlockSize);
+                    // Weighted prediction — §8.4.2.3.1 (per 16x8 partition)
+                    if (sh.hasWeightTable_)
+                    {
+                        const auto& w = sh.weightL0_[refIdxL0[p]];
+                        applyWeightedPred(predU + cPartOffY * cChromaBlockSize, cChromaBlockSize, 8U, 4U,
+                                          sh.chromaLog2WeightDenom_, w.chromaWeight[0], w.chromaOffset[0], w.chromaWeightFlag);
+                        applyWeightedPred(predV + cPartOffY * cChromaBlockSize, cChromaBlockSize, 8U, 4U,
+                                          sh.chromaLog2WeightDenom_, w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
+                    }
                 }
             }
         }
@@ -2450,28 +2454,36 @@ private:
                                predLuma + partOffX, cMbSize);
 
                 uint32_t cPartOffX = p * 4U;
-                int32_t cRefX = static_cast<int32_t>(mbX * cChromaBlockSize + cPartOffX) + (mv.x >> 3);
-                int32_t cRefY = static_cast<int32_t>(mbY * cChromaBlockSize) + (mv.y >> 3);
-                chromaMotionComp(ref, cRefX, cRefY,
-                                 static_cast<uint32_t>(mv.x) & 7U,
-                                 static_cast<uint32_t>(mv.y) & 7U,
-                                 4U, 8U, true,
-                                 predU + cPartOffX, cChromaBlockSize);
-                chromaMotionComp(ref, cRefX, cRefY,
-                                 static_cast<uint32_t>(mv.x) & 7U,
-                                 static_cast<uint32_t>(mv.y) & 7U,
-                                 4U, 8U, false,
-                                 predV + cPartOffX, cChromaBlockSize);
-                // Weighted prediction — §8.4.2.3.1 (per 8x16 partition)
                 if (sh.hasWeightTable_)
                 {
                     const auto& w = sh.weightL0_[refIdxL0[p]];
                     applyWeightedPred(predLuma + partOffX, cMbSize, 8U, 16U,
                                       sh.lumaLog2WeightDenom_, w.lumaWeight, w.lumaOffset, w.lumaWeightFlag);
-                    applyWeightedPred(predU + cPartOffX, cChromaBlockSize, 4U, 8U,
-                                      sh.chromaLog2WeightDenom_, w.chromaWeight[0], w.chromaOffset[0], w.chromaWeightFlag);
-                    applyWeightedPred(predV + cPartOffX, cChromaBlockSize, 4U, 8U,
-                                      sh.chromaLog2WeightDenom_, w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
+                }
+
+                if (!skipChroma())
+                {
+                    int32_t cRefX = static_cast<int32_t>(mbX * cChromaBlockSize + cPartOffX) + (mv.x >> 3);
+                    int32_t cRefY = static_cast<int32_t>(mbY * cChromaBlockSize) + (mv.y >> 3);
+                    chromaMotionComp(ref, cRefX, cRefY,
+                                     static_cast<uint32_t>(mv.x) & 7U,
+                                     static_cast<uint32_t>(mv.y) & 7U,
+                                     4U, 8U, true,
+                                     predU + cPartOffX, cChromaBlockSize);
+                    chromaMotionComp(ref, cRefX, cRefY,
+                                     static_cast<uint32_t>(mv.x) & 7U,
+                                     static_cast<uint32_t>(mv.y) & 7U,
+                                     4U, 8U, false,
+                                     predV + cPartOffX, cChromaBlockSize);
+                    // Weighted prediction — §8.4.2.3.1 (per 8x16 partition)
+                    if (sh.hasWeightTable_)
+                    {
+                        const auto& w = sh.weightL0_[refIdxL0[p]];
+                        applyWeightedPred(predU + cPartOffX, cChromaBlockSize, 4U, 8U,
+                                          sh.chromaLog2WeightDenom_, w.chromaWeight[0], w.chromaOffset[0], w.chromaWeightFlag);
+                        applyWeightedPred(predV + cPartOffX, cChromaBlockSize, 4U, 8U,
+                                          sh.chromaLog2WeightDenom_, w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
+                    }
                 }
             }
         }
@@ -2499,28 +2511,36 @@ private:
                                predLuma + loy * cMbSize + lox, cMbSize);
 
                 uint32_t cox = subChromaOffX[s], coy = subChromaOffY[s];
-                int32_t cRefX = static_cast<int32_t>(mbX * cChromaBlockSize + cox) + (mv.x >> 3);
-                int32_t cRefY = static_cast<int32_t>(mbY * cChromaBlockSize + coy) + (mv.y >> 3);
-                chromaMotionComp(ref, cRefX, cRefY,
-                                 static_cast<uint32_t>(mv.x) & 7U,
-                                 static_cast<uint32_t>(mv.y) & 7U,
-                                 4U, 4U, true,
-                                 predU + coy * cChromaBlockSize + cox, cChromaBlockSize);
-                chromaMotionComp(ref, cRefX, cRefY,
-                                 static_cast<uint32_t>(mv.x) & 7U,
-                                 static_cast<uint32_t>(mv.y) & 7U,
-                                 4U, 4U, false,
-                                 predV + coy * cChromaBlockSize + cox, cChromaBlockSize);
-                // Weighted prediction — §8.4.2.3.1 (per 8x8 sub-MB)
                 if (sh.hasWeightTable_)
                 {
                     const auto& w = sh.weightL0_[refIdxL0[s]];
                     applyWeightedPred(predLuma + loy * cMbSize + lox, cMbSize, 8U, 8U,
                                       sh.lumaLog2WeightDenom_, w.lumaWeight, w.lumaOffset, w.lumaWeightFlag);
-                    applyWeightedPred(predU + coy * cChromaBlockSize + cox, cChromaBlockSize, 4U, 4U,
-                                      sh.chromaLog2WeightDenom_, w.chromaWeight[0], w.chromaOffset[0], w.chromaWeightFlag);
-                    applyWeightedPred(predV + coy * cChromaBlockSize + cox, cChromaBlockSize, 4U, 4U,
-                                      sh.chromaLog2WeightDenom_, w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
+                }
+
+                if (!skipChroma())
+                {
+                    int32_t cRefX = static_cast<int32_t>(mbX * cChromaBlockSize + cox) + (mv.x >> 3);
+                    int32_t cRefY = static_cast<int32_t>(mbY * cChromaBlockSize + coy) + (mv.y >> 3);
+                    chromaMotionComp(ref, cRefX, cRefY,
+                                     static_cast<uint32_t>(mv.x) & 7U,
+                                     static_cast<uint32_t>(mv.y) & 7U,
+                                     4U, 4U, true,
+                                     predU + coy * cChromaBlockSize + cox, cChromaBlockSize);
+                    chromaMotionComp(ref, cRefX, cRefY,
+                                     static_cast<uint32_t>(mv.x) & 7U,
+                                     static_cast<uint32_t>(mv.y) & 7U,
+                                     4U, 4U, false,
+                                     predV + coy * cChromaBlockSize + cox, cChromaBlockSize);
+                    // Weighted prediction — §8.4.2.3.1 (per 8x8 sub-MB)
+                    if (sh.hasWeightTable_)
+                    {
+                        const auto& w = sh.weightL0_[refIdxL0[s]];
+                        applyWeightedPred(predU + coy * cChromaBlockSize + cox, cChromaBlockSize, 4U, 4U,
+                                          sh.chromaLog2WeightDenom_, w.chromaWeight[0], w.chromaOffset[0], w.chromaWeightFlag);
+                        applyWeightedPred(predV + coy * cChromaBlockSize + cox, cChromaBlockSize, 4U, 4U,
+                                          sh.chromaLog2WeightDenom_, w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
+                    }
                 }
             }
         }
@@ -2595,85 +2615,81 @@ private:
             inverseDct4x4AddPred(coeffs, predPtr, cMbSize, outPtr, yStride);
         }
 
-        // Decode chroma residual and reconstruct
-        // §7.4.2.2 Chroma QP (FM-10: must use chromaQp, not luma QP)
-        int32_t chromaQp = computeChromaQp(qp, pps.chromaQpIndexOffset_);
-
         int16_t dcCb[4] = {}, dcCr[4] = {};
+        ResidualBlock4x4 cbAc[4]{}, crAc[4]{};
         if (cbpChroma >= 1U)
         {
-            uint32_t dcBitStart = static_cast<uint32_t>(br.bitOffset());
             ResidualBlock4x4 dcBlockCb, dcBlockCr;
+            uint32_t bitStart = static_cast<uint32_t>(br.bitOffset());
             decodeResidualBlock4x4(br, -1, 4U, 0U, dcBlockCb);
-            uint32_t dcCbBits = static_cast<uint32_t>(br.bitOffset()) - dcBitStart;
-            trace_.onBlockResidual(mbX, mbY, 16U, -1, dcBlockCb.totalCoeff, dcCbBits);
-            uint32_t dcCrStart = static_cast<uint32_t>(br.bitOffset());
+            trace_.onBlockResidual(mbX, mbY, 16U, -1,
+                dcBlockCb.totalCoeff, static_cast<uint32_t>(br.bitOffset()) - bitStart);
+            bitStart = static_cast<uint32_t>(br.bitOffset());
             decodeResidualBlock4x4(br, -1, 4U, 0U, dcBlockCr);
-            uint32_t dcCrBits = static_cast<uint32_t>(br.bitOffset()) - dcCrStart;
-            trace_.onBlockResidual(mbX, mbY, 17U, -1, dcBlockCr.totalCoeff, dcCrBits);
-            for (uint32_t i = 0U; i < 4U; ++i) { dcCb[i] = dcBlockCb.coeffs[i]; dcCr[i] = dcBlockCr.coeffs[i]; }
-            inverseHadamard2x2(dcCb);
-            inverseHadamard2x2(dcCr);
-
-            // §8.5.11 + §8.5.12.1: Chroma DC dequant (FM-10: chromaQp used, not luma QP).
-            // P-inter path → CbInter/CrInter weightScale[0][0].
-            dequantChromaDcValues(dcCb, chromaQp, scalingLists_.list4x4[4][0]);
-            dequantChromaDcValues(dcCr, chromaQp, scalingLists_.list4x4[5][0]);
+            trace_.onBlockResidual(mbX, mbY, 17U, -1,
+                dcBlockCr.totalCoeff, static_cast<uint32_t>(br.bitOffset()) - bitStart);
+            for (uint32_t i = 0U; i < 4U; ++i)
+            {
+                dcCb[i] = dcBlockCb.coeffs[i];
+                dcCr[i] = dcBlockCr.coeffs[i];
+            }
         }
 
-        // Stash per-block AC coefficients — decode all Cb first, then Cr (§7.3.5)
-        int16_t cbCoeffsBuf[4][16] = {};
-        int16_t crCoeffsBuf[4][16] = {};
-        for (uint32_t blkIdx = 0U; blkIdx < 4U; ++blkIdx)
-        {
-            cbCoeffsBuf[blkIdx][0] = dcCb[blkIdx];
-            crCoeffsBuf[blkIdx][0] = dcCr[blkIdx];
-        }
-
+        // Chroma syntax is required even when the display only consumes luma.
+        // Preserve Cb-then-Cr ordering and every neighbor-context update.
         if (cbpChroma >= 2U)
         {
-            // All Cb AC blocks first — §7.3.5.3
-            for (uint32_t blkIdx = 0U; blkIdx < 4U; ++blkIdx)
+            for (uint32_t bi = 0U; bi < 4U; ++bi)
             {
-                int32_t ncCb = getChromaNc(mbX, mbY, blkIdx, true);
-                uint32_t acBitBefore = static_cast<uint32_t>(br.bitOffset());
-                ResidualBlock4x4 acBlock;
-                decodeResidualBlock4x4(br, ncCb, 15U, 1U, acBlock);
-                uint32_t acBits = static_cast<uint32_t>(br.bitOffset()) - acBitBefore;
-                trace_.onBlockResidual(mbX, mbY, 18U + blkIdx, ncCb, acBlock.totalCoeff, acBits);
-                for (uint32_t i = 1U; i < 16U; ++i) cbCoeffsBuf[blkIdx][i] = acBlock.coeffs[i];
-                nnzCb_[mbIdx * 4U + blkIdx] = acBlock.totalCoeff;
-                int16_t savedDc = cbCoeffsBuf[blkIdx][0];
-                dequantize4x4(cbCoeffsBuf[blkIdx], chromaQp, Block4x4Plane::CbInter);
-                cbCoeffsBuf[blkIdx][0] = savedDc;
+                int32_t nc = getChromaNc(mbX, mbY, bi, true);
+                uint32_t bitStart = static_cast<uint32_t>(br.bitOffset());
+                decodeResidualBlock4x4(br, nc, 15U, 1U, cbAc[bi]);
+                nnzCb_[mbIdx * 4U + bi] = cbAc[bi].totalCoeff;
+                trace_.onBlockResidual(mbX, mbY, 18U + bi, nc,
+                    cbAc[bi].totalCoeff, static_cast<uint32_t>(br.bitOffset()) - bitStart);
             }
-            // Then all Cr AC blocks — §7.3.5.3
-            for (uint32_t blkIdx = 0U; blkIdx < 4U; ++blkIdx)
+            for (uint32_t bi = 0U; bi < 4U; ++bi)
             {
-                int32_t ncCr = getChromaNc(mbX, mbY, blkIdx, false);
-                uint32_t acBitBefore = static_cast<uint32_t>(br.bitOffset());
-                ResidualBlock4x4 acBlock;
-                decodeResidualBlock4x4(br, ncCr, 15U, 1U, acBlock);
-                uint32_t acBits = static_cast<uint32_t>(br.bitOffset()) - acBitBefore;
-                trace_.onBlockResidual(mbX, mbY, 22U + blkIdx, ncCr, acBlock.totalCoeff, acBits);
-                for (uint32_t i = 1U; i < 16U; ++i) crCoeffsBuf[blkIdx][i] = acBlock.coeffs[i];
-                nnzCr_[mbIdx * 4U + blkIdx] = acBlock.totalCoeff;
-                int16_t savedDc = crCoeffsBuf[blkIdx][0];
-                dequantize4x4(crCoeffsBuf[blkIdx], chromaQp, Block4x4Plane::CrInter);
-                crCoeffsBuf[blkIdx][0] = savedDc;
+                int32_t nc = getChromaNc(mbX, mbY, bi, false);
+                uint32_t bitStart = static_cast<uint32_t>(br.bitOffset());
+                decodeResidualBlock4x4(br, nc, 15U, 1U, crAc[bi]);
+                nnzCr_[mbIdx * 4U + bi] = crAc[bi].totalCoeff;
+                trace_.onBlockResidual(mbX, mbY, 22U + bi, nc,
+                    crAc[bi].totalCoeff, static_cast<uint32_t>(br.bitOffset()) - bitStart);
             }
         }
 
-        // Reconstruct chroma using motion-compensated predictions
-        uint32_t uvStride = target.uvStride();
-        for (uint32_t blkIdx = 0U; blkIdx < 4U; ++blkIdx)
+        if (!skipChroma())
         {
-            uint32_t blkX = (blkIdx & 1U) * 4U;
-            uint32_t blkY = (blkIdx >> 1U) * 4U;
-            inverseDct4x4AddPred(cbCoeffsBuf[blkIdx], predU + blkY * 8U + blkX, 8U,
-                                 target.uMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
-            inverseDct4x4AddPred(crCoeffsBuf[blkIdx], predV + blkY * 8U + blkX, 8U,
-                                 target.vMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
+            int32_t chromaQp = computeChromaQp(qp, pps.chromaQpIndexOffset_);
+            if (cbpChroma >= 1U)
+            {
+                inverseHadamard2x2(dcCb);
+                inverseHadamard2x2(dcCr);
+                dequantChromaDcValues(dcCb, chromaQp, scalingLists_.list4x4[4][0]);
+                dequantChromaDcValues(dcCr, chromaQp, scalingLists_.list4x4[5][0]);
+            }
+
+            Frame& chromaFrame = target;
+            uint32_t uvStride = chromaFrame.uvStride();
+            for (uint32_t bi = 0U; bi < 4U; ++bi)
+            {
+                uint32_t blkX = (bi & 1U) * 4U;
+                uint32_t blkY = (bi >> 1U) * 4U;
+                int16_t* cbCoeffs = cbAc[bi].coeffs;
+                int16_t* crCoeffs = crAc[bi].coeffs;
+                if (cbpChroma >= 2U)
+                {
+                    dequantize4x4(cbCoeffs, chromaQp, Block4x4Plane::CbInter);
+                    dequantize4x4(crCoeffs, chromaQp, Block4x4Plane::CrInter);
+                }
+                cbCoeffs[0] = dcCb[bi];
+                crCoeffs[0] = dcCr[bi];
+                inverseDct4x4AddPred(cbCoeffs, predU + blkY * 8U + blkX, 8U,
+                                     chromaFrame.uMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
+                inverseDct4x4AddPred(crCoeffs, predV + blkY * 8U + blkX, 8U,
+                                     chromaFrame.vMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
+            }
         }
         mbQp = qp; // Propagate accumulated QP to next MB
         trace_.onMbEnd(mbX, mbY, static_cast<uint32_t>(br.bitOffset()));
@@ -3546,8 +3562,11 @@ private:
 
         uint8_t predLuma[256], predU[64], predV[64];
         std::memset(predLuma, 128U, 256U);
-        std::memset(predU, 128U, 64U);
-        std::memset(predV, 128U, 64U);
+        if (!skipChroma())
+        {
+            std::memset(predU, 128U, 64U);
+            std::memset(predV, 128U, 64U);
+        }
 
         // Per-partition reference lookup via DPB L0 list — §8.4.2
         auto getRef = [this](uint8_t idx) -> const Frame& {
@@ -3615,28 +3634,36 @@ private:
             // Chroma MC
             uint32_t cPartX = partX / 2U, cPartY = partY / 2U;
             uint32_t cPartW = partW / 2U, cPartH = partH / 2U;
-            int32_t cRefX = static_cast<int32_t>(mbX * cChromaBlockSize + cPartX) + (mv.x >> 3);
-            int32_t cRefY = static_cast<int32_t>(mbY * cChromaBlockSize + cPartY) + (mv.y >> 3);
-            uint32_t cdx = static_cast<uint32_t>(mv.x) & 7U;
-            uint32_t cdy = static_cast<uint32_t>(mv.y) & 7U;
-            chromaMotionComp(ref, cRefX, cRefY, cdx, cdy, cPartW, cPartH, true,
-                             predU + cPartY * cChromaBlockSize + cPartX, cChromaBlockSize);
-            chromaMotionComp(ref, cRefX, cRefY, cdx, cdy, cPartW, cPartH, false,
-                             predV + cPartY * cChromaBlockSize + cPartX, cChromaBlockSize);
-
-            // Weighted prediction
             if (sh.hasWeightTable_)
             {
                 const auto& w = sh.weightL0_[partRefIdx];
                 applyWeightedPred(predLuma + partY * cMbSize + partX, cMbSize,
                                   partW, partH, sh.lumaLog2WeightDenom_,
                                   w.lumaWeight, w.lumaOffset, w.lumaWeightFlag);
-                applyWeightedPred(predU + cPartY * cChromaBlockSize + cPartX, cChromaBlockSize,
-                                  cPartW, cPartH, sh.chromaLog2WeightDenom_,
-                                  w.chromaWeight[0], w.chromaOffset[0], w.chromaWeightFlag);
-                applyWeightedPred(predV + cPartY * cChromaBlockSize + cPartX, cChromaBlockSize,
-                                  cPartW, cPartH, sh.chromaLog2WeightDenom_,
-                                  w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
+            }
+
+            if (!skipChroma())
+            {
+                int32_t cRefX = static_cast<int32_t>(mbX * cChromaBlockSize + cPartX) + (mv.x >> 3);
+                int32_t cRefY = static_cast<int32_t>(mbY * cChromaBlockSize + cPartY) + (mv.y >> 3);
+                uint32_t cdx = static_cast<uint32_t>(mv.x) & 7U;
+                uint32_t cdy = static_cast<uint32_t>(mv.y) & 7U;
+                chromaMotionComp(ref, cRefX, cRefY, cdx, cdy, cPartW, cPartH, true,
+                                 predU + cPartY * cChromaBlockSize + cPartX, cChromaBlockSize);
+                chromaMotionComp(ref, cRefX, cRefY, cdx, cdy, cPartW, cPartH, false,
+                                 predV + cPartY * cChromaBlockSize + cPartX, cChromaBlockSize);
+
+                // Weighted prediction
+                if (sh.hasWeightTable_)
+                {
+                    const auto& w = sh.weightL0_[partRefIdx];
+                    applyWeightedPred(predU + cPartY * cChromaBlockSize + cPartX, cChromaBlockSize,
+                                      cPartW, cPartH, sh.chromaLog2WeightDenom_,
+                                      w.chromaWeight[0], w.chromaOffset[0], w.chromaWeightFlag);
+                    applyWeightedPred(predV + cPartY * cChromaBlockSize + cPartX, cChromaBlockSize,
+                                      cPartW, cPartH, sh.chromaLog2WeightDenom_,
+                                      w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
+                }
             }
         };
 
@@ -3812,85 +3839,79 @@ private:
             }
         }
 
-        // Chroma residual
-        // §7.4.2.2 Chroma QP (FM-10: must use chromaQp, not luma QP)
-        int32_t chromaQp = computeChromaQp(qp, pps.chromaQpIndexOffset_);
-
-        // §9.3.3.1.1.9: chroma DC cbf context — uses actual neighbor CBF.
-        // P-inter current MB is NOT intra.
-        uint32_t cbDcCbfInc2 = cabacNeighbor_.chromaDcCbfCtxInc(mbX, mbY, false, true);
-        uint32_t crDcCbfInc2 = cabacNeighbor_.chromaDcCbfCtxInc(mbX, mbY, false, false);
-
         int16_t dcCb[4] = {}, dcCr[4] = {};
+        int16_t cbAc[4][16] = {}, crAc[4][16] = {};
         if (cbpChroma >= 1U)
         {
-            uint32_t cbDcNnz = cabacDecodeResidual4x4(cabacEngine_, cabacCtx_.data(),
-                                                        dcCb, 4U, 3U, cbDcCbfInc2);
-            uint32_t crDcNnz = cabacDecodeResidual4x4(cabacEngine_, cabacCtx_.data(),
-                                                        dcCr, 4U, 3U, crDcCbfInc2);
-            cabacNeighbor_[mbIdx].setCbDcCbf(cbDcNnz > 0U);
-            cabacNeighbor_[mbIdx].setCrDcCbf(crDcNnz > 0U);
-            inverseHadamard2x2(dcCb);
-            inverseHadamard2x2(dcCr);
-
-            // CABAC P-inter chroma DC → CbInter/CrInter weightScale[0][0].
-            dequantChromaDcValues(dcCb, chromaQp, scalingLists_.list4x4[4][0]);
-            dequantChromaDcValues(dcCr, chromaQp, scalingLists_.list4x4[5][0]);
+            uint32_t cbNnz = cabacDecodeResidual4x4(
+                cabacEngine_, cabacCtx_.data(),
+                dcCb, 4U, 3U, cabacNeighbor_.chromaDcCbfCtxInc(
+                    mbX, mbY, false, true));
+            cabacNeighbor_[mbIdx].setCbDcCbf(cbNnz > 0U);
+            uint32_t crNnz = cabacDecodeResidual4x4(
+                cabacEngine_, cabacCtx_.data(),
+                dcCr, 4U, 3U, cabacNeighbor_.chromaDcCbfCtxInc(
+                    mbX, mbY, false, false));
+            cabacNeighbor_[mbIdx].setCrDcCbf(crNnz > 0U);
         }
 
-        // §7.3.5.3: Chroma AC — ALL Cb first, then ALL Cr. Same order fix as intra.
-        int16_t cbAcPInter[4][16] = {}, crAcPInter[4][16] = {};
+        // Chroma syntax is required even when the display only consumes luma.
+        // Preserve Cb-then-Cr ordering and every neighbor-context update.
         if (cbpChroma >= 2U)
         {
             for (uint32_t bi = 0U; bi < 4U; ++bi)
             {
-                uint32_t cbfInc = chromaAcCbfCtxInc(mbX, mbY, bi, true, false);
-                int16_t acScan[16] = {};
-                uint32_t nnz = cabacDecodeResidual4x4(cabacEngine_, cabacCtx_.data(),
-                                                        acScan, 15U, 4U, cbfInc);
-                for (uint32_t i = 0U; i < 15U; ++i)
-                    cbAcPInter[bi][cZigzag4x4[i + 1U]] = acScan[i];
+                uint32_t nnz = cabacDecodeResidual4x4(
+                    cabacEngine_, cabacCtx_.data(),
+                    cbAc[bi], 15U, 4U, chromaAcCbfCtxInc(
+                        mbX, mbY, bi, true, false));
                 nnzCb_[mbIdx * 4U + bi] = (nnz > 0U) ? 1U : 0U;
             }
             for (uint32_t bi = 0U; bi < 4U; ++bi)
             {
-                uint32_t cbfInc = chromaAcCbfCtxInc(mbX, mbY, bi, false, false);
-                int16_t acScan[16] = {};
-                uint32_t nnz = cabacDecodeResidual4x4(cabacEngine_, cabacCtx_.data(),
-                                                        acScan, 15U, 4U, cbfInc);
-                for (uint32_t i = 0U; i < 15U; ++i)
-                    crAcPInter[bi][cZigzag4x4[i + 1U]] = acScan[i];
+                uint32_t nnz = cabacDecodeResidual4x4(
+                    cabacEngine_, cabacCtx_.data(),
+                    crAc[bi], 15U, 4U, chromaAcCbfCtxInc(
+                        mbX, mbY, bi, false, false));
                 nnzCr_[mbIdx * 4U + bi] = (nnz > 0U) ? 1U : 0U;
             }
         }
 
-
-        uint32_t uvStride = target.uvStride();
-        for (uint32_t blkIdx = 0U; blkIdx < 4U; ++blkIdx)
+        if (!skipChroma())
         {
-            uint32_t blkX = (blkIdx & 1U) * 4U;
-            uint32_t blkY = (blkIdx >> 1U) * 4U;
-            int16_t cbCoeffs[16] = {}, crCoeffs[16] = {};
-            cbCoeffs[0] = dcCb[blkIdx];
-            crCoeffs[0] = dcCr[blkIdx];
-
-            if (cbpChroma >= 2U)
+            int32_t chromaQp = computeChromaQp(qp, pps.chromaQpIndexOffset_);
+            if (cbpChroma >= 1U)
             {
-                for (uint32_t k = 1U; k < 16U; ++k)
-                {
-                    cbCoeffs[k] = cbAcPInter[blkIdx][k];
-                    crCoeffs[k] = crAcPInter[blkIdx][k];
-                }
-                int16_t savedDcCb = cbCoeffs[0];
-                dequantize4x4(cbCoeffs, chromaQp, Block4x4Plane::CbInter);
-                cbCoeffs[0] = savedDcCb;
-                int16_t savedDcCr = crCoeffs[0];
-                dequantize4x4(crCoeffs, chromaQp, Block4x4Plane::CrInter);
-                crCoeffs[0] = savedDcCr;
+                inverseHadamard2x2(dcCb);
+                inverseHadamard2x2(dcCr);
+                dequantChromaDcValues(dcCb, chromaQp, scalingLists_.list4x4[4][0]);
+                dequantChromaDcValues(dcCr, chromaQp, scalingLists_.list4x4[5][0]);
             }
 
-            inverseDct4x4AddPred(cbCoeffs, predU + blkY * 8U + blkX, 8U, target.uMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
-            inverseDct4x4AddPred(crCoeffs, predV + blkY * 8U + blkX, 8U, target.vMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
+            Frame& chromaFrame = target;
+            uint32_t uvStride = chromaFrame.uvStride();
+            for (uint32_t bi = 0U; bi < 4U; ++bi)
+            {
+                uint32_t blkX = (bi & 1U) * 4U;
+                uint32_t blkY = (bi >> 1U) * 4U;
+                int16_t cbCoeffs[16] = {}, crCoeffs[16] = {};
+                for (uint32_t i = 0U; i < 15U; ++i)
+                {
+                    cbCoeffs[cZigzag4x4[i + 1U]] = cbAc[bi][i];
+                    crCoeffs[cZigzag4x4[i + 1U]] = crAc[bi][i];
+                }
+                if (cbpChroma >= 2U)
+                {
+                    dequantize4x4(cbCoeffs, chromaQp, Block4x4Plane::CbInter);
+                    dequantize4x4(crCoeffs, chromaQp, Block4x4Plane::CrInter);
+                }
+                cbCoeffs[0] = dcCb[bi];
+                crCoeffs[0] = dcCr[bi];
+                inverseDct4x4AddPred(cbCoeffs, predU + blkY * 8U + blkX, 8U,
+                                     chromaFrame.uMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
+                inverseDct4x4AddPred(crCoeffs, predV + blkY * 8U + blkX, 8U,
+                                     chromaFrame.vMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
+            }
         }
     }
 
@@ -3899,94 +3920,84 @@ private:
                             uint8_t cbpChroma, int32_t qp,
                             uint32_t mbX, uint32_t mbY) noexcept
     {
-        auto chromaMode = static_cast<IntraChromaMode>(chromaPredMode);
-        uint8_t predU[64], predV[64];
-        intraPredChroma8x8(chromaMode, *activeFrame_, mbX, mbY, true, predU);
-        intraPredChroma8x8(chromaMode, *activeFrame_, mbX, mbY, false, predV);
-
-        // §7.4.2.2 Chroma QP (FM-10: must use chromaQp, not luma QP)
-        int32_t chromaQp = computeChromaQp(qp, pps.chromaQpIndexOffset_);
-
         uint32_t mbIdx = mbY * widthInMbs_ + mbX;
-
-        // §9.3.3.1.1.9: chroma DC cbf context — uses actual neighbor CBF.
-        // transBlockN available when neighbor not skip/I_PCM AND CodedBlockPatternChroma != 0.
-        uint32_t cbDcCbfInc = cabacNeighbor_.chromaDcCbfCtxInc(mbX, mbY, true, true);
-        uint32_t crDcCbfInc = cabacNeighbor_.chromaDcCbfCtxInc(mbX, mbY, true, false);
-
         int16_t dcCb[4] = {}, dcCr[4] = {};
+        int16_t cbAc[4][16] = {}, crAc[4][16] = {};
         if (cbpChroma >= 1U)
         {
-            uint32_t cbDcNnz = cabacDecodeResidual4x4(cabacEngine_, cabacCtx_.data(),
-                                                        dcCb, 4U, 3U, cbDcCbfInc);
-            uint32_t crDcNnz = cabacDecodeResidual4x4(cabacEngine_, cabacCtx_.data(),
-                                                        dcCr, 4U, 3U, crDcCbfInc);
-            cabacNeighbor_[mbIdx].setCbDcCbf(cbDcNnz > 0U);
-            cabacNeighbor_[mbIdx].setCrDcCbf(crDcNnz > 0U);
-            inverseHadamard2x2(dcCb);
-            inverseHadamard2x2(dcCr);
-
-            // Intra chroma DC → CbIntra/CrIntra weightScale[0][0].
-            dequantChromaDcValues(dcCb, chromaQp, scalingLists_.list4x4[1][0]);
-            dequantChromaDcValues(dcCr, chromaQp, scalingLists_.list4x4[2][0]);
+            uint32_t cbNnz = cabacDecodeResidual4x4(
+                cabacEngine_, cabacCtx_.data(),
+                dcCb, 4U, 3U, cabacNeighbor_.chromaDcCbfCtxInc(
+                    mbX, mbY, true, true));
+            cabacNeighbor_[mbIdx].setCbDcCbf(cbNnz > 0U);
+            uint32_t crNnz = cabacDecodeResidual4x4(
+                cabacEngine_, cabacCtx_.data(),
+                dcCr, 4U, 3U, cabacNeighbor_.chromaDcCbfCtxInc(
+                    mbX, mbY, true, false));
+            cabacNeighbor_[mbIdx].setCrDcCbf(crNnz > 0U);
         }
 
-        // §7.3.5.3: Chroma AC decode — ALL Cb blocks first, then ALL Cr blocks.
-        // Spec loop: for(iCbCr=0..1) for(i4x4=0..3) residual_block_cabac().
-        // MUST NOT interleave Cb/Cr — that desyncs the CABAC engine.
-        int16_t cbAcCoeffs[4][16] = {}, crAcCoeffs[4][16] = {};
+        // Chroma syntax is required even when the display only consumes luma.
+        // Preserve Cb-then-Cr ordering and every neighbor-context update.
         if (cbpChroma >= 2U)
         {
             for (uint32_t bi = 0U; bi < 4U; ++bi)
             {
-                uint32_t cbfInc = chromaAcCbfCtxInc(mbX, mbY, bi, true, true);
-                int16_t acScan[16] = {};
-                uint32_t nnz = cabacDecodeResidual4x4(cabacEngine_, cabacCtx_.data(),
-                                                        acScan, 15U, 4U, cbfInc);
-                for (uint32_t i = 0U; i < 15U; ++i)
-                    cbAcCoeffs[bi][cZigzag4x4[i + 1U]] = acScan[i];
+                uint32_t nnz = cabacDecodeResidual4x4(
+                    cabacEngine_, cabacCtx_.data(),
+                    cbAc[bi], 15U, 4U, chromaAcCbfCtxInc(
+                        mbX, mbY, bi, true, true));
                 nnzCb_[mbIdx * 4U + bi] = (nnz > 0U) ? 1U : 0U;
             }
             for (uint32_t bi = 0U; bi < 4U; ++bi)
             {
-                uint32_t cbfInc = chromaAcCbfCtxInc(mbX, mbY, bi, false, true);
-                int16_t acScan[16] = {};
-                uint32_t nnz = cabacDecodeResidual4x4(cabacEngine_, cabacCtx_.data(),
-                                                        acScan, 15U, 4U, cbfInc);
-                for (uint32_t i = 0U; i < 15U; ++i)
-                    crAcCoeffs[bi][cZigzag4x4[i + 1U]] = acScan[i];
+                uint32_t nnz = cabacDecodeResidual4x4(
+                    cabacEngine_, cabacCtx_.data(),
+                    crAc[bi], 15U, 4U, chromaAcCbfCtxInc(
+                        mbX, mbY, bi, false, true));
                 nnzCr_[mbIdx * 4U + bi] = (nnz > 0U) ? 1U : 0U;
             }
         }
 
-        // Reconstruct chroma — dequant AC, preserve DC, IDCT+pred
-        uint8_t* mbU = activeFrame_->uMb(mbX, mbY);
-        uint8_t* mbV = activeFrame_->vMb(mbX, mbY);
-        uint32_t uvStride = activeFrame_->uvStride();
-        for (uint32_t blkIdx = 0U; blkIdx < 4U; ++blkIdx)
-        {
-            uint32_t blkX = (blkIdx & 1U) * 4U;
-            uint32_t blkY = (blkIdx >> 1U) * 4U;
-            int16_t cbCoeffs[16] = {}, crCoeffs[16] = {};
-            cbCoeffs[0] = dcCb[blkIdx]; crCoeffs[0] = dcCr[blkIdx];
+        if (skipChroma())
+            return;
 
+        uint8_t predU[64], predV[64];
+        auto chromaMode = static_cast<IntraChromaMode>(chromaPredMode);
+        intraPredChroma8x8(chromaMode, *activeFrame_, mbX, mbY, true, predU);
+        intraPredChroma8x8(chromaMode, *activeFrame_, mbX, mbY, false, predV);
+        int32_t chromaQp = computeChromaQp(qp, pps.chromaQpIndexOffset_);
+        if (cbpChroma >= 1U)
+        {
+            inverseHadamard2x2(dcCb);
+            inverseHadamard2x2(dcCr);
+            dequantChromaDcValues(dcCb, chromaQp, scalingLists_.list4x4[1][0]);
+            dequantChromaDcValues(dcCr, chromaQp, scalingLists_.list4x4[2][0]);
+        }
+
+        Frame& chromaFrame = *activeFrame_;
+        uint32_t uvStride = chromaFrame.uvStride();
+        for (uint32_t bi = 0U; bi < 4U; ++bi)
+        {
+            uint32_t blkX = (bi & 1U) * 4U;
+            uint32_t blkY = (bi >> 1U) * 4U;
+            int16_t cbCoeffs[16] = {}, crCoeffs[16] = {};
+            for (uint32_t i = 0U; i < 15U; ++i)
+            {
+                cbCoeffs[cZigzag4x4[i + 1U]] = cbAc[bi][i];
+                crCoeffs[cZigzag4x4[i + 1U]] = crAc[bi][i];
+            }
             if (cbpChroma >= 2U)
             {
-                for (uint32_t k = 1U; k < 16U; ++k)
-                {
-                    cbCoeffs[k] = cbAcCoeffs[blkIdx][k];
-                    crCoeffs[k] = crAcCoeffs[blkIdx][k];
-                }
-                int16_t savedDcCb = cbCoeffs[0];
                 dequantize4x4(cbCoeffs, chromaQp, Block4x4Plane::CbIntra);
-                cbCoeffs[0] = savedDcCb;
-                int16_t savedDcCr = crCoeffs[0];
                 dequantize4x4(crCoeffs, chromaQp, Block4x4Plane::CrIntra);
-                crCoeffs[0] = savedDcCr;
             }
-
-            inverseDct4x4AddPred(cbCoeffs, predU + blkY * 8U + blkX, 8U, mbU + blkY * uvStride + blkX, uvStride);
-            inverseDct4x4AddPred(crCoeffs, predV + blkY * 8U + blkX, 8U, mbV + blkY * uvStride + blkX, uvStride);
+            cbCoeffs[0] = dcCb[bi];
+            crCoeffs[0] = dcCr[bi];
+            inverseDct4x4AddPred(cbCoeffs, predU + blkY * 8U + blkX, 8U,
+                                 chromaFrame.uMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
+            inverseDct4x4AddPred(crCoeffs, predV + blkY * 8U + blkX, 8U,
+                                 chromaFrame.vMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
         }
     }
 };

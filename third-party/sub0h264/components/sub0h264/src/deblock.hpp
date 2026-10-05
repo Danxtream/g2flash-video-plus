@@ -262,6 +262,96 @@ inline void filterChromaStrong(uint8_t& p0, const uint8_t& p1,
 
 // ── MB-level deblocking ─────────────────────────────────────────────────
 
+/** Filter U/V using the boundary strengths already computed for luma. */
+inline void deblockChromaMb(Frame& frame, uint32_t mbX, uint32_t mbY,
+                            int32_t alphaOffset, int32_t betaOffset,
+                            const int32_t* mbQps, int32_t chromaQpIndexOffset,
+                            uint16_t widthInMbs,
+                            const uint8_t verticalBs[4][4],
+                            const uint8_t horizontalBs[4][4]) noexcept
+{
+    uint32_t mbIdx = mbY * widthInMbs + mbX;
+    uint32_t pixX = mbX * 16U, pixY = mbY * 16U;
+    int32_t chromaQp = cChromaQpTable[clampQpIdx(mbQps[mbIdx] + chromaQpIndexOffset)];
+    for (uint32_t edge = 0U; edge < 4U; edge += 2U)
+    {
+        if (edge == 0U && mbX == 0U) continue;
+        int32_t edgeQp = chromaQp;
+        if (edge == 0U)
+        {
+            int32_t neighborQp = cChromaQpTable[clampQpIdx(mbQps[mbIdx - 1U] + chromaQpIndexOffset)];
+            edgeQp = (chromaQp + neighborQp + 1) >> 1;
+        }
+        int32_t edgeCIndexA = clampQpIdx(edgeQp + alphaOffset);
+        int32_t edgeCAlpha = cAlphaTable[edgeCIndexA];
+        int32_t edgeCBeta = cBetaTable[clampQpIdx(edgeQp + betaOffset)];
+        const auto& edgeBs = verticalBs[edge];
+        uint32_t cEdgeX = pixX / 2U + (edge / 2U) * 4U;
+
+        for (uint32_t cRow = 0U; cRow < 8U; ++cRow)
+        {
+            uint32_t cY = pixY / 2U + cRow;
+            uint8_t maxBs = edgeBs[cRow >> 1U];
+            if (maxBs == 0U) continue;
+
+            for (int plane = 0; plane < 2; ++plane)
+            {
+                uint8_t* ptr = (plane == 0)
+                    ? frame.uRow(cY) + cEdgeX
+                    : frame.vRow(cY) + cEdgeX;
+
+                if (maxBs == 4U)
+                    filterChromaStrong(ptr[-1], (cEdgeX > 0U ? ptr[-2] : ptr[-1]),
+                                       ptr[0], ptr[1], edgeCAlpha, edgeCBeta);
+                else
+                    filterChromaWeak(ptr[-1], (cEdgeX > 0U ? ptr[-2] : ptr[-1]),
+                                     ptr[0], ptr[1], edgeCAlpha, edgeCBeta,
+                                     cTc0Table[edgeCIndexA][maxBs]);
+            }
+        }
+    }
+    for (uint32_t edge = 0U; edge < 4U; edge += 2U)
+    {
+        if (edge == 0U && mbY == 0U) continue;
+        int32_t edgeQp = chromaQp;
+        if (edge == 0U)
+        {
+            int32_t neighborQp = cChromaQpTable[clampQpIdx(mbQps[mbIdx - widthInMbs] + chromaQpIndexOffset)];
+            edgeQp = (chromaQp + neighborQp + 1) >> 1;
+        }
+        int32_t edgeCIndexA = clampQpIdx(edgeQp + alphaOffset);
+        int32_t edgeCAlpha = cAlphaTable[edgeCIndexA];
+        int32_t edgeCBeta = cBetaTable[clampQpIdx(edgeQp + betaOffset)];
+        const auto& hEdgeBs = horizontalBs[edge];
+        uint32_t cEdgeY = pixY / 2U + (edge / 2U) * 4U;
+
+        for (uint32_t cCol = 0U; cCol < 8U; ++cCol)
+        {
+            uint32_t cX = pixX / 2U + cCol;
+            uint8_t maxBs = hEdgeBs[cCol >> 1U];
+            if (maxBs == 0U) continue;
+
+            for (int plane = 0; plane < 2; ++plane)
+            {
+                auto getRow = [&](uint32_t r) -> uint8_t* {
+                    return plane == 0 ? frame.uRow(r) : frame.vRow(r);
+                };
+
+                uint8_t* qPtr = getRow(cEdgeY) + cX;
+                uint8_t* pPtr = getRow(cEdgeY - 1U) + cX;
+                uint8_t p1val = (cEdgeY >= 2U) ? *(getRow(cEdgeY - 2U) + cX) : *pPtr;
+                uint8_t q1val = (cEdgeY + 1U < frame.height() / 2U) ? *(getRow(cEdgeY + 1U) + cX) : *qPtr;
+
+                if (maxBs == 4U)
+                    filterChromaStrong(*pPtr, p1val, *qPtr, q1val, edgeCAlpha, edgeCBeta);
+                else
+                    filterChromaWeak(*pPtr, p1val, *qPtr, q1val,
+                                     edgeCAlpha, edgeCBeta, cTc0Table[edgeCIndexA][maxBs]);
+            }
+        }
+    }
+}
+
 /** Deblock one macroblock (luma + chroma).
  *
  *  Filters all 4 vertical and 4 horizontal edges.
@@ -288,6 +378,7 @@ inline void filterChromaStrong(uint8_t& p0, const uint8_t& p1,
  *  @param chromaQpIndexOffset PPS chroma_qp_index_offset
  *  @param widthInMbs         Frame width in MBs
  *  @param heightInMbs        Frame height in MBs
+ *  @param skipChroma         Filter only Y; U/V planes may be absent
  */
 inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
                        bool isIntra, int32_t alphaOffset, int32_t betaOffset,
@@ -296,7 +387,8 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
                        const int32_t* mbQps,
                        const uint8_t* mbTransform8x8,
                        int32_t chromaQpIndexOffset,
-                       uint16_t widthInMbs, uint16_t heightInMbs) noexcept
+                       uint16_t widthInMbs, uint16_t heightInMbs,
+                       bool skipChroma = false) noexcept
 {
     uint32_t mbIdx = mbY * widthInMbs + mbX;
     (void)heightInMbs;
@@ -304,8 +396,6 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
 
     // This MB's luma and chroma QP — used for internal edges.
     int32_t qp = mbQps[mbIdx];
-    int32_t chromaQpIdx = clampQpIdx(qp + chromaQpIndexOffset);
-    int32_t chromaQp = cChromaQpTable[chromaQpIdx];
 
     // Internal-edge thresholds (same MB on both sides).
     int32_t indexA = clampQpIdx(qp + alphaOffset);
@@ -313,14 +403,15 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
     int32_t alpha = cAlphaTable[indexA];
     int32_t beta = cBetaTable[indexB];
 
-    int32_t cIndexA = clampQpIdx(chromaQp + alphaOffset);
-    int32_t cIndexB = clampQpIdx(chromaQp + betaOffset);
-    int32_t cAlpha = cAlphaTable[cIndexA];
-    int32_t cBeta = cBetaTable[cIndexB];
+    // Keep the original joint early return: dropping cAlpha could change
+    // which luma boundary edges are visited when neighboring QPs differ.
+    int32_t chromaQp = cChromaQpTable[clampQpIdx(qp + chromaQpIndexOffset)];
+    int32_t cAlpha = cAlphaTable[clampQpIdx(chromaQp + alphaOffset)];
 
     if (alpha == 0 && cAlpha == 0)
         return; // No filtering needed at this QP
 
+    uint8_t verticalBs[4][4] = {}, horizontalBs[4][4] = {};
     uint32_t pixX = mbX * 16U;
     uint32_t pixY = mbY * 16U;
 
@@ -337,7 +428,6 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
 
         // For boundary edges, average QP of both MBs — §8.7.2.2.
         int32_t edgeAlpha = alpha, edgeBeta = beta, edgeIndexA = indexA;
-        int32_t edgeCAlpha = cAlpha, edgeCBeta = cBeta, edgeCIndexA = cIndexA;
         if (edge == 0U)
         {
             uint32_t leftMbIdx = mbY * widthInMbs + mbX - 1U;
@@ -345,17 +435,11 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
             edgeIndexA = clampQpIdx(qpAvg + alphaOffset);
             edgeAlpha = cAlphaTable[edgeIndexA];
             edgeBeta  = cBetaTable[clampQpIdx(qpAvg + betaOffset)];
-
-            int32_t leftChromaQp = cChromaQpTable[clampQpIdx(mbQps[leftMbIdx] + chromaQpIndexOffset)];
-            int32_t cQpAvg = (chromaQp + leftChromaQp + 1) >> 1;
-            edgeCIndexA = clampQpIdx(cQpAvg + alphaOffset);
-            edgeCAlpha  = cAlphaTable[edgeCIndexA];
-            edgeCBeta   = cBetaTable[clampQpIdx(cQpAvg + betaOffset)];
         }
 
         // Precompute BS for 4 block rows on this edge (one per 4x4 block pair).
         // BS only changes at 4-row boundaries, so we compute 4 values and reuse.
-        uint8_t edgeBs[4];
+        auto& edgeBs = verticalBs[edge];
         {
             uint32_t mbIdxP = (edge == 0U) ? (mbY * widthInMbs + mbX - 1U) : mbIdx;
             for (uint32_t blkRow = 0U; blkRow < 4U; ++blkRow)
@@ -401,40 +485,6 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
                                edgeAlpha, edgeBeta, tc0);
             }
         }
-
-        // Chroma vertical edges — ITU-T H.264 §8.7.2.
-        // Chroma edges at MB boundary (edge=0) and 8-pixel internal (edge=2).
-        // BS is derived from the corresponding luma edge per §8.7.2.1: each
-        // chroma row cRow maps to luma rows 2*cRow and 2*cRow+1, both in luma
-        // block-row (cRow>>1). The luma BS was already computed per blkRow in
-        // edgeBs[] above, so we reuse it directly.
-        if (edge == 0U || edge == 2U)
-        {
-            uint32_t cEdgeX = pixX / 2U + (edge / 2U) * 4U;
-            if (edge == 0U && mbX == 0U) continue;
-
-            for (uint32_t cRow = 0U; cRow < 8U; ++cRow)
-            {
-                uint32_t cY = pixY / 2U + cRow;
-                uint8_t maxBs = edgeBs[cRow >> 1U];
-                if (maxBs == 0U) continue;
-
-                for (int plane = 0; plane < 2; ++plane)
-                {
-                    uint8_t* ptr = (plane == 0)
-                        ? frame.uRow(cY) + cEdgeX
-                        : frame.vRow(cY) + cEdgeX;
-
-                    if (maxBs == 4U)
-                        filterChromaStrong(ptr[-1], (cEdgeX > 0U ? ptr[-2] : ptr[-1]),
-                                           ptr[0], ptr[1], edgeCAlpha, edgeCBeta);
-                    else
-                        filterChromaWeak(ptr[-1], (cEdgeX > 0U ? ptr[-2] : ptr[-1]),
-                                         ptr[0], ptr[1], edgeCAlpha, edgeCBeta,
-                                         cTc0Table[edgeCIndexA][maxBs]);
-                }
-            }
-        }
     }
 
     // ── Horizontal edges (top boundary + 3 internal) ────────────────
@@ -450,7 +500,6 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
 
         // For boundary edges, average QP of both MBs — §8.7.2.2.
         int32_t edgeAlpha = alpha, edgeBeta = beta, edgeIndexA = indexA;
-        int32_t edgeCAlpha = cAlpha, edgeCBeta = cBeta, edgeCIndexA = cIndexA;
         if (edge == 0U)
         {
             uint32_t topMbIdx = (mbY - 1U) * widthInMbs + mbX;
@@ -458,16 +507,10 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
             edgeIndexA = clampQpIdx(qpAvg + alphaOffset);
             edgeAlpha = cAlphaTable[edgeIndexA];
             edgeBeta  = cBetaTable[clampQpIdx(qpAvg + betaOffset)];
-
-            int32_t topChromaQp = cChromaQpTable[clampQpIdx(mbQps[topMbIdx] + chromaQpIndexOffset)];
-            int32_t cQpAvg = (chromaQp + topChromaQp + 1) >> 1;
-            edgeCIndexA = clampQpIdx(cQpAvg + alphaOffset);
-            edgeCAlpha  = cAlphaTable[edgeCIndexA];
-            edgeCBeta   = cBetaTable[clampQpIdx(cQpAvg + betaOffset)];
         }
 
         // Precompute BS for 4 block columns on this horizontal edge.
-        uint8_t hEdgeBs[4];
+        auto& hEdgeBs = horizontalBs[edge];
         {
             uint32_t mbIdxP = (edge == 0U) ? ((mbY - 1U) * widthInMbs + mbX) : mbIdx;
             for (uint32_t blkCol = 0U; blkCol < 4U; ++blkCol)
@@ -518,42 +561,13 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
                 filterLumaWeak(*yP, p1, p2, *yQ, q1, q2, edgeAlpha, edgeBeta, tc0);
             }
         }
-
-        // Chroma horizontal edges — ITU-T H.264 §8.7.2.
-        // BS from corresponding luma edge per §8.7.2.1: chroma column cCol
-        // maps to luma columns 2*cCol and 2*cCol+1, both in luma block-col
-        // (cCol>>1). Reuse hEdgeBs[] computed above.
-        if (edge == 0U || edge == 2U)
-        {
-            uint32_t cEdgeY = pixY / 2U + (edge / 2U) * 4U;
-            if (edge == 0U && mbY == 0U) continue;
-
-            for (uint32_t cCol = 0U; cCol < 8U; ++cCol)
-            {
-                uint32_t cX = pixX / 2U + cCol;
-                uint8_t maxBs = hEdgeBs[cCol >> 1U];
-                if (maxBs == 0U) continue;
-
-                for (int plane = 0; plane < 2; ++plane)
-                {
-                    auto getRow = [&](uint32_t r) -> uint8_t* {
-                        return plane == 0 ? frame.uRow(r) : frame.vRow(r);
-                    };
-
-                    uint8_t* qPtr = getRow(cEdgeY) + cX;
-                    uint8_t* pPtr = getRow(cEdgeY - 1U) + cX;
-                    uint8_t p1val = (cEdgeY >= 2U) ? *(getRow(cEdgeY - 2U) + cX) : *pPtr;
-                    uint8_t q1val = (cEdgeY + 1U < frame.height() / 2U) ? *(getRow(cEdgeY + 1U) + cX) : *qPtr;
-
-                    if (maxBs == 4U)
-                        filterChromaStrong(*pPtr, p1val, *qPtr, q1val, edgeCAlpha, edgeCBeta);
-                    else
-                        filterChromaWeak(*pPtr, p1val, *qPtr, q1val,
-                                         edgeCAlpha, edgeCBeta, cTc0Table[edgeCIndexA][maxBs]);
-                }
-            }
-        }
     }
+    // Chroma filtering is independent of Y, so choose once for the whole MB.
+    if (!skipChroma)
+        deblockChromaMb(frame, mbX, mbY, alphaOffset, betaOffset,
+                        mbQps, chromaQpIndexOffset, widthInMbs,
+                        verticalBs, horizontalBs);
+
 }
 
 } // namespace sub0h264
