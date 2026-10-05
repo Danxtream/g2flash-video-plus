@@ -52,7 +52,8 @@ class Dpb
 {
 public:
     /** Initialize DPB for given SPS parameters. */
-    bool init(uint16_t width, uint16_t height, uint8_t numRefFrames) noexcept
+    bool init(uint16_t width, uint16_t height, uint8_t numRefFrames,
+              bool skipChroma = false) noexcept
     {
         const size_t entryCount = std::max(numRefFrames + 1U, 2U);
         if (entries_.capacity() < entryCount)
@@ -69,6 +70,7 @@ public:
         width_ = width;
         height_ = height;
         maxRefFrames_ = numRefFrames;
+        skipChroma_ = skipChroma;
         // Need at least 2 entries: one for current decode target + one reference.
         // With numRefFrames=0, the stream still needs a reference for P-frames.
         // §A.3.1: maxDpbFrames = Max(1, max_num_ref_frames).
@@ -635,10 +637,10 @@ public:
     /** @return Bytes occupied by allocated I420 frame planes. */
     uint32_t allocatedFrameBytes() const noexcept
     {
-        const uint32_t pixels =
-            static_cast<uint32_t>(width_) * static_cast<uint32_t>(height_);
-        const uint32_t bytesPerFrame = pixels + (pixels / 2U);
-        return allocatedFrameCount() * bytesPerFrame;
+        uint32_t bytes = 0U;
+        for (const auto& e : entries_)
+            bytes += e.frame.allocatedBytes();
+        return bytes;
     }
 
 private:
@@ -648,7 +650,7 @@ private:
             entry.frame.width() != width_ ||
             entry.frame.height() != height_)
         {
-            if (!entry.frame.allocate(width_, height_))
+            if (!entry.frame.allocate(width_, height_, skipChroma_))
             {
                 allocationFailure_ = entry.frame.allocationFailure();
                 return nullptr;
@@ -665,6 +667,7 @@ private:
     uint16_t width_ = 0U;
     uint16_t height_ = 0U;
     uint8_t maxRefFrames_ = 0U;
+    bool skipChroma_ = false;
     AllocationFailure allocationFailure_{};
 
     /// Cached L0 reference list — built by buildRefListL0(), used by getReference().
