@@ -145,6 +145,9 @@ static uint32_t cfw_message_complete(cfw_message_stream *stream, uint8_t here,
     }
     int result = cfw_message_reply(stream, here, origin,
         valid ? CFW_MESSAGE_ACK : CFW_MESSAGE_NACK, (uint16_t)size);
+#ifdef CFW_MESSAGE_AFTER_ACK
+    if (valid && result == 0) CFW_MESSAGE_AFTER_ACK(data, size);
+#endif
     if (decoded) CFW_MESSAGE_FREE(decoded);
     if (stream->buffer) CFW_MESSAGE_FREE(stream->buffer);
     stream->buffer = 0;

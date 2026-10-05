@@ -73,7 +73,7 @@ APP_PREAMBLE  = 0x20         # it programs payload[0x20:], so payload[k] -> 0x43
 OTA_FLAG_ADDR = 0x007FE000   # OTA magic word (last 8 KB of MRAM)
 MRAM_END      = 0x00800000
 APP_MAX_END   = 0x007F0000   # conservative ceiling: leave the top ~56 KB for NV + flag
-BLOB_ALIGN    = 4            # 4-byte-align each appended blob (Thumb literal pools)
+BLOB_ALIGN    = 32           # embedded capsule alignment, including its constants
 
 # BLE policy validated with sustained 2,000-byte/window-3 transfers (~41 KiB/s)
 # and a day of battery use. These are Apollo host changes, not EM9305 ROM edits.
@@ -326,6 +326,8 @@ def layout(img):
     patch source) and append it at the tail of the main-app payload. Returns
     (append_bytes, in_place_patches, mainapp=(idx,off,old_ps)). Enforces the MRAM
     ceiling (duplicate of g2flash.check_mainapp_fits_mram)."""
+    from decoder_speed.abi import validate_stock
+    validate_stock(img)
     validate_ring_battery_stock(img)
     validate_message_transport_stock(img)
     validate_compass_calibration_stock(img)

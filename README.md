@@ -1,5 +1,11 @@
 # g2flash
 
+Modified version of https://github.com/jimrandomh/g2flash by Danxtream, 2026.
+
+This local experiment measures the unchanged G2 Sub0h264 decoder from MRAM
+and RAM on jim's Even 2.2.9.22 / Faceclaw/16 base. It is inert until a PC test
+command. See [the measurement protocol](docs/decoder-speed-test.md).
+
 `g2flash` is a utility for installing firmware on Even Realities G2 smart
 glasses, as well as a collection of firmware modifications that add features and
 fix limitations of the glasses. The modifications themselves are made with
@@ -356,6 +362,23 @@ PRs welcome, especially of firmware mods that unlock functionality that isn't
 usable in the stock firmware. Please only submit changes that you've tested on
 a real device.
 
+
+## Third-party code
+
+[Sub0h264](https://github.com/CraigHutchinson/Sub0h264) by Craig Hutchinson
+is vendored in `third-party/sub0h264/` from commit
+[`15421eeade48774929bc0221ea0418a25462c222`](https://github.com/CraigHutchinson/Sub0h264/commit/15421eeade48774929bc0221ea0418a25462c222),
+with modifications for the G2 decoder. Sub0h264 and these modifications are
+licensed under MIT; see [LICENSE.md](third-party/sub0h264/LICENSE.md).
+
+> **Patent Notice:** H.264/AVC may be covered by patents in some jurisdictions.
+> The patent portfolio is administered by [Via Licensing Alliance](https://via-la.com/licensing-programs/avc-h-264/)
+> (formerly MPEG LA). Most patents have expired; the last known US patents expire
+> ~2027-2028. This project provides software under the MIT license which grants
+> **copyright only, not patent rights**. Users are responsible for determining
+> whether a patent license is required for their use case. See
+> [Via LA](https://via-la.com/licensing-programs/avc-h-264/) or the
+> [Wikimedia patent tracker](https://meta.wikimedia.org/wiki/Have_the_patents_for_H.264_MPEG-4_AVC_expired_yet%3F).
 
 # Acknowledgements
 

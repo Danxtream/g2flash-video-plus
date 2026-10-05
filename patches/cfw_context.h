@@ -122,6 +122,7 @@ typedef struct {
     uint8_t ancs_connection, ancs_stage;
     uint16_t ancs_sequence;
     uint32_t ancs_token;
+    void *decoder_speed_session; /* measurement state; zero until mode 31 */
 } customCfwContext;
 
 #define CFW_CTX_SLOT  0x2029f4a8U    /* first word of the CFW-reserved TLSF tail */

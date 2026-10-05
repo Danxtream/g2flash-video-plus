@@ -20,6 +20,7 @@
  * turn those into absolute relocations that build.py rejects.
  */
 
+#include "decoder_speed_capsule.h"
 #include "memory.c"
 #include "utils.c"
 #include "protobuf.c"
@@ -40,3 +41,4 @@
 #include "debug.c"
 
 #include "ancs_relay.c"
+#include "decoder_speed/controller.c"
