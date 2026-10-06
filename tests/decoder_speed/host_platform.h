@@ -11,9 +11,15 @@ static customCfwContext context={1,0};
 static uint32_t tick, allocations, releases, allocation_attempts, fail_at;
 static uint32_t thread_new_fail, terminated, timer_fail, timer_deleted, mutex_busy;
 static uint32_t regs[16], mpu_base, mpu_limit, mpu_mair;
+static uint32_t calibration_rate=250000;
 static uint8_t reply[10];
 static void *import_slot;
 #define DS_IMPORT_SLOT ((uintptr_t)&import_slot)
+#include "../../patches/decoder_speed/capsule.h"
+static void *ds_host_init(void *memory,uint32_t size,uint32_t skip);
+static void ds_host_destroy(void *state);
+static int ds_host_decode(void *state,const uint8_t *nal,uint32_t size);
+static int ds_host_frame(const void *state,ds_frame_info *info);
 #define FW_MS_TICK tick
 #define DS_CAPSULE_BYTES 136792U
 #define DS_OFFSET_DS_SELFTEST 0
@@ -89,4 +95,4 @@ static uint32_t *host_reg(uint32_t addr) {
 #define DS_REG(addr) (*host_reg(addr))
 static void ds_read_control(uint32_t *control,uint32_t *ipsr) { *control=regs[8]; *ipsr=regs[9]; }
 static void ds_barrier(int instruction) { (void)instruction; }
-static void ds_nop(void) { ++tick; }
+static void ds_nop(void) { ++tick; regs[7]+=calibration_rate; }

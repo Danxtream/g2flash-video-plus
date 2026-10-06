@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from datetime import datetime
 import queue
 import secrets
 import statistics
@@ -19,10 +20,11 @@ import sys
 import time
 import zlib
 
+import g2flash
 from g2flash import Bridge, CTRL, DroidBridgeTransport, LocalBleTransport, authenticate, crc16, parse_connection_string
 from send_message_probe import LENS_BITS, make_packets, parse_acks
 
-MAGIC = 0x44530103
+MAGIC = 0x44530203
 CLIP_BYTES = 23921
 CLIP_SHA256 = 'c80a8087c83bed781374b3475987d9e772b517177ba244b250704046b354da0b'
 CLIP_CRC = 0xc81c1bdc
@@ -32,13 +34,27 @@ PROFILES = (
 HELLO, BEGIN, WRITE, SEAL, RUN, READ, ABORT, CLOSE, HEAPS = range(9)
 SETUPS = {'full-mram': 0, 'full-ram': 1}
 HEADER_WORDS, FRAMES, PASSES, WARMUPS = 128, 32, 5, 2
+FRAME_WORDS = 5
+RESULT_WORDS = HEADER_WORDS+FRAMES*(PASSES+WARMUPS)*FRAME_WORDS
+SCAN_SECONDS = 60
+OP_NAMES = dict(enumerate(('HELLO', 'BEGIN', 'WRITE', 'SEAL', 'RUN', 'READ', 'ABORT', 'CLOSE', 'HEAPS')))
+
+
+def progress(text, file=None):
+    """Flush each step so a long scan, upload or result read stays visible."""
+    print(f'[{datetime.now().astimezone().isoformat(timespec="seconds")}] {text}', file=file, flush=True)
+
+
+def exception_text(error):
+    """Name silent failures, including queue.Empty and backend timeouts."""
+    return f'{type(error).__name__}: {str(error) or repr(error)}'
 
 
 def message(op, session, args=b''):
     """Encode a versioned, bounded experiment command inside the old transport."""
     if not 0 <= op <= HEAPS or not 0 <= session <= 65535:
         raise ValueError('invalid operation/session')
-    return b'\x1fDS\x01' + bytes([op]) + struct.pack('<H', session) + args
+    return b'\x1fDS\x02' + bytes([op]) + struct.pack('<H', session) + args
 
 
 def parse_result(frame):
@@ -70,6 +86,7 @@ def linux_path(path):
 
 def prepare(source, clip_path, reference_path):
     """Freeze the approved segment and calculate both modes with the real capsule."""
+    progress('Reading and checking the PC reference clip')
     raw = Path(source).read_bytes()[:CLIP_BYTES]
     profile = check_clip(raw)
     clip_path = Path(clip_path).resolve()
@@ -85,10 +102,12 @@ def prepare(source, clip_path, reference_path):
         linux_path(root/'patches/decoder_speed/capsule.cpp'),
         linux_path(root/'tests/decoder_speed/reference.cpp'), '-o', linux_path(executable)]
     prefix = ['wsl', '-d', 'Ubuntu', '--exec'] if os.name == 'nt' else []
+    progress('Compiling the PC decoder reference')
     subprocess.run(prefix+command, check=True)
     clip_path.write_bytes(raw)
     hashes = {}
     for skip in (0, 1):
+        progress(f'PC reference: skip_chroma={skip}, seven passes')
         p = subprocess.run(prefix+[linux_path(executable), linux_path(clip_path), str(skip)],
                            capture_output=True, text=True, check=True)
         (reference_path.parent/f'reference-skip-{skip}.log').write_text(p.stderr+p.stdout, encoding='utf-8')
@@ -105,7 +124,7 @@ def prepare(source, clip_path, reference_path):
     reference = dict(protocol=1, clip_sha256=profile['sha256'], clip_crc32=profile['crc32'],
         dimensions=profile['dimensions'], frames=FRAMES, decoder='59c66b1', hashes=hashes)
     reference_path.write_text(json.dumps(reference, indent=2)+'\n', encoding='utf-8')
-    print(f'PC reference PASS: 448 frames, both modes and seven repeats; {reference_path}')
+    progress(f'PC reference PASS: 448 frames, both modes and seven repeats; {reference_path}')
 
 
 class Client:
@@ -117,7 +136,21 @@ class Client:
         self.session = secrets.randbelow(65535)+1
 
     def connect(self):
-        self.transport.connect()
+        if isinstance(self.transport, LocalBleTransport):
+            progress(f'Scanning for the lens for up to {SCAN_SECONDS} s, then connecting; '
+                     'both lenses must be paired with Windows')
+            # Scope the longer scan to this PC measurement connection; leave
+            # the upstream flasher and its normal timeout unchanged.
+            previous_timeout = g2flash.SCAN_TIMEOUT
+            try:
+                g2flash.SCAN_TIMEOUT = SCAN_SECONDS
+                self.transport.connect()
+            finally:
+                g2flash.SCAN_TIMEOUT = previous_timeout
+        else:
+            progress('Connecting through DroidBridge')
+            self.transport.connect()
+        progress('Connected; discovering the private service')
         if not self.transport.discover():
             raise RuntimeError('service discovery failed')
         self.max_write = self.mtu-3
@@ -126,12 +159,15 @@ class Client:
             if characteristic is None or 'write-without-response' not in characteristic.properties:
                 raise RuntimeError('private command characteristic unavailable')
             self.max_write = characteristic.max_write_without_response_size
+        progress('Enabling private notifications')
         self.transport.set_notify(CTRL[0], CTRL[2], True)
         if not isinstance(self.transport, LocalBleTransport):
             time.sleep(2.5)
         # Stock authentication avoids 2.2.9's ~30 s disconnect for an otherwise
         # unauthenticated connection. It runs before uploading or timing.
+        progress('Authenticating the lens')
         authenticate(self.transport)
+        progress(f'Connected and authenticated; largest write {self.max_write} bytes')
 
     def receive(self, wait):
         characteristic, frame = self.transport.notes.get(timeout=wait)
@@ -144,6 +180,9 @@ class Client:
         return frame
 
     def command(self, op, args=b'', result_index=None):
+        if op != READ:
+            detail = f' offset={struct.unpack("<I", args[:4])[0]}' if op == WRITE else ''
+            progress(f'Sending {OP_NAMES[op]}{detail}')
         if result_index is not None:
             self.results.pop(result_index, None)
         payload = message(op, self.session, args)
@@ -185,36 +224,54 @@ class Client:
 
 def summarize(words, reference, setup, skip, uncached):
     """Void the entire run on any identity, status, count or Y-hash mismatch."""
-    expected_length = HEADER_WORDS+FRAMES*(PASSES+WARMUPS)*4
+    expected_length = RESULT_WORDS
     profile = next((p for p in PROFILES if p['sha256']==reference.get('clip_sha256')),None)
     if (len(words) != expected_length or words[0] != MAGIC or words[1] != (SETUPS[setup] | skip<<8 | uncached<<16)
             or not profile or words[2] or words[3] != expected_length
             or words[4:7] != [FRAMES,PASSES,profile['crc32']]
             or words[12:15] != profile['dimensions']+[profile['bytes']]
-            or words[37] != WARMUPS or reference.get('decoder') != '59c66b1'):
+            or words[15] != FRAME_WORDS or words[37] != WARMUPS or reference.get('decoder') != '59c66b1'
+            or any(type(word) is not int or not 0 <= word <= 0xffffffff for word in words)):
         raise ValueError('run metadata invalid; timing result void')
+    hashes = reference.get('hashes', {}).get(str(skip))
+    if not isinstance(hashes, list) or len(hashes) != FRAMES:
+        raise ValueError('PC hash reference format invalid; entire run void')
     rows, frame_rows = [], []
     for frame in range(FRAMES):
         samples = []
         for run in range(PASSES+WARMUPS):
-            i = HEADER_WORDS+(run*FRAMES+frame)*4
-            cycles, hashed, ticks, rate = words[i:i+4]
-            if (hashed != reference['hashes'][str(skip)][frame] or not 1000 <= rate <= 500000
-                    or not 0 < cycles <= 1000000000 or ticks > 2000
-                    or cycles > rate*(ticks+2) or (ticks>2 and cycles < rate*(ticks-2))):
-                raise ValueError(f'frame {frame}, repeat {run}: Y/clock mismatch; entire run void')
-            ms = cycles/rate
-            if run < WARMUPS:
-                continue
-            samples.append(ms)
-            rows.append(dict(frame=frame, repeat=run, cycles=cycles, ticks=ticks, hash=hashed,
-                             cycles_per_ms=rate, effective_mhz=rate/1000, ms=ms))
+            i = HEADER_WORDS+(run*FRAMES+frame)*FRAME_WORDS
+            cycles, hashed, ticks, before, after = words[i:i+FRAME_WORDS]
+            if hashed != hashes[frame]:
+                raise ValueError(f'frame {frame}, repeat {run}: Y mismatch; entire run void')
+            flags = []
+            rate = (before+after)/2 if 1000 <= before <= 500000 and 1000 <= after <= 500000 else None
+            if rate is None:
+                flags.append('clock calibration unavailable/out of range')
+            elif abs(after-before) > before*.04:
+                flags.append('clock changed by more than 4%')
+            if not 0 < cycles <= 1000000000 or ticks > 2000:
+                flags.append('cycle/tick delta out of range')
+            if rate is not None and (cycles > rate*(ticks+2) or (ticks>2 and cycles < rate*(ticks-2))):
+                flags.append('cycles and ticks disagree (2 ms tick tolerance)')
+            row = dict(frame=frame, repeat=run, warmup=run<WARMUPS, cycles=cycles, ticks=ticks, hash=hashed,
+                clock_before=before, clock_after=after, clock_before_mhz=before/1000, clock_after_mhz=after/1000,
+                cycles_per_ms=rate, effective_mhz=rate/1000 if rate else None,
+                ms=cycles/rate if rate else None, cycle_ms=cycles/rate if rate else None,
+                tick_ms=float(ticks), flagged=bool(flags), timing_flags=flags)
+            rows.append(row)
+            if not row['warmup'] and not flags:
+                samples.append(row)
         frame_rows.append(dict(frame=frame, type='IDR' if frame == 0 else 'P',
-            median_ms=statistics.median(samples), min_ms=min(samples), max_ms=max(samples)))
-    return dict(valid=True, setup=setup, skip_chroma=bool(skip), uncached_frames_tables=bool(uncached),
+            included=len(samples), excluded=PASSES-len(samples), **timing_summary(samples)))
+    measured = [row for row in rows if not row['warmup']]
+    included = [row for row in measured if not row['flagged']]
+    return dict(valid=True, timing_valid=bool(included), setup=setup, skip_chroma=bool(skip), uncached_frames_tables=bool(uncached),
         dimensions=profile['dimensions'], pool_slots=[words[i:i+2] for i in range(40,104,2) if words[i]],
-        samples=rows, frames=frame_rows, median_ms=statistics.median([row['ms'] for row in rows]),
-        min_ms=min(row['ms'] for row in rows), max_ms=max(row['ms'] for row in rows),
+        samples=rows, frames=frame_rows, **timing_summary(included),
+        measured_frames=len(measured), included_frames=len(included), excluded_frames=len(measured)-len(included),
+        flagged_frames=sum(row['flagged'] for row in rows),
+        warmup_flagged_frames=sum(row['flagged'] for row in rows if row['warmup']),
         heap_stats_before=words[16:22], heap_stats_reserved=words[22:28],
         memory_addresses=words[28:34], hot_bytes=words[34], state_bytes=words[35],
         pool_highwater=words[36], stack_highwater=words[38], capsule_bytes=words[7], mpu_control=words[9],
@@ -223,7 +280,19 @@ def summarize(words, reference, setup, skip, uncached):
         cold_note='Fresh decoder per repeat: first IDR/P include lazy DPB/table initialization from reserved slots')
 
 
+def timing_summary(samples):
+    """Return both time sources, or null summaries when all samples were flagged."""
+    values = {}
+    for field, suffix in (('ms', 'ms'), ('tick_ms', 'tick_ms')):
+        times = [row[field] for row in samples]
+        values.update({f'median_{suffix}': statistics.median(times) if times else None,
+                       f'min_{suffix}': min(times) if times else None,
+                       f'max_{suffix}': max(times) if times else None})
+    return values
+
+
 def run(args):
+    progress('Reading and validating the clip and PC Y-hash reference')
     raw = Path(args.clip).read_bytes()
     profile = check_clip(raw)
     reference = json.loads(Path(args.reference).read_text(encoding='utf-8'))
@@ -235,6 +304,7 @@ def run(args):
     session_open = False
     try:
         if connection['method'] == 'droidbridge':
+            progress('Opening the DroidBridge websocket')
             bridge = Bridge(connection['base'],connection['token']); bridge.start_ws()
             deadline = time.monotonic()+20
             while not bridge.ws_open:
@@ -248,40 +318,64 @@ def run(args):
             raise RuntimeError('wrong experiment firmware')
         client.command(BEGIN,struct.pack('<IIHH',profile['bytes'],profile['crc32'],*profile['dimensions']))
         session_open = True
+        progress(f'Uploading {len(raw)} clip bytes in 2 KiB chunks')
         for offset in range(0,len(raw),2048):
             client.command(WRITE,struct.pack('<I',offset)+raw[offset:offset+2048])
         client.command(SEAL)
+        progress('Upload sealed; reserving and starting the decoder worker')
         client.results.pop(0xffff,None)
         client.command(RUN,bytes([SETUPS[args.setup],args.skip_chroma,5,args.uncached]))
         # Stay silent while decoding. All result reads follow completion or the
         # 60-second worker deadline; reads never perturb a valid timed run.
         deadline = time.monotonic()+75
+        next_progress = time.monotonic()
         while 0xffff not in client.results and time.monotonic() < deadline:
+            if time.monotonic() >= next_progress:
+                progress(f'Waiting for completion ({max(0, deadline-time.monotonic()):.0f} s remaining); no BLE polling')
+                next_progress = time.monotonic()+5
             try: client.receive(min(1,deadline-time.monotonic()))
             except queue.Empty: pass
         phase = client.results.get(0xffff)
         if phase is None: phase = client.read(0xffff)
+        progress(f'Worker phase {phase}; reading result bounds')
         count = client.read(3)
-        if count > 1024 or count < HEADER_WORDS:
+        if count > RESULT_WORDS or count < HEADER_WORDS:
             raise RuntimeError('invalid result bound')
-        words = [client.read(i) for i in range(count)]
+        words = []
+        for i in range(count):
+            if i == 0 or (i+1)%100 == 0 or i+1 == count:
+                progress(f'Reading results: value {i+1}/{count}')
+            words.append(client.read(i))
         output = Path(args.output); output.parent.mkdir(parents=True,exist_ok=True)
         raw_path = output.with_suffix('.raw.json')
         raw_path.write_text(json.dumps(dict(phase=phase, words=words),indent=2)+'\n',encoding='utf-8')
+        progress(f'Raw evidence saved: {raw_path}')
         if phase != 4:
             raise RuntimeError(f'firmware run failed: phase={phase}, error={words[2]}; raw results {raw_path}')
+        progress('Checking every Y hash and flagging timing anomalies')
         summary = summarize(words,reference,args.setup,args.skip_chroma,args.uncached)
         summary.update(lens=args.lens, clip_sha256=profile['sha256'], hardware_measurement=True)
+        progress('Closing the session and checking released heaps')
         summary['heap_stats_released'] = client.close_session()
         session_open = False
         output.write_text(json.dumps(summary,indent=2)+'\n',encoding='utf-8')
-        print(f'Y hashes PASS: {FRAMES*(PASSES+WARMUPS)} frames. Decode median {summary["median_ms"]:.3f} ms, '
-              f'min {summary["min_ms"]:.3f}, max {summary["max_ms"]:.3f}. {output}')
+        progress(f'Y hashes PASS: {FRAMES*(PASSES+WARMUPS)} frames; '
+                 f'excluded {summary["excluded_frames"]}/{summary["measured_frames"]} measured frames '
+                 f'for timing anomalies ({summary["warmup_flagged_frames"]} flagged warmups).')
+        if summary['timing_valid']:
+            progress(f'Decode cycles: median {summary["median_ms"]:.3f} ms, min {summary["min_ms"]:.3f}, '
+                     f'max {summary["max_ms"]:.3f}; ticks: median {summary["median_tick_ms"]:.3f} ms, '
+                     f'min {summary["min_tick_ms"]:.3f}, max {summary["max_tick_ms"]:.3f}.')
+        else:
+            progress('No reliable timing samples remain; Y correctness passed and raw evidence is retained.')
+        progress(f'Summary saved: {output}')
     finally:
         if client:
             if session_open:
                 try: client.close_session()
-                except Exception as error: print(f'Close pending; session expires automatically: {error}',file=sys.stderr)
+                except Exception as error:
+                    progress(f'Close pending; session expires automatically: {exception_text(error)}', file=sys.stderr)
+            progress('Disconnecting the lens')
             client.transport.close()
         if bridge:
             bridge.close()
@@ -306,7 +400,7 @@ def main(argv=None):
         if args.action=='prepare': prepare(args.source,args.clip,args.reference)
         else: run(args)
     except Exception as error:
-        print(f'decoder speed test failed: {error}',file=sys.stderr); return 1
+        progress(f'Decoder speed test failed: {exception_text(error)}', file=sys.stderr); return 1
     return 0
 
 

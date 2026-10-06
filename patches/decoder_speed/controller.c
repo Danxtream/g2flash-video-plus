@@ -3,9 +3,10 @@
 #include "pool.h"
 #include "platform.h"
 #define DS_HEAP27 0x2000033cU
-#define DS_WORDS 1024U
 #define DS_HEADER_WORDS 128U
 #define DS_FRAMES 32U
+#define DS_FRAME_WORDS 5U
+#define DS_WORDS (DS_HEADER_WORDS + DS_FRAMES*7U*DS_FRAME_WORDS)
 #define DS_CLIP_BYTES 23921U
 #define DS_CLIP_CRC 0xc81c1bdcU
 #define DS_STACK_BYTES 16384U
@@ -294,10 +295,17 @@ static uint32_t ds_start_code(const uint8_t *p, uint32_t size, uint32_t at, uint
     *prefix=0; return size;
 }
 static int ds_pass(ds_session *s, uint32_t pass) {
+#ifdef DS_HOST_TEST
+    void *(*init)(void *,uint32_t,uint32_t) = ds_host_init;
+    void (*destroy)(void *) = ds_host_destroy;
+    int (*decode)(void *,const uint8_t *,uint32_t) = ds_host_decode;
+    int (*frame)(const void *,ds_frame_info *) = ds_host_frame;
+#else
     void *(*init)(void *,uint32_t,uint32_t) = (void *)(s->code+DS_OFFSET_DS_INIT+1);
     void (*destroy)(void *) = (void *)(s->code+DS_OFFSET_DS_DESTROY+1);
     int (*decode)(void *,const uint8_t *,uint32_t) = (void *)(s->code+DS_OFFSET_DS_DECODE+1);
     int (*frame)(const void *,ds_frame_info *) = (void *)(s->code+DS_OFFSET_DS_FRAME+1);
+#endif
     void *state = init(s->state,DS_STATE_BYTES,s->skip);
     if (!state) return 10;
     uint32_t prefix, cursor=ds_start_code(s->clip,DS_CLIP_BYTES,0,&prefix), count=0;
@@ -308,7 +316,6 @@ static int ds_pass(ds_session *s, uint32_t pass) {
         uint32_t type = s->clip[nal] & 31U;
         if (s->cancel || (int32_t)(FW_MS_TICK-s->run_deadline) >= 0) { error=11; break; }
         uint32_t rate = (type == 1 || type == 5) ? ds_calibrate() : 0;
-        if ((type == 1 || type == 5) && !rate) { error=12; break; }
         uint32_t tick0=FW_MS_TICK, c0=DS_CYCLES;
         int decoded=decode(state,s->clip+nal,next-nal);
         uint32_t cycles=DS_CYCLES-c0, ticks=FW_MS_TICK-tick0;
@@ -318,17 +325,17 @@ static int ds_pass(ds_session *s, uint32_t pass) {
             if (count >= DS_FRAMES || frame(state,&info) || info.width != 320 || info.height != 192
                 || info.stride != 320 || info.count != count+1 || !info.y) { error=14; break; }
             uint32_t after=ds_calibrate();
-            if (!after || (after > rate ? after-rate : rate-after) > rate/25
-                || ticks > 2000 || cycles > 1000000000U
-                || cycles > rate*(ticks+2) || (ticks>2 && cycles < rate*(ticks-2))) { error=15; break; }
+            // Clock anomalies are evidence, not decoder failures. The PC
+            // flags/excludes their timing while still checking every Y hash.
             uint32_t hash=~ds_crc(info.y,61440,~0U);
-            uint32_t row=DS_HEADER_WORDS+(pass*DS_FRAMES+count)*4;
+            uint32_t row=DS_HEADER_WORDS+(pass*DS_FRAMES+count)*DS_FRAME_WORDS;
             s->words[row]=cycles; s->words[row+1]=hash;
-            s->words[row+2]=ticks; s->words[row+3]=(rate+after)/2;
-            s->used_words=row+4;
+            s->words[row+2]=ticks; s->words[row+3]=rate; s->words[row+4]=after;
+            s->used_words=row+DS_FRAME_WORDS;
             ++count;
             DS_DELAY(1); // Normal scheduler, interrupts and watchdog remain live.
         }
+        if (s->cancel || (int32_t)(FW_MS_TICK-s->run_deadline) >= 0) { error=11; break; }
         cursor=next; prefix=next_prefix;
     }
     destroy(state);
@@ -379,11 +386,11 @@ complete:
 }
 
 static int ds_control(const uint8_t *data, uint32_t size) {
-    if (size < 7 || data[0] != 31 || data[1] != 'D' || data[2] != 'S' || data[3] != 1) return -1;
+    if (size < 7 || data[0] != 31 || data[1] != 'D' || data[2] != 'S' || data[3] != 2) return -1;
     uint32_t op=data[4], token=ds_rd16(data+5);
     customCfwContext *ctx = getCustomCfwContext();
     ds_session *s = ds_active();
-    if (op == DS_HELLO && size == 7) return ds_reply(token,0xffffU,0x44530103U);
+    if (op == DS_HELLO && size == 7) return ds_reply(token,0xffffU,0x44530203U);
     if (!token) return -1;
     if (op == DS_HEAPS && size == 9 && !s) {
         uint32_t index=ds_rd16(data+7);
@@ -436,9 +443,10 @@ static int ds_control(const uint8_t *data, uint32_t size) {
         if (s->phase == DS_RUNNING) return s->setup == setup && s->skip == skip && s->uncached == uncached ? 0 : -1;
         if (s->phase != DS_SEALED) return -1;
         s->setup=setup; s->skip=skip; s->uncached=uncached;
-        s->words[0]=0x44530103U; s->words[1]=(setup | skip<<8 | uncached<<16);
+        s->words[0]=0x44530203U; s->words[1]=(setup | skip<<8 | uncached<<16);
         s->words[4]=DS_FRAMES; s->words[5]=5; s->words[6]=DS_CLIP_CRC; s->words[7]=DS_CAPSULE_BYTES;
         s->words[12]=320; s->words[13]=192; s->words[14]=DS_CLIP_BYTES;
+        s->words[15]=DS_FRAME_WORDS;
         if (!ds_prepare(s)) return -1;
         ds_thread_attr attr={"decoder-speed",0,s->tcb,sizeof(s->tcb),s->stack,DS_STACK_BYTES,8,0,0};
         s->run_deadline=FW_MS_TICK+60000U;
@@ -458,7 +466,7 @@ static int ds_control(const uint8_t *data, uint32_t size) {
     return -1;
 }
 static void ds_after_ack(const uint8_t *data, uint32_t size) {
-    if (size != 11 || data[0] != 31 || data[1] != 'D' || data[2] != 'S' || data[3] != 1 || data[4] != DS_RUN) return;
+    if (size != 11 || data[0] != 31 || data[1] != 'D' || data[2] != 'S' || data[3] != 2 || data[4] != DS_RUN) return;
     customCfwContext *ctx=peekCustomCfwContext();
     if (!ctx || DS_MUTEX_TAKE(ctx->image_mutex,10) != 0) return;
     ds_session *s=ds_active();
