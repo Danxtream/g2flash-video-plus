@@ -43,9 +43,10 @@ class LinkTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_capsule_identical_at_three_load_addresses(self):
-        for address in (0x7cb000,0x20275000,0x20278000):
-            actual, reference = lld_bytes(ROOT/'obj/ds_closed.o',address,self.here)
-            self.assertEqual(actual,reference)
+        for name in ('small','mixed'):
+            for address in (0x7cb000,0x20275000,0x20278000):
+                actual, reference = lld_bytes(ROOT/f'obj/ds_{name}_closed.o',address,self.here)
+                self.assertEqual(actual,reference)
 
     def test_c_blob_multiple_sections_identical_to_lld(self):
         for address in (0x7bea80,0x438000):

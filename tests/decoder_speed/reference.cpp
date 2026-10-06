@@ -1,5 +1,6 @@
-// Host proof of firmware A's capsule and reserved-pool path. Clips are arguments.
+// Host proof of the measurement capsule and reserved-pool path. Clips are arguments.
 #include "../../patches/decoder_speed/pool.h"
+#include "../../patches/decoder_speed/clips.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -30,11 +31,11 @@ int main(int argc,char** argv) {
     bool skip=std::atoi(argv[2])!=0;
     FILE* file=std::fopen(argv[1],"rb"); if(!file) return 2;
     std::fseek(file,0,SEEK_END); long length=std::ftell(file); std::rewind(file);
-    if(length!=23921) return 3;
+    if(length<=0 || length>DS_CLIP_MAX_BYTES) return 3;
     auto* clip=static_cast<uint8_t*>(std::malloc(length));
     if(!clip || std::fread(clip,1,length,file)!=static_cast<size_t>(length)) return 3;
     std::fclose(file);
-    if(crc(clip,length)!=0xc81c1bdcU) return 4;
+    if(ds_clip_index(length,crc(clip,length))<0) return 4;
     uint8_t* p=hot;
     for(uint32_t i=0;i<2;++i) { ds_pool_add(&pool,2,p,61440); p+=61440; }
     const uint32_t sizes[8]={3840,960,960,960,240,38400,3840,960};

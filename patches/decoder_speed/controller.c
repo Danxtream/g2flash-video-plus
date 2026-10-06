@@ -2,13 +2,12 @@
 #pragma clang section text=".text.decoder_speed"
 #include "pool.h"
 #include "platform.h"
+#include "clips.h"
 #define DS_HEAP27 0x2000033cU
 #define DS_HEADER_WORDS 128U
 #define DS_FRAMES 32U
 #define DS_FRAME_WORDS 5U
 #define DS_WORDS (DS_HEADER_WORDS + DS_FRAMES*7U*DS_FRAME_WORDS)
-#define DS_CLIP_BYTES 23921U
-#define DS_CLIP_CRC 0xc81c1bdcU
 #define DS_STACK_BYTES 16384U
 #define DS_STATE_BYTES 4096U
 #define DS_META_BYTES 3072U
@@ -32,7 +31,11 @@ typedef struct {
     ds_pool pool;
     volatile uint32_t phase, cancel, start, parked;
     uint32_t session, uploaded, deadline, run_deadline, thread, timer;
-    uint32_t setup, skip, uncached, error;
+    uint32_t clip_bytes, clip_crc;
+    uint32_t setup, skip, error;
+    uint32_t code_bytes;
+    const uint32_t *offsets;
+    const uint8_t *image;
     uint32_t old_demcr, old_dwt_ctrl, clock_owned;
     uint8_t *clip, *hot_raw, *state_raw, *stack_raw, *meta, *code_raw;
     uint8_t *hot, *state, *stack;
@@ -92,15 +95,14 @@ static void ds_record_heaps(ds_session *s, uint32_t offset) {
 static void ds_release_run(ds_session *s) {
     if (s->code_raw) { FW_HEAP_FREE(DS_HEAP27, s->code_raw); s->code_raw = 0; }
     if (s->hot_raw) {
-        if (s->uncached) FW_HEAP_FREE(FW_HEAP_13_DESCRIPTOR, s->hot_raw);
-        else FW_FREE(s->hot_raw);
+        FW_FREE(s->hot_raw);
         s->hot_raw = 0;
     }
     if (s->state_raw) { FW_FREE(s->state_raw); s->state_raw = 0; }
     if (s->meta) { FW_FREE(s->meta); s->meta = 0; }
     if (s->stack_raw) { FW_FREE(s->stack_raw); s->stack_raw = 0; }
     bzero((uint8_t *)&s->pool, sizeof(s->pool));
-    s->code = ds_capsule_image;
+    s->code = s->image;
 }
 static void ds_park(ds_session *s) __attribute__((noreturn));
 static void ds_park(ds_session *s) {
@@ -177,27 +179,28 @@ static int ds_pool_layout(ds_session *s) {
     return s->pool.count < DS_POOL_SLOTS;
 }
 static int ds_prepare(ds_session *s) {
+    s->code_bytes = s->setup & 2U ? DS_MIXED_BYTES : DS_SMALL_BYTES;
+    s->image = s->setup & 2U ? ds_mixed_image : ds_small_image;
+    s->offsets = s->setup & 2U ? ds_mixed_offsets : ds_small_offsets;
     uint32_t hot_size = s->skip ? DS_LUMA_BYTES : DS_COLOR_BYTES;
-    uint32_t cached = DS_STATE_BYTES+8+DS_META_BYTES+DS_STACK_BYTES+32;
-    if (!s->uncached) cached += hot_size+32;
+    uint32_t cached = DS_STATE_BYTES+8+DS_META_BYTES+DS_STACK_BYTES+32+hot_size+32;
     ds_record_heaps(s, 16);
-    if (!ds_room(20, cached+128, s->uncached ? DS_STACK_BYTES+32 : hot_size+32)
-        || !ds_room(13, s->uncached ? hot_size+32 : 0, s->uncached ? hot_size+32 : 0)
-        || !ds_room(27, s->setup == 1 ? DS_CAPSULE_BYTES+128 : 0, s->setup == 1 ? DS_CAPSULE_BYTES+128 : 0)) return 0;
-    s->hot_raw = s->uncached ? FW_HEAP_MALLOC(FW_HEAP_13_DESCRIPTOR, hot_size+32) : FW_MALLOC(hot_size+32);
+    uint32_t ram_bytes = s->setup & 1U ? s->code_bytes+128 : 0;
+    if (!ds_room(20, cached+128, hot_size+32) || !ds_room(27, ram_bytes, ram_bytes)) return 0;
+    s->hot_raw = FW_MALLOC(hot_size+32);
     s->state_raw = FW_MALLOC(DS_STATE_BYTES+8);
     s->meta = FW_MALLOC(DS_META_BYTES);
     s->stack_raw = FW_MALLOC(DS_STACK_BYTES+32);
     if (!s->hot_raw || !s->state_raw || !s->meta || !s->stack_raw) goto failed;
     s->hot = ds_align(s->hot_raw, 32); s->state = ds_align(s->state_raw, 8);
     s->stack = ds_align(s->stack_raw, 32);
-    s->code = ds_capsule_image;
-    if (s->setup == 1) {
-        s->code_raw = FW_HEAP_MALLOC(DS_HEAP27, DS_CAPSULE_BYTES+128);
+    s->code = s->image;
+    if (s->setup & 1U) {
+        s->code_raw = FW_HEAP_MALLOC(DS_HEAP27, s->code_bytes+128);
         if (!s->code_raw) goto failed;
         s->code = ds_align(s->code_raw, 64);
     }
-    if (!ds_room(20,0,0) || !ds_room(13,0,0) || !ds_room(27,0,0)) goto failed;
+    if (!ds_room(20,0,0) || !ds_room(27,0,0)) goto failed;
     for (uint32_t i=0; i<DS_STACK_BYTES; ++i) s->stack[i]=0xa5;
     bzero((uint8_t *)&s->pool, sizeof(s->pool));
     if (!ds_pool_layout(s)) goto failed;
@@ -209,6 +212,7 @@ static int ds_prepare(ds_session *s) {
     s->words[32] = (uint32_t)(uintptr_t)s->stack;
     s->words[33] = (uint32_t)(uintptr_t)s->code;
     s->words[34] = hot_size;
+    s->words[7] = s->code_bytes;
     s->words[39] = sizeof(ds_session);
     for (uint32_t i=0; i<s->pool.count; ++i) {
         uint32_t word = 40+i*2;
@@ -234,9 +238,8 @@ static int ds_copy_code(ds_session *s) {
     const uint32_t starts[6]={address,(uint32_t)(uintptr_t)s->clip,
         (uint32_t)(uintptr_t)s->state,(uint32_t)(uintptr_t)s->meta,
         (uint32_t)(uintptr_t)s->stack,(uint32_t)(uintptr_t)s->hot};
-    const uint32_t sizes[6]={DS_CAPSULE_BYTES,DS_CLIP_BYTES,DS_STATE_BYTES,
+    const uint32_t sizes[6]={s->code_bytes,s->clip_bytes,DS_STATE_BYTES,
         DS_META_BYTES,DS_STACK_BYTES,s->skip ? DS_LUMA_BYTES : DS_COLOR_BYTES};
-    uint32_t uncached_ok=!s->uncached;
     for (uint32_t i=0; i<regions; ++i) {
         DS_REG(0xe000ed98U) = i;
         uint32_t base = DS_REG(0xe000ed9cU), limit = DS_REG(0xe000eda0U);
@@ -245,29 +248,22 @@ static int ds_copy_code(ds_session *s) {
             uint32_t end=starts[block]+sizes[block]-1;
             if (end<starts[block]) goto policy_failed;
             if (starts[block]>(limit|31U) || end<(base&~31U)) continue;
-            // All cached allocations must use the privileged default map.
-            // The one uncached block must be covered by an XN normal-memory
-            // region whose MAIR byte is 0x44 (inner/outer non-cacheable).
-            uint32_t attr=(limit>>1)&7U;
-            uint32_t mair=DS_REG(attr<4 ? 0xe000edc0U : 0xe000edc4U);
-            if (block!=5 || !s->uncached || starts[block]<(base&~31U)
-                || end>(limit|31U) || !(base&1U)
-                || ((mair>>((attr&3U)*8))&255U)!=0x44U) goto policy_failed;
-            uncached_ok=1;
+            // Every allocation uses cached privileged-default memory; an
+            // explicit MPU region makes this donor layout unsupported.
+            goto policy_failed;
         }
     }
     DS_REG(0xe000ed98U) = saved;
-    if (!uncached_ok) return 0;
-    if (s->setup == 0) return 1;
+    if (!(s->setup & 1U)) return 1;
     uint32_t line = 4U << ((s->words[11] >> 16) & 15U);
     uint32_t iline = 4U << (s->words[11] & 15U);
     if (line > 64U || iline > 64U) return 0;
-    memcpy((void *)s->code, ds_capsule_image, DS_CAPSULE_BYTES);
-    if (ds_crc(s->code,DS_CAPSULE_BYTES,~0U) != ds_crc(ds_capsule_image,DS_CAPSULE_BYTES,~0U)) return 0;
+    memcpy((void *)s->code, s->image, s->code_bytes);
+    if (ds_crc(s->code,s->code_bytes,~0U) != ds_crc(s->image,s->code_bytes,~0U)) return 0;
     ds_barrier(0);
-    for (uint32_t p=address; p<address+DS_CAPSULE_BYTES; p+=line) DS_REG(0xe000ef68U) = p;
+    for (uint32_t p=address; p<address+s->code_bytes; p+=line) DS_REG(0xe000ef68U) = p;
     ds_barrier(0);
-    for (uint32_t p=address; p<address+DS_CAPSULE_BYTES; p+=iline) DS_REG(0xe000ef58U) = p; // ICIMVAU.
+    for (uint32_t p=address; p<address+s->code_bytes; p+=iline) DS_REG(0xe000ef58U) = p; // ICIMVAU.
     ds_barrier(1);
     return 1;
 policy_failed:
@@ -301,18 +297,18 @@ static int ds_pass(ds_session *s, uint32_t pass) {
     int (*decode)(void *,const uint8_t *,uint32_t) = ds_host_decode;
     int (*frame)(const void *,ds_frame_info *) = ds_host_frame;
 #else
-    void *(*init)(void *,uint32_t,uint32_t) = (void *)(s->code+DS_OFFSET_DS_INIT+1);
-    void (*destroy)(void *) = (void *)(s->code+DS_OFFSET_DS_DESTROY+1);
-    int (*decode)(void *,const uint8_t *,uint32_t) = (void *)(s->code+DS_OFFSET_DS_DECODE+1);
-    int (*frame)(const void *,ds_frame_info *) = (void *)(s->code+DS_OFFSET_DS_FRAME+1);
+    void *(*init)(void *,uint32_t,uint32_t) = (void *)(s->code+s->offsets[2]+1);
+    void (*destroy)(void *) = (void *)(s->code+s->offsets[3]+1);
+    int (*decode)(void *,const uint8_t *,uint32_t) = (void *)(s->code+s->offsets[4]+1);
+    int (*frame)(const void *,ds_frame_info *) = (void *)(s->code+s->offsets[5]+1);
 #endif
     void *state = init(s->state,DS_STATE_BYTES,s->skip);
     if (!state) return 10;
-    uint32_t prefix, cursor=ds_start_code(s->clip,DS_CLIP_BYTES,0,&prefix), count=0;
+    uint32_t prefix, cursor=ds_start_code(s->clip,s->clip_bytes,0,&prefix), count=0;
     int error=0;
-    while (prefix && cursor < DS_CLIP_BYTES) {
+    while (prefix && cursor < s->clip_bytes) {
         uint32_t nal=cursor+prefix, next_prefix;
-        uint32_t next=ds_start_code(s->clip,DS_CLIP_BYTES,nal,&next_prefix);
+        uint32_t next=ds_start_code(s->clip,s->clip_bytes,nal,&next_prefix);
         uint32_t type = s->clip[nal] & 31U;
         if (s->cancel || (int32_t)(FW_MS_TICK-s->run_deadline) >= 0) { error=11; break; }
         uint32_t rate = (type == 1 || type == 5) ? ds_calibrate() : 0;
@@ -352,8 +348,8 @@ static void ds_worker(void *argument) {
         DS_DELAY(1);
     }
     if (!ds_copy_code(s)) { s->error=1; goto complete; }
-    uint32_t (*selftest)(uint32_t) = (void *)(s->code+DS_OFFSET_DS_SELFTEST+1);
-    uint32_t (*state_size)(void) = (void *)(s->code+DS_OFFSET_DS_SIZE+1);
+    uint32_t (*selftest)(uint32_t) = (void *)(s->code+s->offsets[1]+1);
+    uint32_t (*state_size)(void) = (void *)(s->code+s->offsets[0]+1);
     if (selftest(0x12345678U) != ((0x12345678U ^ 0xd35c2301U)+17U)
         || state_size() > DS_STATE_BYTES) { s->error=2; goto complete; }
     s->words[35]=state_size();
@@ -390,7 +386,7 @@ static int ds_control(const uint8_t *data, uint32_t size) {
     uint32_t op=data[4], token=ds_rd16(data+5);
     customCfwContext *ctx = getCustomCfwContext();
     ds_session *s = ds_active();
-    if (op == DS_HELLO && size == 7) return ds_reply(token,0xffffU,0x44530203U);
+    if (op == DS_HELLO && size == 7) return ds_reply(token,0xffffU,0x4453020fU);
     if (!token) return -1;
     if (op == DS_HEAPS && size == 9 && !s) {
         uint32_t index=ds_rd16(data+7);
@@ -400,16 +396,19 @@ static int ds_control(const uint8_t *data, uint32_t size) {
         return ds_reply(token,index,index&1 ? stats.max_alloc : stats.free_bytes);
     }
     if (op == DS_BEGIN && size == 19) {
-        if (s) return s->session == token && s->phase == DS_UPLOAD ? 0 : -1;
-        if (ds_rd32(data+7) != DS_CLIP_BYTES || ds_rd32(data+11) != DS_CLIP_CRC
-            || ds_rd16(data+15) != 320 || ds_rd16(data+17) != 192
-            || !ds_room(20,sizeof(ds_session)+DS_CLIP_BYTES+128,DS_CLIP_BYTES)) return -1;
+        uint32_t bytes=ds_rd32(data+7), crc=ds_rd32(data+11);
+        if (ds_clip_index(bytes,crc)<0 || bytes>DS_CLIP_MAX_BYTES
+            || ds_rd16(data+15)!=320 || ds_rd16(data+17)!=192) return -1;
+        if (s) return s->session==token && s->phase==DS_UPLOAD
+            && s->clip_bytes==bytes && s->clip_crc==crc ? 0 : -1;
+        if (!ds_room(20,sizeof(ds_session)+bytes+128,bytes)) return -1;
         s=FW_MALLOC(sizeof(ds_session));
         if (!s) return -1;
         bzero((uint8_t *)s,sizeof(*s)); s->session=token; s->phase=DS_UPLOAD;
+        s->clip_bytes=bytes; s->clip_crc=crc;
         s->imports=(ds_imports){ds_allocate,ds_deallocate,ds_preallocate,ds_fatal};
-        s->code=ds_capsule_image; s->used_words=DS_HEADER_WORDS;
-        s->clip=FW_MALLOC(DS_CLIP_BYTES);
+        s->used_words=DS_HEADER_WORDS;
+        s->clip=FW_MALLOC(bytes);
         s->deadline=FW_MS_TICK+120000U;
         s->timer=DS_TIMER_NEW(ds_lease_tick,1,ctx,0);
         if (!s->clip || !s->timer || DS_TIMER_START(s->timer,1000) != 0) {
@@ -424,7 +423,7 @@ static int ds_control(const uint8_t *data, uint32_t size) {
     s->deadline=FW_MS_TICK+120000U;
     if (op == DS_WRITE && size > 11 && size <= 2059 && s->phase == DS_UPLOAD) {
         uint32_t offset=ds_rd32(data+7), n=size-11;
-        if (offset > DS_CLIP_BYTES || n > DS_CLIP_BYTES-offset) return -1;
+        if (offset > s->clip_bytes || n > s->clip_bytes-offset) return -1;
         if (offset < s->uploaded) {
             if (offset+n > s->uploaded) return -1;
             for (uint32_t i=0;i<n;++i) if (s->clip[offset+i] != data[11+i]) return -1;
@@ -434,18 +433,18 @@ static int ds_control(const uint8_t *data, uint32_t size) {
         memcpy(s->clip+offset,data+11,n); s->uploaded+=n; return 0;
     }
     if (op == DS_SEAL && size == 7 && (s->phase == DS_UPLOAD || s->phase == DS_SEALED)) {
-        if (s->uploaded != DS_CLIP_BYTES || ~ds_crc(s->clip,DS_CLIP_BYTES,~0U) != DS_CLIP_CRC) return -1;
+        if (s->uploaded != s->clip_bytes || ~ds_crc(s->clip,s->clip_bytes,~0U) != s->clip_crc) return -1;
         s->phase=DS_SEALED; return 0;
     }
     if (op == DS_RUN && size == 11) {
         uint32_t setup=data[7], skip=data[8], passes=data[9], uncached=data[10];
-        if (setup > 1 || skip > 1 || passes != 5 || uncached > 1 || (setup == 1 && uncached)) return -1;
-        if (s->phase == DS_RUNNING) return s->setup == setup && s->skip == skip && s->uncached == uncached ? 0 : -1;
+        if (setup > 3 || skip > 1 || passes != 5 || uncached) return -1;
+        if (s->phase == DS_RUNNING) return s->setup == setup && s->skip == skip ? 0 : -1;
         if (s->phase != DS_SEALED) return -1;
-        s->setup=setup; s->skip=skip; s->uncached=uncached;
-        s->words[0]=0x44530203U; s->words[1]=(setup | skip<<8 | uncached<<16);
-        s->words[4]=DS_FRAMES; s->words[5]=5; s->words[6]=DS_CLIP_CRC; s->words[7]=DS_CAPSULE_BYTES;
-        s->words[12]=320; s->words[13]=192; s->words[14]=DS_CLIP_BYTES;
+        s->setup=setup; s->skip=skip;
+        s->words[0]=0x4453020fU; s->words[1]=(setup | skip<<8);
+        s->words[4]=DS_FRAMES; s->words[5]=5; s->words[6]=s->clip_crc;
+        s->words[12]=320; s->words[13]=192; s->words[14]=s->clip_bytes;
         s->words[15]=DS_FRAME_WORDS;
         if (!ds_prepare(s)) return -1;
         ds_thread_attr attr={"decoder-speed",0,s->tcb,sizeof(s->tcb),s->stack,DS_STACK_BYTES,8,0,0};

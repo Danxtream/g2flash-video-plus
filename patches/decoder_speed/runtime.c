@@ -19,3 +19,20 @@ void __aeabi_memclr(void *d, size_t n) { memset(d, 0, n); }
 void __aeabi_memclr4(void *d, size_t n) { memset(d, 0, n); }
 void __aeabi_memclr8(void *d, size_t n) { memset(d, 0, n); }
 void __aeabi_memset(void *d, size_t n, int c) { memset(d, c, n); }
+
+/* -Oz calls these instead of expanding 64-bit shifts. Word-sized operations
+ * avoid recursively invoking the same ABI helper inside its implementation. */
+uint64_t __aeabi_llsr(uint64_t value, int shift) {
+    uint32_t lo = (uint32_t)value, hi = (uint32_t)(value >> 32);
+    if (shift >= 64) return 0;
+    if (shift >= 32) { lo = hi >> (shift - 32); hi = 0; }
+    else if (shift > 0) { lo = (lo >> shift) | (hi << (32 - shift)); hi >>= shift; }
+    return ((uint64_t)hi << 32) | lo;
+}
+uint64_t __aeabi_llsl(uint64_t value, int shift) {
+    uint32_t lo = (uint32_t)value, hi = (uint32_t)(value >> 32);
+    if (shift >= 64) return 0;
+    if (shift >= 32) { hi = lo << (shift - 32); lo = 0; }
+    else if (shift > 0) { hi = (hi << shift) | (lo >> (32 - shift)); lo <<= shift; }
+    return ((uint64_t)hi << 32) | lo;
+}

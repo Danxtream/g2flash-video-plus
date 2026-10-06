@@ -21,14 +21,11 @@ static void ds_host_destroy(void *state);
 static int ds_host_decode(void *state,const uint8_t *nal,uint32_t size);
 static int ds_host_frame(const void *state,ds_frame_info *info);
 #define FW_MS_TICK tick
-#define DS_CAPSULE_BYTES 136792U
-#define DS_OFFSET_DS_SELFTEST 0
-#define DS_OFFSET_DS_SIZE 0
-#define DS_OFFSET_DS_INIT 0
-#define DS_OFFSET_DS_DESTROY 0
-#define DS_OFFSET_DS_DECODE 0
-#define DS_OFFSET_DS_FRAME 0
-static const uint8_t ds_capsule_image[DS_CAPSULE_BYTES]={0};
+#define DS_SMALL_BYTES 60000U
+#define DS_MIXED_BYTES 70000U
+static const uint32_t ds_small_offsets[6]={0}, ds_mixed_offsets[6]={0};
+static const uint8_t ds_small_image[DS_SMALL_BYTES]={0}, ds_mixed_image[DS_MIXED_BYTES]={0};
+static uint32_t heap27_free=133924U, heap27_max=131072U;
 static customCfwContext *getCustomCfwContext(void) { return &context; }
 static customCfwContext *peekCustomCfwContext(void) { return &context; }
 static void host_zero(uint8_t *p,uint32_t n) { memset(p,0,n); }
@@ -45,8 +42,8 @@ static void host_heap_free(uint32_t heap,void *p) { (void)heap; host_free(p); }
 #define FW_HEAP_MALLOC host_heap_alloc
 #define FW_HEAP_FREE host_heap_free
 static cfw_heap_stats ds_host_stats(uint32_t heap) {
-    cfw_heap_stats s={heap==27 ? 172620U : heap==13 ? 561592U : 428028U,
-        heap==27 ? 172596U : heap==13 ? 561544U : 428028U};
+    cfw_heap_stats s={heap==27 ? heap27_free : heap==13 ? 561592U : 428028U,
+        heap==27 ? heap27_max : heap==13 ? 561544U : 428028U};
     return s;
 }
 static uint32_t host_thread_new(void (*fn)(void *),void *arg,const void *attr) {

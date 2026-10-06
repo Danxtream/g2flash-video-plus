@@ -4,7 +4,7 @@
 #include "rle.h"
 #include "debug.h"
 #include "message_transport.h"
-#ifdef DS_CAPSULE_BYTES
+#ifdef DS_SMALL_BYTES
 #include "decoder_speed/controller.h"
 #endif
 
@@ -298,7 +298,7 @@ static int image_worker(const uint8_t *src, uint32_t size) {
 /* Private receive calls this dispatcher under the image mutex. Each receiving lens kicks the keepalive once per top-level
  * command, then image_dispatch recurses for multi-segment messages. */
 static int image_worker_locked(const uint8_t *src, uint32_t srclen) {
-#ifdef DS_CAPSULE_BYTES
+#ifdef DS_SMALL_BYTES
     if (src && srclen && src[0] == 31) return ds_control(src, srclen);
 #endif
     /* An inbound image message proves the phone is still connected, so kick the
@@ -703,7 +703,7 @@ static int decode_image_rle(const uint8_t *src, uint32_t size, uint8_t *base,
  * context so a later cleanup can retry it. The sticky allocation diagnostic is
  * deliberately retained so cleanup cannot erase evidence of an earlier OOM. */
 static int cfw_cleanup_session(void) {
-#ifdef DS_CAPSULE_BYTES
+#ifdef DS_SMALL_BYTES
     ds_cleanup();
 #endif
     customCfwContext *ctx = peekCustomCfwContext();

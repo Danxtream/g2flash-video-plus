@@ -6,10 +6,12 @@ import unittest
 import queue
 from contextlib import redirect_stdout, redirect_stderr
 import io
+import asyncio
+import re
 import tempfile
 from types import SimpleNamespace
 import zlib
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 import decoder_speed_test as tool
@@ -43,7 +45,8 @@ class ToolTests(unittest.TestCase):
         words[15]=tool.FRAME_WORDS
         words[12:15]=[320,192,tool.CLIP_BYTES]
         hashes=list(range(32))
-        reference=dict(clip_sha256=tool.CLIP_SHA256,decoder='59c66b1',hashes={'0':hashes,'1':hashes})
+        reference=dict(clip_sha256=tool.CLIP_SHA256,clip_crc32=tool.CLIP_CRC,decoder='59c66b1',
+                       hashes={'0':hashes,'1':hashes},dimensions=[320,192],frames=32)
         for repeat in range(7):
             for frame in range(32):
                 i=128+(repeat*32+frame)*tool.FRAME_WORDS
@@ -115,22 +118,74 @@ class ToolTests(unittest.TestCase):
         words,ref=self.valid_run(); words[0]=0x44530103
         with self.assertRaises(ValueError): tool.summarize(words,ref,'full-mram',0,0)
 
-    def test_measurement_scan_is_60_seconds_and_scoped_even_on_failure(self):
-        for fail in (False,True):
-            transport=object.__new__(tool.LocalBleTransport)
-            def connect():
-                self.assertEqual(tool.g2flash.SCAN_TIMEOUT,60)
-                if fail: raise TimeoutError()
-            transport.connect=connect; transport.discover=Mock(return_value=True)
-            transport.set_notify=Mock()
-            characteristic=SimpleNamespace(properties=['write-without-response'],max_write_without_response_size=20)
-            transport.client=SimpleNamespace(services=SimpleNamespace(get_characteristic=lambda _: characteristic))
-            original=tool.g2flash.SCAN_TIMEOUT
-            with patch.object(tool,'authenticate'),redirect_stdout(io.StringIO()):
-                if fail:
-                    with self.assertRaises(TimeoutError): tool.Client(transport,'left').connect()
-                else: tool.Client(transport,'left').connect()
-            self.assertEqual(tool.g2flash.SCAN_TIMEOUT,original)
+    def local_transport(self):
+        transport=object.__new__(tool.MeasurementBleTransport)
+        transport.connect=Mock(); transport.discover=Mock(return_value=True)
+        transport.set_notify=Mock(); transport.disconnect=Mock(); transport.notes=queue.Queue()
+        characteristic=SimpleNamespace(properties=['write-without-response'],max_write_without_response_size=20)
+        transport.client=SimpleNamespace(services=SimpleNamespace(get_characteristic=lambda _: characteristic))
+        return transport
+
+    def test_windows_connects_with_bledevice_no_scan_or_uncached_override(self):
+        transport=object.__new__(tool.MeasurementBleTransport)
+        transport.address='00:00:00:00:00:01'; transport.side='left'
+        transport.disconnected_event=Mock(); transport._install_disconnect_error_hook=Mock()
+        transport._call=asyncio.run
+        bleak_client=Mock(); bleak_client.connect=AsyncMock()
+        with patch.object(tool.os,'name','nt'),patch('bleak.BleakClient',return_value=bleak_client) as factory, \
+                patch('bleak.BleakScanner.discover') as scan,redirect_stdout(io.StringIO()):
+            transport.connect()
+        scan.assert_not_called()
+        self.assertEqual(factory.call_args.args[0].address,transport.address)
+        self.assertEqual(set(factory.call_args.kwargs),{'disconnected_callback'})
+        bleak_client.connect.assert_awaited_once_with(timeout=30)
+
+    def test_login_retries_data_ctrl_settle_and_drain(self):
+        transport=self.local_transport(); transport.notes.put(('old',b'stale'))
+        attempts=[]
+        def login(tp):
+            self.assertTrue(tp.notes.empty()); attempts.append(1)
+            if len(attempts)<3:
+                tp.notes.put(('old',b'late')); raise TimeoutError()
+        with patch.object(tool,'authenticate',side_effect=login),patch.object(tool.time,'sleep') as sleep, \
+                redirect_stdout(io.StringIO()): tool.Client(transport,'left').connect()
+        self.assertEqual(len(attempts),3); transport.connect.assert_called_once()
+        sleep.assert_called_once_with(2.5)
+        self.assertEqual(transport.set_notify.call_args_list[0].args,(tool.DATA[0],tool.DATA[2],True))
+        self.assertEqual(transport.set_notify.call_args_list[1].args,(tool.CTRL[0],tool.CTRL[2],True))
+
+    def test_cancel_access_denied_and_incomplete_services_rebuild(self):
+        for error in (asyncio.CancelledError(),OSError('services access denied'),TimeoutError()):
+            transport=self.local_transport(); transport.connect.side_effect=[error,None]
+            with patch.object(tool,'authenticate'),patch.object(tool.time,'sleep'),redirect_stdout(io.StringIO()):
+                tool.Client(transport,'left').connect()
+            self.assertEqual(transport.connect.call_count,2); transport.disconnect.assert_called_once()
+        transport=self.local_transport(); transport.discover.side_effect=[False,True]
+        with patch.object(tool,'authenticate'),patch.object(tool.time,'sleep'),redirect_stdout(io.StringIO()):
+            tool.Client(transport,'left').connect()
+        self.assertEqual(transport.connect.call_count,2)
+
+    def test_three_unanswered_logins_rebuild_connection_bounded(self):
+        transport=self.local_transport()
+        with patch.object(tool,'authenticate',side_effect=TimeoutError()) as login, \
+                patch.object(tool.time,'sleep'),redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError,'three connections'):
+                tool.Client(transport,'left').connect()
+        self.assertEqual(login.call_count,9); self.assertEqual(transport.connect.call_count,3)
+        self.assertEqual(transport.disconnect.call_count,3)
+
+    def test_b_setup_metadata_and_a_firmware_are_not_interchangeable(self):
+        for setup in ('small-mram','small-ram','mixed-mram','mixed-ram'):
+            words,ref=self.valid_run(); words[0]=tool.B_MAGIC; words[1]=tool.SETUPS[setup]
+            self.assertTrue(tool.summarize(words,ref,setup,0,0)['valid'])
+            words[0]=tool.MAGIC
+            with self.assertRaises(ValueError): tool.summarize(words,ref,setup,0,0)
+
+    def test_new_session_keeps_sequence_but_clears_stale_results(self):
+        client=tool.Client(None,'left'); old=client.session; seq=client.next_sequence
+        client.results={65535:4}; client.new_session()
+        self.assertNotEqual(old,client.session); self.assertFalse(client.results)
+        self.assertEqual(client.next_sequence,seq)
 
     def test_progress_is_timestamped_flushed_and_empty_errors_named(self):
         with patch('builtins.print') as printer:
@@ -160,7 +215,7 @@ class ToolTests(unittest.TestCase):
                 return tool.MAGIC
             client.command.side_effect=command
             with patch.object(tool,'check_clip',return_value=tool.PROFILES[0]), \
-                    patch.object(tool,'LocalBleTransport'),patch.object(tool,'Client',return_value=client), \
+                    patch.object(tool,'MeasurementBleTransport'),patch.object(tool,'Client',return_value=client), \
                     redirect_stdout(io.StringIO()) as output:
                 tool.run(args)
             saved=tool.json.loads((root/'result.json').read_text(encoding='utf-8'))
@@ -171,8 +226,129 @@ class ToolTests(unittest.TestCase):
             self.assertIn('excluded 0/160',output.getvalue())
             client.transport.close.assert_called_once()
 
+    def test_batch_matrix_uses_one_authenticated_connection(self):
+        _,ref=self.valid_run(); client=Mock(); client.command.return_value=tool.B_MAGIC
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); (root/'clip').write_bytes(b'fake')
+            (root/'ref').write_text(tool.json.dumps(ref),encoding='utf-8')
+            args=SimpleNamespace(clip=root/'clip',reference=root/'ref',output_dir=root,
+                setups=['small-mram','small-ram','mixed-mram','mixed-ram'],skip_chroma=[0,1],
+                connection='g2://local?left=00:00:00:00:00:01&right=00:00:00:00:00:02&addressType=public',lens='left',mtu=23)
+            with patch.object(tool,'check_clip',return_value=tool.PROFILES[0]),patch.object(tool,'MeasurementBleTransport'), \
+                    patch.object(tool,'Client',return_value=client),patch.object(tool,'run_case',return_value={'valid':True}) as case, \
+                    patch.object(tool.time,'sleep'),redirect_stdout(io.StringIO()): tool.batch(args)
+            client.connect.assert_called_once(); client.transport.close.assert_called_once()
+            self.assertEqual(case.call_count,8); self.assertEqual(client.new_session.call_count,8)
+            self.assertEqual([(c.args[1].setup,c.args[1].skip_chroma) for c in case.call_args_list],
+                             [(s,c) for s in args.setups for c in (0,1)])
+            self.assertEqual(len(tool.json.loads((root/'batch-summary.json').read_text(encoding='utf-8'))),8)
+
+    def test_batch_stops_after_failure_without_reconnecting_or_replaying(self):
+        _,ref=self.valid_run(); client=Mock(); client.command.return_value=tool.B_MAGIC
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); (root/'clip').write_bytes(b'fake')
+            (root/'ref').write_text(tool.json.dumps(ref),encoding='utf-8')
+            args=SimpleNamespace(clip=root/'clip',reference=root/'ref',output_dir=root,
+                setups=['small-mram','small-ram'],skip_chroma=[0,1],
+                connection='g2://local?left=00:00:00:00:00:01&right=00:00:00:00:00:02&addressType=public',lens='left',mtu=23)
+            with patch.object(tool,'check_clip',return_value=tool.PROFILES[0]),patch.object(tool,'MeasurementBleTransport'), \
+                    patch.object(tool,'Client',return_value=client),patch.object(tool,'run_case',side_effect=TimeoutError()) as case, \
+                    redirect_stdout(io.StringIO()):
+                with self.assertRaises(TimeoutError): tool.batch(args)
+            case.assert_called_once(); client.connect.assert_called_once(); client.transport.close.assert_called_once()
+            self.assertFalse((root/'batch-summary.json').exists())
+
+    def test_batch_preserves_existing_raw_or_summary_without_connecting(self):
+        for filename in ('batch-summary.json','deblocking-comparison.json','left-tokyo-original-small-mram-color.raw.json'):
+            with tempfile.TemporaryDirectory() as directory:
+                root=Path(directory); (root/filename).write_text('old evidence',encoding='utf-8')
+                (root/'clip').write_bytes(b'fake')
+                args=SimpleNamespace(output_dir=root,setups=['small-mram'],skip_chroma=[0],lens='left',clip=root/'clip',reference=root/'ref')
+                with patch.object(tool,'measure') as connect,patch.object(tool,'check_clip',return_value=tool.PROFILES[0]):
+                    with self.assertRaises(FileExistsError): tool.batch(args)
+                connect.assert_not_called()
+                self.assertEqual((root/filename).read_text(encoding='utf-8'),'old evidence')
+
     def test_bad_clip_rejected_without_connecting(self):
         with self.assertRaises(ValueError): tool.check_clip(b'\0'*tool.CLIP_BYTES)
+
+    def test_deblock_profiles_match_firmware_metadata(self):
+        root=Path(__file__).resolve().parents[2]
+        text=(root/'patches/decoder_speed/clips.h').read_text(encoding='utf-8')
+        self.assertIn(f'#define DS_CLIP_BYTES {tool.CLIP_BYTES}U',text)
+        self.assertIn(f'#define DS_CLIP_CRC {tool.CLIP_CRC:#x}U',text)
+        pairs=[(int(a),int(b,16)) for a,b in re.findall(r'\{(\d+)U, (0x[0-9a-f]+)U\}',text)]
+        self.assertEqual(pairs,[(p['bytes'],p['crc32']) for p in tool.PROFILES[1:]])
+        self.assertTrue(all(p['bytes']<=tool.CLIP_BYTES for p in tool.PROFILES))
+        self.assertEqual([p['deblocking'] for p in tool.PROFILES],['on','on','off'])
+
+    def test_results_require_the_selected_clip_length_crc_and_y_reference(self):
+        for profile in tool.PROFILES:
+            words,ref=self.valid_run(); words[0]=tool.B_MAGIC
+            words[6]=profile['crc32']; words[14]=profile['bytes']
+            ref.update(clip_sha256=profile['sha256'],clip_crc32=profile['crc32'])
+            self.assertTrue(tool.summarize(words,ref,'small-mram',0,0)['valid'])
+            words[6]^=1
+            with self.assertRaisesRegex(ValueError,'metadata invalid'): tool.summarize(words,ref,'small-mram',0,0)
+
+    def test_clip_setup_mode_batch_uses_one_connection_and_distinct_outputs(self):
+        client=Mock(); client.command.return_value=tool.B_MAGIC
+        _,ref=self.valid_run()
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); clips=[]; refs=[]
+            profiles={}
+            for index,profile in enumerate(tool.PROFILES):
+                clip=root/f'clip-{index}'; clip.write_bytes(bytes([index])); clips.append(clip)
+                reference=dict(ref,clip_sha256=profile['sha256'],clip_crc32=profile['crc32'])
+                path=root/f'ref-{index}'; path.write_text(tool.json.dumps(reference),encoding='utf-8'); refs.append(path)
+                profiles[bytes([index])]=profile
+            args=SimpleNamespace(clip=clips,reference=refs,output_dir=root/'results',setups=['small-mram','small-ram','mixed-mram','mixed-ram'],
+                skip_chroma=[0,1],connection='g2://local?left=00:00:00:00:00:01&right=00:00:00:00:00:02&addressType=public',lens='left',mtu=23)
+            (root/'results').mkdir()
+            with patch.object(tool,'check_clip',side_effect=lambda raw: profiles[raw]),patch.object(tool,'MeasurementBleTransport'), \
+                    patch.object(tool,'Client',return_value=client),patch.object(tool,'run_case',return_value={'valid':True}) as case, \
+                    patch.object(tool.time,'sleep'),redirect_stdout(io.StringIO()): tool.batch(args)
+            client.connect.assert_called_once(); self.assertEqual(case.call_count,24)
+            self.assertEqual(len({call.args[1].output for call in case.call_args_list}),24)
+            self.assertEqual([call.args[1].clip for call in case.call_args_list[:3]],clips)
+            self.assertEqual([call.args[3]['name'] for call in case.call_args_list[:3]],[p['name'] for p in tool.PROFILES])
+            self.assertEqual(client.new_session.call_count,24); client.transport.close.assert_called_once()
+
+    def test_missing_reference_and_duplicate_clips_stop_before_connecting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); clip=root/'clip'; clip.write_bytes(b'fake')
+            args=SimpleNamespace(output_dir=root,clip=[clip,clip],reference=[root/'ref'],setups=['small-mram'],skip_chroma=[0],lens='left')
+            with patch.object(tool,'measure') as connect,patch.object(tool,'check_clip',return_value=tool.PROFILES[0]):
+                with self.assertRaisesRegex(ValueError,'one PC reference'): tool.batch(args)
+                args.reference=[root/'ref',root/'ref']
+                with self.assertRaisesRegex(ValueError,'same clip'): tool.batch(args)
+            connect.assert_not_called()
+
+    def test_reference_for_other_clip_and_a_deblock_run_stop_before_connecting(self):
+        _,ref=self.valid_run()
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); (root/'clip').write_bytes(b'fake'); (root/'ref').write_text(tool.json.dumps(ref),encoding='utf-8')
+            args=SimpleNamespace(clip=root/'clip',reference=root/'ref',setup='small-mram',uncached=0)
+            with patch.object(tool,'check_clip',return_value=tool.PROFILES[1]),patch.object(tool,'Client') as client:
+                with self.assertRaisesRegex(ValueError,'identity/format'): tool.measure(args,[args])
+                ref.update(clip_sha256=tool.PROFILES[1]['sha256'],clip_crc32=tool.PROFILES[1]['crc32'])
+                (root/'ref').write_text(tool.json.dumps(ref),encoding='utf-8'); args.setup='full-mram'
+                with self.assertRaisesRegex(ValueError,'A accepts only'): tool.measure(args,[args])
+            client.assert_not_called()
+
+    def test_deblock_comparison_reports_both_clocks_and_never_invents_invalid_gain(self):
+        runs=[dict(setup='small-mram',skip_chroma=True,clip_name='tokyo-deblock-'+mode,
+                   timing_valid=True,excluded_frames=i,median_ms=ms,median_tick_ms=ms)
+              for i,(mode,ms) in enumerate((('on',60),('off',52)))]
+        rows=tool.deblocking_comparisons(runs)
+        self.assertEqual(len(rows),1); self.assertTrue(rows[0]['timing_valid'])
+        self.assertAlmostEqual(rows[0]['cycles']['saving_percent'],100*8/60)
+        self.assertEqual(rows[0]['cycles'],rows[0]['ticks'])
+        self.assertEqual((rows[0]['excluded_on'],rows[0]['excluded_off']),(0,1))
+        runs[1].update(timing_valid=False,median_ms=None,median_tick_ms=None)
+        row=tool.deblocking_comparisons(runs)[0]
+        self.assertFalse(row['timing_valid']); self.assertIsNone(row['cycles']['saving_percent'])
+        self.assertEqual(tool.deblocking_comparisons(runs[:1]),[])
 
     def test_client_upload_fragmentation_ack_and_result(self):
         transport=FakeTransport()

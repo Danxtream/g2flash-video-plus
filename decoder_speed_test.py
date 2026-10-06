@@ -2,15 +2,17 @@
 """Measure the local Faceclaw/16 decoder experiment through one lens.
 
 Prepare the clip/reference on the PC first. Run connects and uploads only;
-this tool never flashes firmware. Firmware A accepts the verified 32-frame
-Tokyo segment, and supports full-mram/full-ram plus an MRAM-only uncached run.
+this tool never flashes firmware. B also accepts the matched deblocking pair.
+Batch keeps one authenticated connection for several clips and measurements.
 """
 import argparse
+import asyncio
 import hashlib
 import json
 import os
 from pathlib import Path
 from datetime import datetime
+from types import SimpleNamespace
 import queue
 import secrets
 import statistics
@@ -21,22 +23,29 @@ import time
 import zlib
 
 import g2flash
-from g2flash import Bridge, CTRL, DroidBridgeTransport, LocalBleTransport, authenticate, crc16, parse_connection_string
+from g2flash import Bridge, CTRL, DATA, DroidBridgeTransport, LocalBleTransport, authenticate, crc16, parse_connection_string
 from send_message_probe import LENS_BITS, make_packets, parse_acks
 
 MAGIC = 0x44530203
+B_MAGIC = 0x4453020f
 CLIP_BYTES = 23921
 CLIP_SHA256 = 'c80a8087c83bed781374b3475987d9e772b517177ba244b250704046b354da0b'
 CLIP_CRC = 0xc81c1bdc
 PROFILES = (
-    dict(bytes=CLIP_BYTES,sha256=CLIP_SHA256,crc32=CLIP_CRC,dimensions=[320,192]),
+    dict(name='tokyo-original',bytes=CLIP_BYTES,sha256=CLIP_SHA256,crc32=CLIP_CRC,dimensions=[320,192],deblocking='on'),
+    dict(name='tokyo-deblock-on',bytes=22888,
+         sha256='3e31c73ac4208be4b53f9cffc4b7921098cfa17de0f6d4c18730e5bb6bae4215',
+         crc32=0xa7e2ccf1,dimensions=[320,192],deblocking='on'),
+    dict(name='tokyo-deblock-off',bytes=23296,
+         sha256='c68f8a3a113b6b0e3cf2aee3a5b9082ea52548a83f8927eddbec3b920e3756e8',
+         crc32=0x65ebfb75,dimensions=[320,192],deblocking='off'),
 )
 HELLO, BEGIN, WRITE, SEAL, RUN, READ, ABORT, CLOSE, HEAPS = range(9)
-SETUPS = {'full-mram': 0, 'full-ram': 1}
+SETUPS = {'full-mram': 0, 'full-ram': 1, 'small-mram': 0, 'small-ram': 1,
+          'mixed-mram': 2, 'mixed-ram': 3}
 HEADER_WORDS, FRAMES, PASSES, WARMUPS = 128, 32, 5, 2
 FRAME_WORDS = 5
 RESULT_WORDS = HEADER_WORDS+FRAMES*(PASSES+WARMUPS)*FRAME_WORDS
-SCAN_SECONDS = 60
 OP_NAMES = dict(enumerate(('HELLO', 'BEGIN', 'WRITE', 'SEAL', 'RUN', 'READ', 'ABORT', 'CLOSE', 'HEAPS')))
 
 
@@ -73,7 +82,7 @@ def check_clip(raw):
         if (len(raw)==profile['bytes'] and hashlib.sha256(raw).hexdigest()==profile['sha256']
                 and zlib.crc32(raw)==profile['crc32']):
             return profile
-    raise ValueError('firmware A requires the verified 23,921-byte Tokyo segment')
+    raise ValueError('the experiment requires a verified 32-frame Tokyo clip (original or deblocking pair)')
 
 
 def linux_path(path):
@@ -122,9 +131,45 @@ def prepare(source, clip_path, reference_path):
     if hashes['0'] != hashes['1']:
         raise ValueError('PC chroma modes disagree on Y')
     reference = dict(protocol=1, clip_sha256=profile['sha256'], clip_crc32=profile['crc32'],
+        clip_name=profile['name'], deblocking=profile['deblocking'],
         dimensions=profile['dimensions'], frames=FRAMES, decoder='59c66b1', hashes=hashes)
     reference_path.write_text(json.dumps(reference, indent=2)+'\n', encoding='utf-8')
     progress(f'PC reference PASS: 448 frames, both modes and seven repeats; {reference_path}')
+
+
+class MeasurementBleTransport(LocalBleTransport):
+    """Windows paired-address connection; upstream's flasher stays unchanged."""
+    def connect(self):
+        if os.name != 'nt':
+            # CoreBluetooth needs the scanned BLEDevice backend details.
+            previous = g2flash.SCAN_TIMEOUT
+            try:
+                g2flash.SCAN_TIMEOUT = 60
+                return super().connect()
+            finally:
+                g2flash.SCAN_TIMEOUT = previous
+        from bleak import BleakClient
+        from bleak.backends.device import BLEDevice
+
+        async def connect_direct():
+            device = BLEDevice(self.address, f'Even G2 {self.side} lens', None)
+            self.disconnected_event.clear()
+            self.disconnected_at = self.disconnect_detail = None
+            self._disconnect_requested = False
+            def on_disconnect(_client):
+                self.disconnected_at = time.monotonic()
+                self.disconnected_event.set()
+            # Preserve Windows' default service cache. Uncached discovery on
+            # paired lenses failed with "Catastrophic failure" on real hardware.
+            self.client = BleakClient(device, disconnected_callback=on_disconnect)
+            await self.client.connect(timeout=30)
+            self._install_disconnect_error_hook()
+        progress(f'Connecting directly to the paired {self.side} lens; no scan')
+        self._call(connect_direct())
+
+
+def firmware_magic(setup):
+    return MAGIC if setup.startswith('full-') else B_MAGIC
 
 
 class Client:
@@ -136,38 +181,51 @@ class Client:
         self.session = secrets.randbelow(65535)+1
 
     def connect(self):
-        if isinstance(self.transport, LocalBleTransport):
-            progress(f'Scanning for the lens for up to {SCAN_SECONDS} s, then connecting; '
-                     'both lenses must be paired with Windows')
-            # Scope the longer scan to this PC measurement connection; leave
-            # the upstream flasher and its normal timeout unchanged.
-            previous_timeout = g2flash.SCAN_TIMEOUT
+        last_error = None
+        for connection in range(1, 4):
             try:
-                g2flash.SCAN_TIMEOUT = SCAN_SECONDS
+                progress(f'Opening connection {connection} of 3; both lenses must be paired with Windows')
                 self.transport.connect()
-            finally:
-                g2flash.SCAN_TIMEOUT = previous_timeout
-        else:
-            progress('Connecting through DroidBridge')
-            self.transport.connect()
-        progress('Connected; discovering the private service')
-        if not self.transport.discover():
-            raise RuntimeError('service discovery failed')
-        self.max_write = self.mtu-3
-        if isinstance(self.transport, LocalBleTransport):
-            characteristic = self.transport.client.services.get_characteristic(CTRL[1])
-            if characteristic is None or 'write-without-response' not in characteristic.properties:
-                raise RuntimeError('private command characteristic unavailable')
-            self.max_write = characteristic.max_write_without_response_size
-        progress('Enabling private notifications')
-        self.transport.set_notify(CTRL[0], CTRL[2], True)
-        if not isinstance(self.transport, LocalBleTransport):
-            time.sleep(2.5)
-        # Stock authentication avoids 2.2.9's ~30 s disconnect for an otherwise
-        # unauthenticated connection. It runs before uploading or timing.
-        progress('Authenticating the lens')
-        authenticate(self.transport)
-        progress(f'Connected and authenticated; largest write {self.max_write} bytes')
+                progress('Connected; checking the private services')
+                if not self.transport.discover():
+                    raise RuntimeError('service discovery failed')
+                self.max_write = self.mtu-3
+                if isinstance(self.transport, LocalBleTransport):
+                    characteristic = self.transport.client.services.get_characteristic(CTRL[1])
+                    if characteristic is None or 'write-without-response' not in characteristic.properties:
+                        raise RuntimeError('Windows reports incomplete private command services')
+                    self.max_write = characteristic.max_write_without_response_size
+                progress('Enabling data and control notifications; settling for 2.5 s')
+                self.transport.set_notify(DATA[0], DATA[2], True)
+                self.transport.set_notify(CTRL[0], CTRL[2], True)
+                time.sleep(2.5)
+                for login in range(1, 4):
+                    while True:
+                        try: self.transport.notes.get_nowait()
+                        except queue.Empty: break
+                    progress(f'Authenticating: login {login} of 3 on connection {connection}')
+                    try:
+                        authenticate(self.transport)
+                        progress(f'Logged in; largest write {self.max_write} bytes')
+                        return
+                    except TimeoutError as error:
+                        last_error = error
+                        progress(f'Login unanswered: {exception_text(error)}')
+                raise TimeoutError('three login attempts received no reply') from last_error
+            except (Exception, asyncio.CancelledError) as error:
+                last_error = error
+                progress(f'Connection {connection} failed: {exception_text(error)}; rebuilding the connection')
+                try: self.transport.disconnect()
+                except (Exception, asyncio.CancelledError): pass
+                if connection < 3:
+                    time.sleep(10)
+        raise RuntimeError(f'lens connection/login failed after three connections: {exception_text(last_error)}') from last_error
+
+    def new_session(self):
+        """Clear old results while retaining the authenticated link and sequence."""
+        previous = self.session
+        self.session = (previous + secrets.randbelow(65534)+1) % 65535 or 65535
+        self.results.clear()
 
     def receive(self, wait):
         characteristic, frame = self.transport.notes.get(timeout=wait)
@@ -226,7 +284,7 @@ def summarize(words, reference, setup, skip, uncached):
     """Void the entire run on any identity, status, count or Y-hash mismatch."""
     expected_length = RESULT_WORDS
     profile = next((p for p in PROFILES if p['sha256']==reference.get('clip_sha256')),None)
-    if (len(words) != expected_length or words[0] != MAGIC or words[1] != (SETUPS[setup] | skip<<8 | uncached<<16)
+    if (len(words) != expected_length or words[0] != firmware_magic(setup) or words[1] != (SETUPS[setup] | skip<<8 | uncached<<16)
             or not profile or words[2] or words[3] != expected_length
             or words[4:7] != [FRAMES,PASSES,profile['crc32']]
             or words[12:15] != profile['dimensions']+[profile['bytes']]
@@ -291,31 +349,10 @@ def timing_summary(samples):
     return values
 
 
-def run(args):
-    progress('Reading and validating the clip and PC Y-hash reference')
-    raw = Path(args.clip).read_bytes()
-    profile = check_clip(raw)
-    reference = json.loads(Path(args.reference).read_text(encoding='utf-8'))
-    if args.uncached and args.setup != 'full-mram':
-        raise ValueError('uncached frames/tables option is full-mram only')
-    connection = parse_connection_string(args.connection)
-    bridge = None
-    client = None
+def run_case(client, args, raw, profile, reference):
+    """One bounded session; successful CLOSE is required before the next case."""
     session_open = False
     try:
-        if connection['method'] == 'droidbridge':
-            progress('Opening the DroidBridge websocket')
-            bridge = Bridge(connection['base'],connection['token']); bridge.start_ws()
-            deadline = time.monotonic()+20
-            while not bridge.ws_open:
-                if time.monotonic() >= deadline: raise TimeoutError('DroidBridge websocket did not open')
-                time.sleep(.05)
-        transport = (DroidBridgeTransport(bridge,connection[args.lens]) if bridge else
-            LocalBleTransport(connection[args.lens],connection['address_type'],side=args.lens))
-        client = Client(transport,args.lens,args.mtu)
-        client.connect()
-        if client.command(HELLO,result_index=0xffff) != MAGIC:
-            raise RuntimeError('wrong experiment firmware')
         client.command(BEGIN,struct.pack('<IIHH',profile['bytes'],profile['crc32'],*profile['dimensions']))
         session_open = True
         progress(f'Uploading {len(raw)} clip bytes in 2 KiB chunks')
@@ -354,7 +391,8 @@ def run(args):
             raise RuntimeError(f'firmware run failed: phase={phase}, error={words[2]}; raw results {raw_path}')
         progress('Checking every Y hash and flagging timing anomalies')
         summary = summarize(words,reference,args.setup,args.skip_chroma,args.uncached)
-        summary.update(lens=args.lens, clip_sha256=profile['sha256'], hardware_measurement=True)
+        summary.update(lens=args.lens, clip_sha256=profile['sha256'], clip_name=profile['name'],
+                       deblocking=profile['deblocking'], hardware_measurement=True)
         progress('Closing the session and checking released heaps')
         summary['heap_stats_released'] = client.close_session()
         session_open = False
@@ -369,17 +407,138 @@ def run(args):
         else:
             progress('No reliable timing samples remain; Y correctness passed and raw evidence is retained.')
         progress(f'Summary saved: {output}')
+        return summary
+    finally:
+        if session_open:
+            try: client.close_session()
+            except Exception as error:
+                progress(f'Close pending; session expires automatically: {exception_text(error)}', file=sys.stderr)
+
+
+def measure(args, cases):
+    """Authenticate once; stop on a failed case without replaying a timed run."""
+    progress('Reading and validating every clip and PC Y-hash reference')
+    inputs = {}
+    for case in cases:
+        if case.uncached and case.setup != 'full-mram':
+            raise ValueError('uncached frames/tables option is full-mram only')
+        key = (str(Path(case.clip).resolve()), str(Path(case.reference).resolve()))
+        if key not in inputs:
+            raw = Path(case.clip).read_bytes()
+            profile = check_clip(raw)
+            reference = json.loads(Path(case.reference).read_text(encoding='utf-8'))
+            hashes = reference.get('hashes', {})
+            if (reference.get('decoder') != '59c66b1' or reference.get('clip_sha256') != profile['sha256']
+                    or reference.get('clip_crc32') != profile['crc32']
+                    or reference.get('dimensions') != profile['dimensions'] or reference.get('frames') != FRAMES
+                    or any(len(hashes.get(str(skip), [])) != FRAMES for skip in (0, 1))
+                    or hashes.get('0') != hashes.get('1')):
+                raise ValueError('PC reference identity/format invalid')
+            inputs[key] = (raw, profile, reference)
+        if case.setup.startswith('full-') and inputs[key][1]['name'] != 'tokyo-original':
+            raise ValueError('firmware A accepts only the original Tokyo clip')
+    if len({firmware_magic(case.setup) for case in cases}) != 1:
+        raise ValueError('batch cases must belong to the same firmware (A or B)')
+    connection = parse_connection_string(args.connection)
+    bridge = client = None
+    try:
+        if connection['method'] == 'droidbridge':
+            progress('Opening the DroidBridge websocket')
+            bridge = Bridge(connection['base'],connection['token']); bridge.start_ws()
+            deadline = time.monotonic()+20
+            while not bridge.ws_open:
+                if time.monotonic() >= deadline: raise TimeoutError('DroidBridge websocket did not open')
+                time.sleep(.05)
+        transport = (DroidBridgeTransport(bridge,connection[args.lens]) if bridge else
+            MeasurementBleTransport(connection[args.lens],connection['address_type'],side=args.lens))
+        client = Client(transport,args.lens,args.mtu)
+        client.connect()
+        if client.command(HELLO,result_index=0xffff) != firmware_magic(cases[0].setup):
+            raise RuntimeError('wrong experiment firmware for the selected setups')
+        summaries = []
+        for index, case in enumerate(cases):
+            key = (str(Path(case.clip).resolve()), str(Path(case.reference).resolve()))
+            raw, profile, reference = inputs[key]
+            client.new_session()
+            progress(f'Batch case {index+1}/{len(cases)}: {profile["name"]}, {case.setup}, '
+                     f'skip_chroma={case.skip_chroma}; same connection')
+            summaries.append(run_case(client,case,raw,profile,reference))
+            if index+1 < len(cases):
+                progress('Session released; pausing 2 s before the next case')
+                time.sleep(2)
+        return summaries
     finally:
         if client:
-            if session_open:
-                try: client.close_session()
-                except Exception as error:
-                    progress(f'Close pending; session expires automatically: {exception_text(error)}', file=sys.stderr)
             progress('Disconnecting the lens')
             client.transport.close()
         if bridge:
             bridge.close()
             if getattr(bridge,'ws',None) is not None: bridge.ws.close()
+
+
+def run(args):
+    return measure(args, [args])
+
+
+def deblocking_comparisons(summaries):
+    """Compare the matched re-encodes only when both runs have valid timing."""
+    runs = {(row.get('setup'), row.get('skip_chroma'), row.get('clip_name')): row for row in summaries}
+    comparisons = []
+    for setup, skip in dict.fromkeys((row.get('setup'), row.get('skip_chroma')) for row in summaries):
+        on, off = (runs.get((setup,skip,'tokyo-deblock-'+mode)) for mode in ('on','off'))
+        if on is None or off is None:
+            continue
+        row = dict(setup=setup, skip_chroma=skip,
+                   timing_valid=bool(on.get('timing_valid') and off.get('timing_valid')),
+                   excluded_on=on['excluded_frames'], excluded_off=off['excluded_frames'])
+        for field, label in (('median_ms','cycles'), ('median_tick_ms','ticks')):
+            before, after = on[field], off[field]
+            row[label] = dict(on_ms=before, off_ms=after,
+                saving_percent=100*(before-after)/before if row['timing_valid'] and before and after is not None else None)
+        comparisons.append(row)
+    return comparisons
+
+
+def batch(args):
+    """Run a clip/setup/mode matrix on one lens over one connection."""
+    directory = Path(args.output_dir)
+    if directory.exists() and not directory.is_dir():
+        raise ValueError('batch output must be a directory')
+    cases = []
+    clips = [args.clip] if isinstance(args.clip, (str, Path)) else args.clip
+    references = [args.reference] if isinstance(args.reference, (str, Path)) else args.reference
+    if len(clips) != len(references):
+        raise ValueError('supply one PC reference for each clip, in the same order')
+    profiles = [check_clip(Path(clip).read_bytes()) for clip in clips]
+    if len({profile['name'] for profile in profiles}) != len(profiles):
+        raise ValueError('batch contains the same clip more than once')
+    for setup in dict.fromkeys(args.setups):
+        for skip in dict.fromkeys(args.skip_chroma):
+            for clip, reference, profile in zip(clips, references, profiles):
+                case = SimpleNamespace(**vars(args))
+                case.clip, case.reference = clip, reference
+                case.setup, case.skip_chroma, case.uncached = setup, skip, 0
+                case.output = directory/(f'{args.lens}-{profile["name"]}-{setup}-'+('skip' if skip else 'color')+'.json')
+                cases.append(case)
+    if ((directory/'batch-summary.json').exists() or (directory/'deblocking-comparison.json').exists()
+            or any(case.output.exists() or case.output.with_suffix('.raw.json').exists() for case in cases)):
+        raise FileExistsError('batch evidence already exists; choose a new output directory')
+    summaries = measure(args, cases)
+    Path(args.output_dir, 'batch-summary.json').write_text(json.dumps(summaries, indent=2)+'\n', encoding='utf-8')
+    comparisons = deblocking_comparisons(summaries)
+    if comparisons:
+        (directory/'deblocking-comparison.json').write_text(json.dumps(comparisons, indent=2)+'\n', encoding='utf-8')
+        for row in comparisons:
+            timing = row['cycles']
+            if row['timing_valid'] and timing['saving_percent'] is not None:
+                progress(f'Deblocking {row["setup"]}, skip_chroma={int(row["skip_chroma"])}: '
+                         f'{timing["on_ms"]:.3f} -> {timing["off_ms"]:.3f} ms; '
+                         f'{timing["saving_percent"]:.1f}% saving; '
+                         f'excluded on/off {row["excluded_on"]}/{row["excluded_off"]}.')
+            else:
+                progress(f'Deblocking {row["setup"]}, skip_chroma={int(row["skip_chroma"])}: '
+                         'no reliable timing comparison; Y correctness passed.')
+    progress(f'Batch complete: {len(summaries)} valid runs over one connection')
 
 
 def main(argv=None):
@@ -395,9 +554,19 @@ def main(argv=None):
     measure.add_argument('--uncached',type=int,choices=(0,1),default=0)
     measure.add_argument('--mtu',type=int,default=23)
     measure.add_argument('--clip',required=True); measure.add_argument('--reference',required=True); measure.add_argument('--output',required=True)
+    matrix=sub.add_parser('batch',help='measure several setup/chroma combinations over one connection; never flash')
+    matrix.add_argument('-c','--connection',required=True)
+    matrix.add_argument('--lens',choices=('left','right'),required=True)
+    matrix.add_argument('--setups',nargs='+',choices=tuple(SETUPS),default=['small-mram','small-ram','mixed-mram','mixed-ram'])
+    matrix.add_argument('--skip-chroma',nargs='+',type=int,choices=(0,1),default=[0,1])
+    matrix.add_argument('--mtu',type=int,default=23)
+    matrix.add_argument('--clip',nargs='+',required=True,help='one or more verified clips')
+    matrix.add_argument('--reference',nargs='+',required=True,help='matching PC references in clip order')
+    matrix.add_argument('--output-dir',required=True)
     args=parser.parse_args(argv)
     try:
         if args.action=='prepare': prepare(args.source,args.clip,args.reference)
+        elif args.action=='batch': batch(args)
         else: run(args)
     except Exception as error:
         progress(f'Decoder speed test failed: {exception_text(error)}', file=sys.stderr); return 1
