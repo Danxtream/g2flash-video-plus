@@ -1,3 +1,4 @@
+#define CFW_DECODER_SPEED_UPLOAD 1
 /*
  * Single translation unit for all injected CFW patch code.
  *
@@ -20,7 +21,6 @@
  * turn those into absolute relocations that build.py rejects.
  */
 
-#include "decoder_speed_capsule.h"
 #include "memory.c"
 #include "utils.c"
 #include "protobuf.c"

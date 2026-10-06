@@ -16,7 +16,7 @@ extern "C" __attribute__((visibility("hidden"))) int abs(int);
 #include "nal.hpp"
 
 #ifdef DS_HOST_TEST
-ds_imports* ds_host_imports;
+extern ds_imports* ds_host_imports;
 #endif
 static ds_imports& imports() {
 #ifdef DS_HOST_TEST

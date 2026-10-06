@@ -195,11 +195,6 @@ def compile_text(src, extra=()):
     BuildError on any relocation that can't be resolved position-independently or
     any reference to an external/undefined symbol. Sizes are resolved from st_size,
     falling back to the gap to the next function (or end of .text) when 0."""
-    if os.path.basename(src) == "patches_main.c":
-        # The experiment capsule is separately closed and movable; the C unit
-        # merely embeds its bytes and calls exported offsets indirectly.
-        from decoder_speed.build_capsule import build_capsule
-        build_capsule()
     obj = obj_path(src, ".o")
     subprocess.run([CLANG, *CFLAGS, *extra, "-I", OBJ_DIR, "-c", src, "-o", obj], check=True)
 

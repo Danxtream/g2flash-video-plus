@@ -11,6 +11,8 @@ static const ds_clip_profile ds_clips[] = {
     {DS_CLIP_BYTES, DS_CLIP_CRC}, /* Original Tokyo segment. */
     {22888U, 0xa7e2ccf1U},       /* Matching re-encode, deblocking on. */
     {23296U, 0x65ebfb75U},       /* Matching re-encode, deblocking off. */
+    {19038U, 0x5026f28eU}, /* Second source, deblocking on. */
+    {19672U, 0x91283249U}, /* Second source, deblocking off. */
 };
 static inline int ds_clip_index(uint32_t bytes, uint32_t crc) {
     for (uint32_t i=0; i<sizeof(ds_clips)/sizeof(ds_clips[0]); ++i)

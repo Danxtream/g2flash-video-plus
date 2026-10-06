@@ -138,6 +138,10 @@ static uint32_t cfw_message_complete(cfw_message_stream *stream, uint8_t here,
     }
     uint16_t crc = valid ? cfw_message_crc(data, (uint16_t)size) : 0;
     valid = valid && crc == stream->checksum;
+    /* Uploaded native code is a direct-lens measurement command only. */
+#ifdef CFW_DECODER_SPEED_UPLOAD
+    if (!ds_direct_message(data,size,here,origin,stream->options)) valid = 0;
+#endif
     if (valid && cfw_message_received(data, (uint16_t)size, crc) != 0) valid = 0;
     if (!valid) {
         cfw_inflate_reset(stream);

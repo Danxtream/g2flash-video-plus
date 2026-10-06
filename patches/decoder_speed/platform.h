@@ -5,7 +5,6 @@
 #else
 #include "../cfw_context.h"
 #include "../malloc.h"
-#include "decoder_speed_capsule.h"
 
 /* Entry points are pinned to the audited 2.2.9.22 donor in abi.py. */
 #define DS_THREAD_NEW ((uint32_t (*)(void (*)(void *), void *, const void *))0x00442897U)

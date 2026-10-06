@@ -30,6 +30,15 @@ attributes #0 = { nounwind }
 
 
 class PartitionTests(unittest.TestCase):
+    def test_exact_promotion_has_one_owner_and_unknown_symbol_is_rejected(self):
+        hot,cold,membership=module.partition(IR,('_hot',),promotions=('cold',))
+        self.assertEqual(membership['functions']['cold'],'hot')
+        self.assertEqual(membership['promotions'],['cold'])
+        self.assertEqual(sum(line.startswith('define ') and module.symbol(line)=='cold'
+                             for line in (hot+cold).splitlines()),1)
+        self.assertNotIn('minsize',hot)
+        with self.assertRaises(ValueError):module.partition(IR,('_hot',),promotions=('absent',))
+
     def test_single_owner_hidden_cross_calls_and_constants(self):
         hot, cold, membership = module.partition(IR, ('_hot',))
         self.assertEqual(membership['functions'], {'sub0h264_hot':'hot','cold':'cold','entry':'cold'})

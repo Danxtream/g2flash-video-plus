@@ -14,6 +14,8 @@ typedef struct {
     void (*release)(void *);
     int (*preflight)(const ds_request *, uint32_t, ds_failure *);
     void (*fail)(uint32_t);
+    void (*profile_enter)(uint32_t);
+    void (*profile_exit)(uint32_t);
 } ds_imports;
 typedef struct {
     const uint8_t *y;
@@ -22,6 +24,8 @@ typedef struct {
 #ifdef __cplusplus
 extern "C" {
 #endif
+void ds_profile_enter(uint32_t id);
+void ds_profile_exit(uint32_t id);
 uint32_t ds_size(void);
 uint32_t ds_selftest(uint32_t value);
 void *ds_init(void *memory, uint32_t size, uint32_t skip);

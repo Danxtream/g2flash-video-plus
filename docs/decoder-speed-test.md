@@ -1,4 +1,4 @@
-# Decoder measurement, firmwares A and B
+# Decoder measurement, firmwares A, B and C
 
 This experiment uses jim's `306e42e` (Even 2.2.9.22, `Faceclaw/16`). It retains
 that identity solely for this local measurement and does not implement the video
@@ -201,3 +201,113 @@ Build with `bash build_cfw.sh --skip-venv --update-patches`, review the generate
 pin the resulting hash and reproduce it before the independent boot gate.
 All real execution timings and cache/RAM behavior remain to be measured on the
 glasses; offline tests and a healthy boot do not establish decoder throughput.
+
+## Firmware C: uploaded candidates and a function profile
+
+C removes both embedded decoder capsules. It keeps the controller, bounded
+allocator, clock/results code and a SHA256 upload check in MRAM. No decoder
+worker or experiment buffer exists before a PC command. Decoder sources still
+equal `59c66b1`; every C run requires chroma skipped and cached heap-20 data.
+Code and read-only constants are uploaded into one 64-byte-aligned heap-27
+allocation, with 128 bytes of slack and the existing 16 KiB reserve. C accepts
+at most 156,108 capsule bytes, subject to live free/largest-block checks. A
+phone session can leave too little heap 27 for the full endpoint; C refuses it
+without evicting Even's allocations. No code is persisted or written to MRAM.
+
+The existing public stock login is retained. It contains no secret; the nonce
+and token identify a single owner and do not authenticate native code. C adds
+no bonding/login hooks. Mode 31 must originate locally and target that one
+lens; inter-lens bridge and both-lens commands are rejected while other private
+messages keep their routing. The C tool also rejects DroidBridge connections.
+Use trusted, PC-checked capsules only: a digest checks bytes, not code safety.
+Uploaded native code can fault, hang or write memory despite these bounds.
+This is a temporary measurement build, never part of Faceclaw or the port.
+
+C's command header is `31,'D','S',3,op,tokenLE16,nonceLE32`; HELLO returns
+`0x44530301`. The 88-byte BEGIN manifest contains clip length/CRC/dimensions,
+capsule length, text bounds, ABI/kind, profile count, six even/distinct export
+offsets and the declared SHA256. ABI 1 exports, in order, are `ds_size`,
+`ds_selftest`, `ds_init`, `ds_destroy`, `ds_decode` and `ds_frame`. Offsets must
+lie inside the declared executable bounds. Kind 0 is ordinary, 1 profiles,
+and 2 is the matching profile control with accounting disabled.
+
+CAP_WRITE (9) uses an offset and at most 2,048 code bytes. Writes must be
+contiguous; only an identical already-written range can be retried. CAP_SEAL
+(10) computes SHA256 over the complete capsule. Clip WRITE/SEAL remain separate.
+Both seals are required before RUN, and sealed bytes cannot change. RUN accepts
+only setup 4, skip 1, repeats 5, uncached 0. Ordinary capsules use two warmups
+and five measured passes; profile/control use one warmup and one measured pass
+to bound instrumentation time. No ambiguous RUN is replayed or resumed after
+connection loss. The lease reclaims abandoned state; CLOSE waits for the worker
+to park and terminate before freeing executable memory. The original MPU/cache
+policy checks, clean/invalidate barriers, normal watchdog/interrupts and deadline
+remain. C does not modify MPU mappings.
+
+Result words 110-114 give profile count, validity flags, depth high-water,
+scratch bytes and kind; 115 is the nonce; 116-123 repeat the capsule hash.
+PROFILE_READ (11) pages five words per function: call count, inclusive cycles
+(low/high), exclusive cycles (low/high). Only decoding is profiled: initialization,
+destruction, calibration, hashes and BLE remain outside the accounting bracket.
+The bounded scratch is 13,328 bytes in heap 20, with at most 512 rows and 64
+active calls; depth, call-count, unbalanced-return and ambiguous-wrap failures
+make a profile unusable. Inlined work belongs to its emitted caller. Profile
+timings rank promotions and never become points on the final speed curve.
+
+The profile and control have identical instrumented bytes. Compare both with
+ordinary mixed on the glasses to report frame slowdown and estimated additional
+cycles per hook using the recorded call count. This includes accounting overhead
+and excludes untimed initialization; interrupt/preemption noise still applies.
+If overhead changes rankings substantially, verify savings with uninstrumented
+one-function/group promotion capsules before selecting the curve.
+
+C adds a second matched Baseline/CAVLC/ref-1 pair, from a different source,
+with no I_PCM or 8x8 transform. SPS/PPS + IDR + 31 P frames are retained; each
+off slice has filter-idc 1. The cap remains 23,921 bytes and 2,048 bytes per NAL:
+both new segments fit without modifying encoder settings.
+
+| Clip | Bytes | CRC32 | SHA256 |
+|---|---:|---|---|
+| tokyo15-deblock-on | 19,038 | 5026f28e | 88af67490140ac9355371f9dcb008339eafc958943feab35f97ca1ff655b6aa0 |
+| tokyo15-deblock-off | 19,672 | 91283249 | 52d8a8f474d9138480f37b58bb0c4b8b86a56fb5b0f010851aa2e11fac9315fb |
+
+Build capsules without rebuilding firmware, in Ubuntu:
+
+```sh
+python3 patches/decoder_speed/build_capsule.py --kind mixed --output obj/decoder-speed/mixed
+python3 patches/decoder_speed/build_capsule.py --kind full --output obj/decoder-speed/full
+python3 patches/decoder_speed/build_capsule.py --kind profile --output obj/decoder-speed/profile
+python3 patches/decoder_speed/build_capsule.py --kind profile-control --output obj/decoder-speed/profile-control
+python3 -m unittest discover -s tests/decoder_speed -p test_link.py -v
+python3 -m unittest discover -s tests/decoder_speed -p test_partition.py -v
+python3 -m unittest discover -s tests/decoder_speed -p test_profile.py -v
+```
+
+`--promotions <symbols.json>` adds exact pre-optimization symbols to mixed's
+existing hot set. Unknown symbols fail; constants/definitions retain one owner,
+with no LTO or duplicated decode path. Promoted capsules are named
+`mixedplus-<actual decimal KB to three places>`. Manifests record bytes, exports,
+SHA256, flags, compiler, source identity and membership. Generated files remain
+ignored. `DS_CAPSULE_ROOT` optionally locates these directories for link tests.
+
+Before upload, each capsule must have independent LLD byte comparisons and
+sanitized PC equivalents matching every frame of all accepted clips. Store a
+matching `checks.json` beside `capsule.json` and `capsule.bin`: `result="PASS"`,
+the exact `sha256`, `lld=true` and `pc_y=true`. The tool requires this evidence
+before connecting; it is a local provenance record, not a signature. Every
+physical run must still match its PC Y hashes.
+
+```powershell
+venv\Scripts\python.exe -m unittest discover -s tests/decoder_speed -p 'test*tool.py' -v
+venv\Scripts\python.exe decoder_speed_test.py batch -c 'g2://local?left=<left-address>&right=<right-address>&addressType=public' --lens left --capsule <mixed/capsule.json> <profile-control/capsule.json> <profile/capsule.json> --clip <Tokyo-off.h264> <second-off.h264> --reference <Tokyo-off-reference.json> <second-off-reference.json> --output-dir <new-private-profile-directory>
+```
+
+A C batch forces skip mode, keeps one paired Windows connection, and closes
+each sealed owner before the next capsule/clip. Color requests and existing
+evidence directories are rejected. Raw results precede validation; profile
+rows and validity flags accompany the summary. Capsule bytes/hash/nonce/kind
+are checked against the manifest. Use ordinary mixed and full plus at least
+five promoted intermediates for the complete left-lens, deblocking-off curve
+on both sources. Then measure the 2-3 knee sizes on both lenses, OFF/ON, both
+sources. Measure full RAM on original Tokyo once per lens to compare with A.
+The hardware profile chooses promotions; no candidate speed is inferred from
+PC timings, instrumentation or the boot check. The user chooses the final size.

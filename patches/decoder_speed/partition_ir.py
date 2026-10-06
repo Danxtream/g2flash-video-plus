@@ -44,11 +44,13 @@ def constant_type(text):
     return match.group().rstrip()
 
 
-def partition(ir, groups=HOT_GROUPS):
+def partition(ir, groups=HOT_GROUPS, promotions=()):
     """Return hot/cold IR plus an auditable membership manifest; fail closed."""
     if any(token in ir for token in ('@llvm.global_ctors', '@llvm.global_dtors',
                                     ' blockaddress(', ' alias ', ' ifunc ', 'thread_local')):
         raise ValueError('unsupported initializer, alias or thread-local IR')
+    def selected(name):
+        return name in promotions or ('sub0h264' in name and any(group in name for group in groups))
     hot, cold, names, constants = [], [], {}, []
     lines = ir.splitlines(keepends=True)
     references = {'hot': set(), 'cold': set()}
@@ -56,7 +58,7 @@ def partition(ir, groups=HOT_GROUPS):
     for line in lines:
         if line.startswith('define '):
             name = symbol(line)
-            owner = 'hot' if any(group in name for group in groups) and 'sub0h264' in name else 'cold'
+            owner = 'hot' if selected(name) else 'cold'
         elif line == '}\n':
             owner = None
         elif owner:
@@ -68,8 +70,8 @@ def partition(ir, groups=HOT_GROUPS):
             name = symbol(line)
             if name in names or not line.endswith(' {\n') or '!dbg' in line:
                 raise ValueError('duplicate, multiline or debug function header')
-            selected = any(group in name for group in groups) and 'sub0h264' in name
-            names[name] = 'hot' if selected else 'cold'
+            is_hot = selected(name)
+            names[name] = 'hot' if is_hot else 'cold'
             header = 'define dso_local hidden ' + re.sub(LINKAGE, '', line[len('define '):])
             header = re.sub(r' comdat(?:\([^)]*\))?', '', header)
             # Parameter align attributes belong to the signature. Only the
@@ -79,7 +81,7 @@ def partition(ir, groups=HOT_GROUPS):
             # Preserve the original discardable/local linkage when no other
             # module needs this symbol. Promoting every inline helper prevents
             # Clang from eliminating otherwise unused out-of-line copies.
-            opposite = 'cold' if selected else 'hot'
+            opposite = 'cold' if is_hot else 'hot'
             body = [header if name in references[opposite] else line]
             i += 1
             while i < len(lines) and lines[i] != '}\n':
@@ -89,8 +91,8 @@ def partition(ir, groups=HOT_GROUPS):
             if i == len(lines):
                 raise ValueError('unterminated function')
             body.append(lines[i])
-            hot.extend(body if selected else [declaration])
-            cold.extend([declaration] if selected else body)
+            hot.extend(body if is_hot else [declaration])
+            cold.extend([declaration] if is_hot else body)
         elif line.startswith('@'):
             if ' external ' in line:
                 hot.append(line); cold.append(line)
@@ -114,10 +116,12 @@ def partition(ir, groups=HOT_GROUPS):
                 raise ValueError('debug metadata not supported; emit IR without stack usage/debug')
             hot.append(line); cold.append(line)
         i += 1
+    if set(promotions)-set(names):
+        raise ValueError('promotion matched no definition')
     if not any(owner == 'hot' for owner in names.values()):
         raise ValueError('hot selection matched no definitions')
     cold_ir = ''.join(cold)
     # Clang's -Oz frontend attaches both attributes. IR-input compilation
     # keeps the input attributes; the driver flag alone cannot add them.
     cold_ir = re.sub(r'^(attributes #\d+ = \{ )', r'\1minsize optsize ', cold_ir, flags=re.MULTILINE)
-    return ''.join(hot), cold_ir, dict(functions=names, constants=constants, groups=list(groups))
+    return ''.join(hot), cold_ir, dict(functions=names, constants=constants, groups=list(groups), promotions=list(promotions))

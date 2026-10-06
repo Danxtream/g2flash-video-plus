@@ -14,6 +14,7 @@ from pathlib import Path
 from datetime import datetime
 from types import SimpleNamespace
 import queue
+import re
 import secrets
 import statistics
 import struct
@@ -40,13 +41,22 @@ PROFILES = (
          sha256='c68f8a3a113b6b0e3cf2aee3a5b9082ea52548a83f8927eddbec3b920e3756e8',
          crc32=0x65ebfb75,dimensions=[320,192],deblocking='off'),
 )
-HELLO, BEGIN, WRITE, SEAL, RUN, READ, ABORT, CLOSE, HEAPS = range(9)
+C_MAGIC = 0x44530301
+C_PROFILES = PROFILES + (
+    dict(name='tokyo15-deblock-on', bytes=19038,
+         sha256='88af67490140ac9355371f9dcb008339eafc958943feab35f97ca1ff655b6aa0',
+         crc32=1344729742, dimensions=[320,192], deblocking='on'),
+    dict(name='tokyo15-deblock-off', bytes=19672,
+         sha256='52d8a8f474d9138480f37b58bb0c4b8b86a56fb5b0f010851aa2e11fac9315fb',
+         crc32=2435330633, dimensions=[320,192], deblocking='off'),
+)
+HELLO, BEGIN, WRITE, SEAL, RUN, READ, ABORT, CLOSE, HEAPS, CAP_WRITE, CAP_SEAL, PROFILE_READ = range(12)
 SETUPS = {'full-mram': 0, 'full-ram': 1, 'small-mram': 0, 'small-ram': 1,
-          'mixed-mram': 2, 'mixed-ram': 3}
+          'mixed-mram': 2, 'mixed-ram': 3, 'capsule-ram': 4}
 HEADER_WORDS, FRAMES, PASSES, WARMUPS = 128, 32, 5, 2
 FRAME_WORDS = 5
 RESULT_WORDS = HEADER_WORDS+FRAMES*(PASSES+WARMUPS)*FRAME_WORDS
-OP_NAMES = dict(enumerate(('HELLO', 'BEGIN', 'WRITE', 'SEAL', 'RUN', 'READ', 'ABORT', 'CLOSE', 'HEAPS')))
+OP_NAMES = dict(enumerate(('HELLO', 'BEGIN', 'WRITE', 'SEAL', 'RUN', 'READ', 'ABORT', 'CLOSE', 'HEAPS', 'CAP_WRITE', 'CAP_SEAL', 'PROFILE_READ')))
 
 
 def progress(text, file=None):
@@ -59,11 +69,15 @@ def exception_text(error):
     return f'{type(error).__name__}: {str(error) or repr(error)}'
 
 
-def message(op, session, args=b''):
+def message(op, session, args=b'', nonce=None):
     """Encode a versioned, bounded experiment command inside the old transport."""
-    if not 0 <= op <= HEAPS or not 0 <= session <= 65535:
+    if not 0 <= op <= PROFILE_READ or not 0 <= session <= 65535:
         raise ValueError('invalid operation/session')
-    return b'\x1fDS\x02' + bytes([op]) + struct.pack('<H', session) + args
+    if nonce is None:
+        return b'\x1fDS\x02' + bytes([op]) + struct.pack('<H', session) + args
+    if not 0 < nonce <= 0xffffffff:
+        raise ValueError('invalid session nonce')
+    return b'\x1fDS\x03' + bytes([op]) + struct.pack('<HI', session, nonce) + args
 
 
 def parse_result(frame):
@@ -78,11 +92,11 @@ def parse_result(frame):
 
 
 def check_clip(raw):
-    for profile in PROFILES:
+    for profile in C_PROFILES:
         if (len(raw)==profile['bytes'] and hashlib.sha256(raw).hexdigest()==profile['sha256']
                 and zlib.crc32(raw)==profile['crc32']):
             return profile
-    raise ValueError('the experiment requires a verified 32-frame Tokyo clip (original or deblocking pair)')
+    raise ValueError('the experiment requires a verified 32-frame reference clip')
 
 
 def linux_path(path):
@@ -169,7 +183,9 @@ class MeasurementBleTransport(LocalBleTransport):
 
 
 def firmware_magic(setup):
-    return MAGIC if setup.startswith('full-') else B_MAGIC
+    """Keep A/B compatibility; uploaded capsules select C's nonce protocol."""
+    if setup=='capsule-ram': return C_MAGIC
+    return B_MAGIC if setup.startswith(('small-','mixed-')) else MAGIC
 
 
 class Client:
@@ -179,6 +195,7 @@ class Client:
         self.next_sequence = secrets.randbelow(256)
         self.results = {}
         self.session = secrets.randbelow(65535)+1
+        self.nonce = None
 
     def connect(self):
         last_error = None
@@ -226,6 +243,8 @@ class Client:
         previous = self.session
         self.session = (previous + secrets.randbelow(65534)+1) % 65535 or 65535
         self.results.clear()
+        if self.nonce is not None:
+            self.nonce = secrets.randbelow(0xffffffff)+1
 
     def receive(self, wait):
         characteristic, frame = self.transport.notes.get(timeout=wait)
@@ -238,12 +257,12 @@ class Client:
         return frame
 
     def command(self, op, args=b'', result_index=None):
-        if op != READ:
-            detail = f' offset={struct.unpack("<I", args[:4])[0]}' if op == WRITE else ''
+        if op not in (READ, PROFILE_READ):
+            detail = f' offset={struct.unpack("<I", args[:4])[0]}' if op in (WRITE, CAP_WRITE) else ''
             progress(f'Sending {OP_NAMES[op]}{detail}')
         if result_index is not None:
             self.results.pop(result_index, None)
-        payload = message(op, self.session, args)
+        payload = message(op, self.session, args, self.nonce)
         seq = self.next_sequence
         self.next_sequence = (seq+17)&255
         packets = make_packets([payload], self.mtu, seq, self.lens, max_write=self.max_write)
@@ -282,13 +301,18 @@ class Client:
 
 def summarize(words, reference, setup, skip, uncached):
     """Void the entire run on any identity, status, count or Y-hash mismatch."""
-    expected_length = RESULT_WORDS
-    profile = next((p for p in PROFILES if p['sha256']==reference.get('clip_sha256')),None)
+    c_mode = setup == 'capsule-ram'
+    if c_mode and (not skip or uncached):
+        raise ValueError('C requires cached chroma-skipped decoding')
+    passes = 1 if c_mode and len(words)>114 and words[114] in (1,2) else PASSES
+    warmups = 1 if passes == 1 else WARMUPS
+    expected_length = HEADER_WORDS+FRAMES*(passes+warmups)*FRAME_WORDS
+    profile = next((p for p in C_PROFILES if p['sha256']==reference.get('clip_sha256')),None)
     if (len(words) != expected_length or words[0] != firmware_magic(setup) or words[1] != (SETUPS[setup] | skip<<8 | uncached<<16)
             or not profile or words[2] or words[3] != expected_length
-            or words[4:7] != [FRAMES,PASSES,profile['crc32']]
+            or words[4:7] != [FRAMES,passes,profile['crc32']]
             or words[12:15] != profile['dimensions']+[profile['bytes']]
-            or words[15] != FRAME_WORDS or words[37] != WARMUPS or reference.get('decoder') != '59c66b1'
+            or words[15] != FRAME_WORDS or words[37] != warmups or reference.get('decoder') != '59c66b1'
             or any(type(word) is not int or not 0 <= word <= 0xffffffff for word in words)):
         raise ValueError('run metadata invalid; timing result void')
     hashes = reference.get('hashes', {}).get(str(skip))
@@ -297,7 +321,7 @@ def summarize(words, reference, setup, skip, uncached):
     rows, frame_rows = [], []
     for frame in range(FRAMES):
         samples = []
-        for run in range(PASSES+WARMUPS):
+        for run in range(passes+warmups):
             i = HEADER_WORDS+(run*FRAMES+frame)*FRAME_WORDS
             cycles, hashed, ticks, before, after = words[i:i+FRAME_WORDS]
             if hashed != hashes[frame]:
@@ -312,7 +336,7 @@ def summarize(words, reference, setup, skip, uncached):
                 flags.append('cycle/tick delta out of range')
             if rate is not None and (cycles > rate*(ticks+2) or (ticks>2 and cycles < rate*(ticks-2))):
                 flags.append('cycles and ticks disagree (2 ms tick tolerance)')
-            row = dict(frame=frame, repeat=run, warmup=run<WARMUPS, cycles=cycles, ticks=ticks, hash=hashed,
+            row = dict(frame=frame, repeat=run, warmup=run<warmups, cycles=cycles, ticks=ticks, hash=hashed,
                 clock_before=before, clock_after=after, clock_before_mhz=before/1000, clock_after_mhz=after/1000,
                 cycles_per_ms=rate, effective_mhz=rate/1000 if rate else None,
                 ms=cycles/rate if rate else None, cycle_ms=cycles/rate if rate else None,
@@ -321,7 +345,7 @@ def summarize(words, reference, setup, skip, uncached):
             if not row['warmup'] and not flags:
                 samples.append(row)
         frame_rows.append(dict(frame=frame, type='IDR' if frame == 0 else 'P',
-            included=len(samples), excluded=PASSES-len(samples), **timing_summary(samples)))
+            included=len(samples), excluded=passes-len(samples), **timing_summary(samples)))
     measured = [row for row in rows if not row['warmup']]
     included = [row for row in measured if not row['flagged']]
     return dict(valid=True, timing_valid=bool(included), setup=setup, skip_chroma=bool(skip), uncached_frames_tables=bool(uncached),
@@ -352,9 +376,17 @@ def timing_summary(samples):
 def run_case(client, args, raw, profile, reference):
     """One bounded session; successful CLOSE is required before the next case."""
     session_open = False
+    capsule = getattr(args, 'capsule_data', None)
     try:
-        client.command(BEGIN,struct.pack('<IIHH',profile['bytes'],profile['crc32'],*profile['dimensions']))
+        begin = capsule_begin(profile, capsule) if capsule else struct.pack('<IIHH',profile['bytes'],profile['crc32'],*profile['dimensions'])
+        client.command(BEGIN, begin)
         session_open = True
+        if capsule:
+            code, manifest = capsule
+            progress(f'Uploading sealed capsule {manifest["name"]}: {len(code)} bytes')
+            for offset in range(0,len(code),2048):
+                client.command(CAP_WRITE,struct.pack('<I',offset)+code[offset:offset+2048])
+            client.command(CAP_SEAL)
         progress(f'Uploading {len(raw)} clip bytes in 2 KiB chunks')
         for offset in range(0,len(raw),2048):
             client.command(WRITE,struct.pack('<I',offset)+raw[offset:offset+2048])
@@ -393,11 +425,21 @@ def run_case(client, args, raw, profile, reference):
         summary = summarize(words,reference,args.setup,args.skip_chroma,args.uncached)
         summary.update(lens=args.lens, clip_sha256=profile['sha256'], clip_name=profile['name'],
                        deblocking=profile['deblocking'], hardware_measurement=True)
+        if capsule:
+            code, manifest = capsule
+            if (words[7]!=len(code) or words[115]!=client.nonce
+                    or words[114]!={'profile':1,'profile-control':2}.get(manifest['kind'],0)
+                    or words[110]!=len(manifest['profile_functions'])
+                    or b''.join(struct.pack('<I',w) for w in words[116:124]).hex()!=manifest['sha256']):
+                raise ValueError('capsule identity/nonce mismatch; entire run void')
+            summary.update(candidate=manifest['name'], capsule_sha256=manifest['sha256'], capsule_kind=manifest['kind'])
+            if manifest['profile_functions']:
+                summary['function_profile'] = read_profile(client,words,manifest)
         progress('Closing the session and checking released heaps')
         summary['heap_stats_released'] = client.close_session()
         session_open = False
         output.write_text(json.dumps(summary,indent=2)+'\n',encoding='utf-8')
-        progress(f'Y hashes PASS: {FRAMES*(PASSES+WARMUPS)} frames; '
+        progress(f'Y hashes PASS: {len(summary["samples"])} frames; '
                  f'excluded {summary["excluded_frames"]}/{summary["measured_frames"]} measured frames '
                  f'for timing anomalies ({summary["warmup_flagged_frames"]} flagged warmups).')
         if summary['timing_valid']:
@@ -420,6 +462,13 @@ def measure(args, cases):
     progress('Reading and validating every clip and PC Y-hash reference')
     inputs = {}
     for case in cases:
+        capsule_path=getattr(case,'capsule',None)
+        if capsule_path:
+            if case.setup!='capsule-ram' or case.skip_chroma!=1 or case.uncached:
+                raise ValueError('C capsules require capsule-ram, skip_chroma=1 and cached data')
+            case.capsule_data=load_capsule(capsule_path)
+        elif case.setup=='capsule-ram':
+            raise ValueError('capsule-ram requires a checked capsule manifest')
         if case.uncached and case.setup != 'full-mram':
             raise ValueError('uncached frames/tables option is full-mram only')
         key = (str(Path(case.clip).resolve()), str(Path(case.reference).resolve()))
@@ -431,8 +480,8 @@ def measure(args, cases):
             if (reference.get('decoder') != '59c66b1' or reference.get('clip_sha256') != profile['sha256']
                     or reference.get('clip_crc32') != profile['crc32']
                     or reference.get('dimensions') != profile['dimensions'] or reference.get('frames') != FRAMES
-                    or any(len(hashes.get(str(skip), [])) != FRAMES for skip in (0, 1))
-                    or hashes.get('0') != hashes.get('1')):
+                    or any(len(hashes.get(str(skip), [])) != FRAMES for skip in ((1,) if capsule_path else (0,1)))
+                    or (not capsule_path and hashes.get('0') != hashes.get('1'))):
                 raise ValueError('PC reference identity/format invalid')
             inputs[key] = (raw, profile, reference)
         if case.setup.startswith('full-') and inputs[key][1]['name'] != 'tokyo-original':
@@ -440,6 +489,8 @@ def measure(args, cases):
     if len({firmware_magic(case.setup) for case in cases}) != 1:
         raise ValueError('batch cases must belong to the same firmware (A or B)')
     connection = parse_connection_string(args.connection)
+    if cases[0].setup=='capsule-ram' and connection['method']!='local':
+        raise ValueError('uploaded capsules require a direct local lens connection')
     bridge = client = None
     try:
         if connection['method'] == 'droidbridge':
@@ -452,6 +503,7 @@ def measure(args, cases):
         transport = (DroidBridgeTransport(bridge,connection[args.lens]) if bridge else
             MeasurementBleTransport(connection[args.lens],connection['address_type'],side=args.lens))
         client = Client(transport,args.lens,args.mtu)
+        if cases[0].setup=='capsule-ram': client.nonce=secrets.randbelow(0xffffffff)+1
         client.connect()
         if client.command(HELLO,result_index=0xffff) != firmware_magic(cases[0].setup):
             raise RuntimeError('wrong experiment firmware for the selected setups')
@@ -501,6 +553,8 @@ def deblocking_comparisons(summaries):
 
 def batch(args):
     """Run a clip/setup/mode matrix on one lens over one connection."""
+    if getattr(args,'capsule',None):
+        return capsule_batch(args)
     directory = Path(args.output_dir)
     if directory.exists() and not directory.is_dir():
         raise ValueError('batch output must be a directory')
@@ -541,6 +595,84 @@ def batch(args):
     progress(f'Batch complete: {len(summaries)} valid runs over one connection')
 
 
+
+CAPSULE_EXPORTS = ('ds_size','ds_selftest','ds_init','ds_destroy','ds_decode','ds_frame')
+
+
+def load_capsule(path):
+    """Validate bytes and matching PC proofs before opening any connection."""
+    path=Path(path)
+    manifest=json.loads(path.read_text(encoding='utf-8'))
+    raw=path.with_name('capsule.bin').read_bytes()
+    checks=json.loads(path.with_name('checks.json').read_text(encoding='utf-8'))
+    if (not isinstance(manifest.get('name'),str) or not re.fullmatch(r'[a-z0-9][a-z0-9.-]*',manifest['name'])
+            or manifest.get('abi')!=1 or manifest.get('decoder')!='59c66b1'
+            or not 16<=len(raw)<=156108 or manifest.get('bytes')!=len(raw)
+            or hashlib.sha256(raw).hexdigest()!=manifest.get('sha256')
+            or checks.get('result')!='PASS' or checks.get('sha256')!=manifest['sha256']
+            or checks.get('lld') is not True or checks.get('pc_y') is not True):
+        raise ValueError('capsule identity or PC proofs invalid')
+    lo,hi=manifest['text_bounds']; exports=manifest['exports']
+    if type(lo)is not int or type(hi)is not int or not 0<=lo<hi<=len(raw) or set(exports)!=set(CAPSULE_EXPORTS):
+        raise ValueError('capsule executable/export bounds invalid')
+    offsets=[exports[name] for name in CAPSULE_EXPORTS]
+    if len(set(offsets))!=6 or any(type(x)is not int or x&1 or not lo<=x<hi for x in offsets):
+        raise ValueError('capsule export offset invalid')
+    functions=manifest['profile_functions']
+    if (not isinstance(functions,dict) or any(type(i)is not int for i in functions.values())
+            or manifest['kind'] not in ('full','small','mixed','profile','profile-control')
+            or len(functions)>512 or sorted(functions.values())!=list(range(len(functions)))
+            or bool(functions)!=(manifest['kind'] in ('profile','profile-control'))):
+        raise ValueError('capsule profile manifest invalid')
+    return raw,manifest
+
+
+def capsule_begin(profile, capsule):
+    code,m=capsule
+    kind={'profile':1,'profile-control':2}.get(m['kind'],0)
+    return struct.pack('<IIHHIIIII6I',profile['bytes'],profile['crc32'],*profile['dimensions'],
+        len(code),*m['text_bounds'],(1<<16)|kind,len(m['profile_functions']),
+        *(m['exports'][n] for n in CAPSULE_EXPORTS))+bytes.fromhex(m['sha256'])
+
+
+def read_profile(client, words, manifest):
+    """Pull counters after decoding; report corrupt/deep/wrapped profiles as unusable."""
+    if words[110]!=len(manifest['profile_functions']):
+        raise ValueError('profile count mismatch')
+    rows=[]
+    for name,identifier in sorted(manifest['profile_functions'].items(),key=lambda pair:pair[1]):
+        values=[client.command(PROFILE_READ,struct.pack('<H',identifier*5+i),result_index=identifier*5+i) for i in range(5)]
+        rows.append(dict(function=name,calls=values[0],inclusive_cycles=values[1]|values[2]<<32,
+                         exclusive_cycles=values[3]|values[4]<<32))
+    return dict(valid=words[111]==0, flags=words[111],depth_highwater=words[112],
+                scratch_bytes=words[113],ranking_only=True,rows=sorted(rows,key=lambda row:-row['exclusive_cycles']))
+
+
+def capsule_batch(args):
+    """One lens/connection, fresh sealed owner per capsule and clip, no reconnect replay."""
+    directory=Path(args.output_dir)
+    if getattr(args,'skip_chroma',[1])!=[1]:
+        raise ValueError('C capsules only support skip_chroma=1')
+    if directory.exists() and any(directory.iterdir()):
+        raise FileExistsError('capsule output directory must be empty; preserve prior evidence')
+    clips=list(args.clip); references=list(args.reference)
+    if len(clips)!=len(references) or len(set(map(str,clips)))!=len(clips):
+        raise ValueError('one PC reference per distinct clip is required')
+    candidates=[(path,load_capsule(path)[1]) for path in args.capsule]
+    if len({m['name'] for _,m in candidates})!=len(candidates):
+        raise ValueError('duplicate capsule names')
+    directory.mkdir(parents=True,exist_ok=True)
+    cases=[]
+    for path,manifest in candidates:
+        for clip,reference in zip(clips,references):
+            profile=check_clip(Path(clip).read_bytes())
+            output=directory/f'{args.lens}-{profile["name"]}-{manifest["name"]}-skip.json'
+            cases.append(SimpleNamespace(setup='capsule-ram',skip_chroma=1,uncached=0,lens=args.lens,
+                capsule=path,clip=clip,reference=reference,output=output))
+    summaries=measure(args,cases)
+    (directory/'batch-summary.json').write_text(json.dumps(summaries,indent=2)+'\n',encoding='utf-8')
+    progress(f'Capsule batch complete: {len(summaries)} valid runs over one connection')
+
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     sub=parser.add_subparsers(dest='action',required=True)
@@ -551,14 +683,16 @@ def main(argv=None):
     measure.add_argument('--lens',choices=('left','right'),required=True)
     measure.add_argument('--setup',choices=tuple(SETUPS),required=True)
     measure.add_argument('--skip-chroma',type=int,choices=(0,1),required=True)
+    measure.add_argument('--capsule', help='checked capsule.json; C requires capsule-ram/skip 1')
     measure.add_argument('--uncached',type=int,choices=(0,1),default=0)
     measure.add_argument('--mtu',type=int,default=23)
     measure.add_argument('--clip',required=True); measure.add_argument('--reference',required=True); measure.add_argument('--output',required=True)
     matrix=sub.add_parser('batch',help='measure several setup/chroma combinations over one connection; never flash')
     matrix.add_argument('-c','--connection',required=True)
     matrix.add_argument('--lens',choices=('left','right'),required=True)
+    matrix.add_argument('--capsule', nargs='+', help='checked manifests; C batch defaults to skip 1')
     matrix.add_argument('--setups',nargs='+',choices=tuple(SETUPS),default=['small-mram','small-ram','mixed-mram','mixed-ram'])
-    matrix.add_argument('--skip-chroma',nargs='+',type=int,choices=(0,1),default=[0,1])
+    matrix.add_argument('--skip-chroma',nargs='+',type=int,choices=(0,1),default=[1])
     matrix.add_argument('--mtu',type=int,default=23)
     matrix.add_argument('--clip',nargs='+',required=True,help='one or more verified clips')
     matrix.add_argument('--reference',nargs='+',required=True,help='matching PC references in clip order')

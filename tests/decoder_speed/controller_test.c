@@ -1,145 +1,137 @@
-/* Exercise the actual controller without an emulator, Bluetooth or glasses. */
+/* Exercise upload integrity, ownership and lifetime without device access. */
 #include <assert.h>
 #include <stdio.h>
 #define DS_HOST_TEST
 #include "host_platform.h"
 #include "../../patches/decoder_speed/controller.c"
 
-static uint8_t command[2059];
+static uint8_t command[2063], capsule[128];
 static uint32_t header(uint32_t op,uint32_t n) {
     memset(command,0,sizeof(command));
-    command[0]=31; command[1]='D'; command[2]='S'; command[3]=2;
-    command[4]=(uint8_t)op; command[5]=1; return n;
+    command[0]=31; command[1]='D'; command[2]='S'; command[3]=3;
+    command[4]=(uint8_t)op; command[5]=1; command[7]=123; return n;
 }
 static void put32(uint32_t at,uint32_t v) {
     for(uint32_t i=0;i<4;++i) command[at+i]=(uint8_t)(v>>(i*8));
 }
 static int begin(void) {
-    header(DS_BEGIN,19); put32(7,DS_CLIP_BYTES); put32(11,DS_CLIP_CRC);
-    command[15]=64; command[16]=1; command[17]=192;
-    return ds_control(command,19);
+    header(DS_BEGIN,99); put32(11,DS_CLIP_BYTES); put32(15,DS_CLIP_CRC);
+    command[19]=64; command[20]=1; command[21]=192;
+    put32(23,sizeof(capsule)); put32(27,0); put32(31,sizeof(capsule)); put32(35,1U<<16);
+    for(uint32_t i=0;i<6;++i) put32(43+i*4,i*2);
+    ds_sha256(capsule,sizeof(capsule),command+67);
+    return ds_control(command,99);
 }
-static int run(uint32_t ram,uint32_t skip,uint32_t uncached) {
-    header(DS_RUN,11); command[7]=ram; command[8]=skip;
-    command[9]=5; command[10]=uncached; return ds_control(command,11);
+static int run(void) {
+    header(DS_RUN,15); command[11]=4; command[12]=1; command[13]=5;
+    return ds_control(command,15);
 }
 static void close_session(void) {
-    header(DS_CLOSE,7); assert(ds_control(command,7)==0);
+    header(DS_CLOSE,11); assert(ds_control(command,11)==0);
     assert(!context.decoder_speed_session && allocations==releases);
 }
 static void reset(void) {
     assert(!context.decoder_speed_session && allocations==releases);
     fail_at=timer_fail=thread_new_fail=mutex_busy=0; tick=0;
-    heap27_free=133924; heap27_max=131072;
+    heap27_free=172620; heap27_max=172032;
 }
-static void protocol_and_default(void) {
-    header(DS_HELLO,7); command[3]=1;
-    assert(ds_control(command,7)==-1 && !allocations); /* Old row layout is incompatible. */
-    header(DS_HELLO,7); assert(ds_control(command,7)==0);
-    assert(!allocations && !context.decoder_speed_session);
+static void ready(void) {
+    /* Tests of RUN failure/lifetime use a sealed fixture without executing it. */
+    assert(begin()==0); ds_session *s=ds_active();
+    memcpy((void *)s->code,capsule,sizeof(capsule));
+    s->code_uploaded=sizeof(capsule); header(DS_CAP_SEAL,11); assert(ds_control(command,11)==0);
+    s->clip_sealed=1; s->phase=DS_SEALED;
+}
+static void inert_scope_and_integrity(void) {
+    header(DS_HELLO,11); command[3]=2; assert(ds_control(command,11)==-1 && !allocations);
+    header(DS_HELLO,11); assert(ds_control(command,11)==0 && !allocations);
     ds_cleanup(); assert(!allocations);
-    header(DS_BEGIN,19); assert(ds_control(command,19)==-1 && !allocations);
-    assert(begin()==0); uint32_t live=allocations-releases;
-    assert(begin()==0 && allocations-releases==live);
-    command[5]=2; assert(ds_control(command,19)==-1);
-    header(DS_WRITE,12); put32(7,1); assert(ds_control(command,12)==-1);
-    put32(7,0); command[11]=123; assert(ds_control(command,12)==0);
-    assert(ds_control(command,12)==0 && ds_active()->uploaded==1);
-    command[11]=122; assert(ds_control(command,12)==-1);
-    put32(7,DS_CLIP_BYTES); assert(ds_control(command,12)==-1);
-    header(DS_SEAL,7); assert(ds_control(command,7)==-1);
-    ds_active()->uploaded=DS_CLIP_BYTES; memset(ds_active()->clip,0,DS_CLIP_BYTES);
-    assert(ds_control(command,7)==-1); /* A complete upload with a bad CRC. */
-    header(DS_READ,9); assert(ds_control(command,9)==-1);
+    uint8_t body=31;
+    assert(ds_direct_message(&body,1,1,1,1));
+    assert(!ds_direct_message(&body,1,1,2,1));
+    assert(!ds_direct_message(&body,1,1,1,3));
+    body=1; assert(ds_direct_message(&body,1,1,2,3));
+    assert(begin()==0); assert(begin()==-1); /* Cannot replace an owner. */
+    header(DS_CAP_WRITE,16); put32(11,0); command[15]=42;
+    command[7]^=1; assert(ds_control(command,16)==-1); command[7]^=1;
+    assert(ds_control(command,16)==0 && ds_active()->code_uploaded==1);
+    assert(ds_control(command,16)==0); command[15]^=1; assert(ds_control(command,16)==-1);
+    put32(11,2); assert(ds_control(command,16)==-1);
+    put32(11,0xffffffffU); assert(ds_control(command,16)==-1);
+    header(DS_CAP_SEAL,11); assert(ds_control(command,11)==-1);
+    ds_active()->code_uploaded=sizeof(capsule); memset((void *)ds_active()->code,7,sizeof(capsule));
+    assert(ds_control(command,11)==-1 && !ds_active()->code_sealed);
+    memcpy((void *)ds_active()->code,capsule,sizeof(capsule));
+    assert(ds_control(command,11)==0 && ds_active()->code_sealed);
+    header(DS_CAP_WRITE,16); put32(11,0); assert(ds_control(command,16)==-1);
+    assert(run()==-1); /* Clip has not been sealed. */
+    header(DS_SEAL,11); assert(ds_control(command,11)==-1);
     close_session(); reset();
+    assert(begin()==0); close_session(); reset();
+    /* Validate metadata before allocating, including overflow and aliases. */
+    uint8_t valid[99]; assert(begin()==0); memcpy(valid,command,99); close_session(); reset();
+    const uint32_t positions[6]={23,27,43,47,35,7};
+    const uint32_t values[6]={156109,129,1,0,2U<<16,0};
+    for(uint32_t field=0;field<6;++field) {
+        memcpy(command,valid,99); put32(positions[field],values[field]);
+        uint32_t before=allocations;
+        assert(ds_control(command,99)==-1 && allocations==before && !ds_active());
+    }
 }
-static void failed_reservations_release_only_owned_blocks(void) {
-    for(uint32_t failure=1;failure<=2;++failure) {
-        fail_at=allocation_attempts+failure;
-        assert(begin()==-1); assert(!context.decoder_speed_session && allocations==releases); reset();
+static void reservations_worker_and_lifetime(void) {
+    for(uint32_t failure=1;failure<=3;++failure) {
+        fail_at=allocation_attempts+failure; assert(begin()==-1 && allocations==releases); reset();
     }
     timer_fail=1; assert(begin()==-1 && allocations==releases); reset();
-    for(uint32_t failure=1;failure<=5;++failure) {
-        assert(begin()==0); ds_active()->phase=DS_SEALED;
-        fail_at=allocation_attempts+failure;
-        assert(run(1,1,0)==-1 && ds_active()->phase==DS_SEALED);
-        assert(!ds_active()->hot_raw && !ds_active()->code_raw);
+    for(uint32_t failure=1;failure<=4;++failure) {
+        ready(); fail_at=allocation_attempts+failure;
+        assert(run()==-1 && !ds_active()->hot_raw && ds_active()->code_raw);
         fail_at=0; close_session(); reset();
     }
-    assert(begin()==0); ds_active()->phase=DS_SEALED;
-    thread_new_fail=1; assert(run(0,0,0)==-1 && !ds_active()->hot_raw);
+    ready(); thread_new_fail=1; assert(run()==-1 && !ds_active()->hot_raw && ds_active()->code_raw);
     close_session(); reset();
-}
-static void worker_gating_and_lifetime(void) {
-    assert(begin()==0); ds_session *s=ds_active(); s->phase=DS_SEALED;
-    assert(run(1,0,1)==-1); /* B has no uncached data option. */
-    assert(run(1,0,0)==0 && !s->start && s->code_raw);
-    assert(s->words[0]==0x4453020fU && s->words[15]==DS_FRAME_WORDS);
-    assert(run(1,0,0)==0 && !s->start);
-    mutex_busy=1; ds_after_ack(command,11); assert(!s->start);
-    mutex_busy=0; ds_after_ack(command,11); assert(s->start);
-    uint32_t live=allocations-releases, deletes=terminated;
-    header(DS_CLOSE,7); assert(ds_control(command,7)==-1);
-    assert(s->cancel && allocations-releases==live && terminated==deletes);
+    ready(); ds_session *s=ds_active(); assert(run()==0 && !s->start);
+    assert(run()==-1); /* A RUN is never replayed, even while executing. */
+    header(DS_RUN,15); command[11]=4; command[12]=1; command[13]=5;
+    command[7]^=1; ds_after_ack(command,15); assert(!s->start); command[7]^=1;
+    mutex_busy=1; ds_after_ack(command,15); assert(!s->start);
+    mutex_busy=0; ds_after_ack(command,15); assert(s->start);
+    uint32_t live=allocations-releases;
+    header(DS_CLOSE,11); assert(ds_control(command,11)==-1 && s->cancel && allocations-releases==live);
     s->parked=1; s->clock_owned=1; s->old_demcr=123; s->old_dwt_ctrl=456;
-    timer_fail=1; assert(ds_control(command,7)==-1 && !s->thread && s->code_raw);
-    assert(terminated==deletes+1 && regs[5]==123 && regs[6]==456);
-    timer_fail=0; close_session(); reset();
-    assert(begin()==0); s=ds_active(); tick=s->deadline;
-    ds_lease_tick(&context); assert(!ds_active() && allocations==releases); reset();
+    timer_fail=1; assert(ds_control(command,11)==-1 && !s->thread && s->code_raw);
+    assert(regs[5]==123 && regs[6]==456); timer_fail=0; close_session(); reset();
+    assert(begin()==0); tick=ds_active()->deadline; ds_lease_tick(&context);
+    assert(!ds_active() && allocations==releases); reset();
+    heap27_free=sizeof(capsule)+128+16384-1; assert(begin()==-1); reset();
+    heap27_max=128; assert(begin()==-1); reset();
 }
 static void memory_policy_fails_closed(void) {
-    ds_session s={0}; s.code=(void *)0x007cb000U; s.code_bytes=DS_SMALL_BYTES; s.clip_bytes=DS_CLIP_BYTES;
-    s.clip=(void *)0x20204000U; s.state=(void *)0x20210000U;
+    ds_session s={0}; s.code=(void *)0x20275000U; s.code_bytes=128; s.clip_bytes=DS_CLIP_BYTES;
+    s.clip=(void *)0x20204000U; s.state=(void *)0x20210000U; s.skip=1;
     s.meta=(void *)0x20212000U; s.stack=(void *)0x20214000U; s.hot=(void *)0x20220000U;
-    regs[1]=7; regs[3]=0x30000; regs[2]=9;
-    regs[0]=0; assert(ds_copy_code(&s));
+    regs[1]=7; regs[3]=0x30000; regs[2]=9; regs[0]=0; assert(ds_copy_code(&s));
     regs[8]=1; assert(!ds_copy_code(&s)); regs[8]=0;
     regs[9]=1; assert(!ds_copy_code(&s)); regs[9]=0;
     regs[3]=0; assert(!ds_copy_code(&s)); regs[3]=0x30000;
-    regs[0]=1U<<8; mpu_base=0x20200001U; mpu_limit=0x2027ffe1U; mpu_mair=0x44;
-    assert(!ds_copy_code(&s) && regs[2]==9); /* Cached data covered by uncached MPU. */
-    s.hot=(void *)0x20140000U;
-    mpu_base=0x201350a1U; mpu_limit=0x20202181U;
-    assert(!ds_copy_code(&s) && regs[2]==9); /* Heap 13 data is forbidden in B. */
-    regs[0]=0;
-}
-static void all_setups_share_cached_data_and_respect_real_heap27(void) {
-    for(uint32_t setup=0; setup<4; ++setup) for(uint32_t skip=0; skip<2; ++skip) {
-        assert(begin()==0); ds_session *s=ds_active(); s->phase=DS_SEALED;
-        assert(run(setup,skip,1)==-1); /* No uncached option in B. */
-        assert(run(4,skip,0)==-1);
-        assert(run(setup,skip,0)==0);
-        assert(s->image==(setup&2 ? ds_mixed_image : ds_small_image));
-        assert(s->code_bytes==(setup&2 ? DS_MIXED_BYTES : DS_SMALL_BYTES));
-        assert(s->words[7]==s->code_bytes && s->words[34]==(skip ? DS_LUMA_BYTES : DS_COLOR_BYTES));
-        assert(!!s->code_raw==!!(setup&1));
-        if(setup&1) {
-            regs[0]=0; assert(ds_copy_code(s));
-            assert(memcmp(s->code,s->image,s->code_bytes)==0);
-        }
-        s->parked=1; close_session(); reset();
-    }
-    for(uint32_t setup=1;setup<4;setup+=2) {
-        assert(begin()==0); ds_active()->phase=DS_SEALED;
-        heap27_free=(setup&2 ? DS_MIXED_BYTES : DS_SMALL_BYTES)+128+16384-1;
-        assert(run(setup,1,0)==-1 && !ds_active()->code_raw);
-        close_session(); reset();
-        assert(begin()==0); ds_active()->phase=DS_SEALED;
-        heap27_max=50000; assert(run(setup,1,0)==-1 && !ds_active()->code_raw);
-        close_session(); reset();
-    }
+    regs[0]=1U<<8; mpu_base=0x20200001U; mpu_limit=0x2027ffe1U;
+    assert(!ds_copy_code(&s) && regs[2]==9); regs[0]=0;
 }
 static uint8_t fake_y[61440];
 static uint32_t fake_frames, destroyed, decode_error_at, bad_format, short_clip;
 static uint32_t invalid_clock, cancel_at, deadline_at;
 static void *ds_host_init(void *memory,uint32_t size,uint32_t skip) {
-    (void)size; (void)skip; fake_frames=0; calibration_rate=250000; return memory;
+    (void)size; (void)skip; fake_frames=0; calibration_rate=250000;
+    ds_profile_push(0); ds_profile_pop(0); return memory;
 }
-static void ds_host_destroy(void *state) { (void)state; ++destroyed; }
+static void ds_host_destroy(void *state) {
+    (void)state; ds_profile_push(0); ds_profile_pop(0); ++destroyed;
+}
 static int ds_host_decode(void *state,const uint8_t *nal,uint32_t size) {
     (void)state; (void)nal; (void)size;
+    ds_profile_push(0);
     ++fake_frames; tick+=3; regs[7]+=750000;
+    ds_profile_pop(0);
     // More than 4% drift, then unavailable calibration: neither stops decode.
     calibration_rate=invalid_clock ? 0 : fake_frames&1 ? 230000 : 250000;
     if (fake_frames==cancel_at) ds_active()->cancel=1;
@@ -158,6 +150,7 @@ static void timing_anomalies_do_not_abort_but_real_failures_do(void) {
     for(uint32_t i=0;i<DS_FRAMES;++i) {
         s->clip[i*5+2]=1; s->clip[i*5+3]=1; s->clip[i*5+4]=0xaa;
     }
+    s->clip_bytes=DS_FRAMES*5;
     s->state=fake_y; s->run_deadline=tick+60000;
     uint32_t expected_hash=~ds_crc(fake_y,sizeof(fake_y),~0U);
     for(uint32_t pass=0;pass<7;++pass) {
@@ -175,8 +168,15 @@ static void timing_anomalies_do_not_abort_but_real_failures_do(void) {
     deadline_at=3; assert(ds_pass(s,0)==11); deadline_at=0;
     s->run_deadline=tick+60000;
     cancel_at=3; assert(ds_pass(s,0)==11); cancel_at=0;
+    s->cancel=0; s->run_deadline=tick+60000;
+    ds_profile profile={0}; profile.count=1; s->kind=1; s->profile=&profile;
+    assert(ds_pass(s,0)==0 && ds_pass(s,1)==0);
+    assert(!profile.flags && !profile.depth && profile.rows[0].calls==64);
+    assert(profile.rows[0].inclusive==64ULL*750000);
+    assert(!s->profile_recording); s->profile=0;
     close_session(); reset();
 }
+
 static void verified_clip_upload(const char *path) {
     FILE *file=fopen(path,"rb"); assert(file);
     fseek(file,0,SEEK_END); long length=ftell(file); rewind(file);
@@ -185,31 +185,22 @@ static void verified_clip_upload(const char *path) {
     assert(fread(clip,1,(size_t)length,file)==(size_t)length); fclose(file);
     uint32_t crc=~ds_crc(clip,(uint32_t)length,~0U);
     assert(ds_clip_index((uint32_t)length,crc)>=0);
-    for(uint32_t setup=0;setup<4;++setup) for(uint32_t skip=0;skip<2;++skip) {
-        header(DS_BEGIN,19); put32(7,(uint32_t)length); put32(11,crc);
-        command[15]=64; command[16]=1; command[17]=192;
-        assert(ds_control(command,19)==0);
-        assert(ds_active()->clip_bytes==(uint32_t)length && ds_active()->clip_crc==crc);
-        assert(ds_control(command,19)==0); /* Exact duplicate BEGIN is idempotent. */
-        put32(11,crc^1U); assert(ds_control(command,19)==-1);
-        for(uint32_t offset=0;offset<(uint32_t)length;) {
-            uint32_t bytes=(uint32_t)length-offset; if(bytes>2048) bytes=2048;
-            header(DS_WRITE,11+bytes); put32(7,offset); memcpy(command+11,clip+offset,bytes);
-            assert(ds_control(command,11+bytes)==0); offset+=bytes;
-        }
-        header(DS_WRITE,12); put32(7,(uint32_t)length); assert(ds_control(command,12)==-1);
-        header(DS_SEAL,7); assert(ds_control(command,7)==0);
-        assert(run(setup,skip,0)==0);
-        assert(ds_active()->words[6]==crc && ds_active()->words[14]==(uint32_t)length);
-        ds_active()->parked=1; close_session(); reset();
+    ready(); ds_session *s=ds_active(); s->phase=DS_UPLOAD; s->clip_sealed=0;
+    s->clip_bytes=(uint32_t)length; s->clip_crc=crc;
+    for(uint32_t offset=0;offset<(uint32_t)length;) {
+        uint32_t bytes=(uint32_t)length-offset; if(bytes>2048) bytes=2048;
+        header(DS_WRITE,15+bytes); put32(11,offset); memcpy(command+15,clip+offset,bytes);
+        assert(ds_control(command,15+bytes)==0); offset+=bytes;
     }
-    free(clip);
+    header(DS_SEAL,11); assert(ds_control(command,11)==0);
+    assert(run()==0 && s->words[6]==crc && s->words[14]==(uint32_t)length && s->skip==1);
+    s->parked=1; close_session(); reset(); free(clip);
 }
 int main(int argc,char **argv) {
-    protocol_and_default(); failed_reservations_release_only_owned_blocks();
-    worker_gating_and_lifetime(); memory_policy_fails_closed();
-    all_setups_share_cached_data_and_respect_real_heap27();
+    for(uint32_t i=0;i<sizeof(capsule);++i) capsule[i]=(uint8_t)(i*17);
+    reset(); inert_scope_and_integrity(); reservations_worker_and_lifetime(); memory_policy_fails_closed();
     timing_anomalies_do_not_abort_but_real_failures_do();
     for(int i=1;i<argc;++i) verified_clip_upload(argv[i]);
+    puts("PASS: C nonce/seal/direct-lens/allocation/park/cache/timing and supplied clips");
     return 0;
 }

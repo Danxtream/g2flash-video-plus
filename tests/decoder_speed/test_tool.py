@@ -278,7 +278,7 @@ class ToolTests(unittest.TestCase):
         self.assertIn(f'#define DS_CLIP_BYTES {tool.CLIP_BYTES}U',text)
         self.assertIn(f'#define DS_CLIP_CRC {tool.CLIP_CRC:#x}U',text)
         pairs=[(int(a),int(b,16)) for a,b in re.findall(r'\{(\d+)U, (0x[0-9a-f]+)U\}',text)]
-        self.assertEqual(pairs,[(p['bytes'],p['crc32']) for p in tool.PROFILES[1:]])
+        self.assertEqual(pairs,[(p['bytes'],p['crc32']) for p in tool.C_PROFILES[1:]])
         self.assertTrue(all(p['bytes']<=tool.CLIP_BYTES for p in tool.PROFILES))
         self.assertEqual([p['deblocking'] for p in tool.PROFILES],['on','on','off'])
 
@@ -399,9 +399,11 @@ class FakeTransport:
         op=payload[4]; token=int.from_bytes(payload[5:7],'little')
         body=bytes((3 if self.nack else 1,self.stream,0,0,1))+struct.pack('<H',len(payload))+tool.crc16(payload)
         self.notes.put((tool.CTRL[2],result_frame(body)))
-        if not self.nack and op in (tool.HELLO,tool.READ):
-            index=65535 if op==tool.HELLO else int.from_bytes(payload[7:9],'little')
-            self.notes.put((tool.CTRL[2],result_frame(struct.pack('<BBHHI',5,1,token,index,tool.MAGIC if op==tool.HELLO else 1234))))
+        if not self.nack and op in (tool.HELLO,tool.READ,tool.PROFILE_READ):
+            header=11 if payload[3]==3 else 7
+            index=65535 if op==tool.HELLO else int.from_bytes(payload[header:header+2],'little')
+            magic=tool.C_MAGIC if payload[3]==3 else tool.MAGIC
+            self.notes.put((tool.CTRL[2],result_frame(struct.pack('<BBHHI',5,1,token,index,magic if op==tool.HELLO else 1234))))
 
 
 if __name__=='__main__': unittest.main()

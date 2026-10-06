@@ -5,7 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 
-extern ds_imports* ds_host_imports;
+ds_imports* ds_host_imports;
 static ds_pool pool;
 alignas(32) static uint8_t hot[234480], metadata[3072], state[4096];
 static void* allocate(uint32_t n) { return ds_pool_alloc(&pool,n); }

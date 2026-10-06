@@ -1,11 +1,15 @@
 """Independent ARM LLD checks for the movable capsule and surrounding C blob."""
 from pathlib import Path
 import importlib.util
+import os
+import re
+import shutil
 import subprocess
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+CAPSULE_ROOT = Path(os.environ.get('DS_CAPSULE_ROOT', ROOT/'obj/decoder-speed'))
 spec = importlib.util.spec_from_file_location('build', ROOT/'patches/build.py')
 build = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(build)
@@ -43,15 +47,28 @@ class LinkTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_capsule_identical_at_three_load_addresses(self):
-        for name in ('small','mixed'):
+        for name in ('mixed','full','profile','profile-control'):
             for address in (0x7cb000,0x20275000,0x20278000):
-                actual, reference = lld_bytes(ROOT/f'obj/ds_{name}_closed.o',address,self.here)
+                actual, reference = lld_bytes(CAPSULE_ROOT/name/'closed.o',address,self.here)
                 self.assertEqual(actual,reference)
 
     def test_c_blob_multiple_sections_identical_to_lld(self):
         for address in (0x7bea80,0x438000):
             actual, reference = lld_bytes(ROOT/'obj/patches_main.o',address,self.here)
             self.assertEqual(actual,reference)
+
+    def test_profile_startup_probes_need_no_callbacks(self):
+        for name in ('profile','profile-control'):
+            obj=str(CAPSULE_ROOT/name/'closed.o')
+            disassembler=shutil.which('llvm-objdump') or shutil.which('llvm-objdump-21')
+            if disassembler:
+                text=subprocess.check_output([disassembler,'-d','--disassemble-symbols=ds_size,ds_selftest',obj],text=True)
+            else:
+                text=''.join(subprocess.check_output(['arm-none-eabi-objdump','-d',f'--disassemble={symbol}',obj],text=True)
+                             for symbol in ('ds_size','ds_selftest'))
+            self.assertIn('<ds_size>:',text)
+            self.assertIn('<ds_selftest>:',text)
+            self.assertIsNone(re.search(r'\sblx?\s',text))
 
     def test_backward_and_forward_branches_across_sections(self):
         obj=self.compile('''
