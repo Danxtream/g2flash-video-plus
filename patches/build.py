@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Compile a C source to position-independent Thumb-2 machine code for the G2
-mainapp core (ARMv7E-M, Cortex-M-class), verify it has NO relocations and no
-external calls, and emit the raw .text bytes.
+mainapp core (ARMv7E-M, Cortex-M-class), resolve internal relocations without
+external calls, and emit the executable/read-only bytes.
 
 Usage:
   python3 build.py <src.c> [-Dname=val ...]           # human report + obj/<stem>.text.bin
@@ -25,36 +25,21 @@ so patch_compress.py can pull the exact bytes it injects straight from the build
 instead of carrying pasted hex. --json has no side effects beyond the obj/<stem>.o the
 compiler emits (it does NOT write obj/<stem>.text.bin).
 
-Self-containedness is enforced in both modes. build.py acts as a mini-linker over
-the emitted blob and resolves two relocation families in place:
+Self-containedness is enforced in both modes. The mini-linker lays out .text,
+other executable sections and read-only data with their ELF alignment, then
+resolves internal Thumb BL/B.W, R_ARM_REL32 and MOVW/MOVT_PREL relocations.
+REL32 preserves the Thumb bit in function addresses; branch addends are signed.
+These fixups depend only on offsets within the blob, not its load address.
 
-  * Intra-.text branches (R_ARM_THM_CALL / R_ARM_THM_JUMP24 to a symbol defined in
-    .text): the BL/B.W displacement is rewritten, so injected functions can call
-    each other by name (incl. from inline asm) without an "everything must be
-    static" restriction.
+The blob must be loaded at an address satisfying its sections' alignment.
+Function offsets are blob-relative; text_len covers code, constants and padding.
+rodata_len covers everything after the executable sections. Callers extracting
+one function must require rodata_len == 0 rather than discard required data.
 
-  * PC-relative read-only-data references (R_ARM_THM_MOVW_PREL_NC / MOVT_PREL,
-    emitted under -fropi): string literals and other read-only constants. The
-    referenced .rodata* sections are appended to the blob right after .text and
-    the movw/movt immediate pair is fixed up so the runtime `add rX, pc` lands on
-    the datum. Because these are PC-relative, the fixup depends only on the datum's
-    offset WITHIN the blob, so the result stays position-independent regardless of
-    where the blob is later loaded -- exactly like the branch case. This is why we
-    compile with -fropi: absolute (MOVW_ABS/MOVT_ABS) rodata refs would need the
-    final load address, which only patch_compress.py knows.
-
-The emitted bytes are therefore .text followed by any referenced .rodata; the
-returned/reported `text`/`text_len` cover the whole blob and function offsets stay
-blob-relative (i.e. .text-relative, since .text is first). `rodata_len` reports how
-many trailing bytes are data -- callers that extract a SINGLE function's bytes
-(rather than appending the whole blob) must assert rodata_len == 0, since a lone
-function carries no rodata with it.
-
-Any OTHER relocation -- an external/undefined branch target, an absolute rodata
-ref, or a relocation inside the rodata itself (e.g. an array of pointers to string
-literals, which needs data-to-data fixups) -- is still a hard error, because PIC
-injection has no linker to fix absolute addresses up (firmware entry points must be
-called via absolute-constant function pointers instead).
+Undefined symbols, writable/GOT/startup sections, absolute pointers and other
+relocations are errors. Firmware entry points remain absolute-constant function
+pointers. Only CANTUNWIND ARM exception metadata may be omitted: injected code
+has no unwinder or startup machinery.
 """
 import sys, os, struct, subprocess, json
 
@@ -68,6 +53,7 @@ def obj_path(src, suffix):
     stem = os.path.basename(src).rsplit(".", 1)[0]
     return os.path.join(OBJ_DIR, stem + suffix)
 
+R_ARM_REL32            = 3    # S + A - P, including Thumb function addresses
 R_ARM_THM_CALL         = 10   # BL / BLX  (Thumb-2, 32-bit)
 R_ARM_THM_JUMP24       = 30   # B.W       (Thumb-2, 32-bit)
 R_ARM_THM_MOVW_PREL_NC = 49   # movw rX, #:lower16:(sym - .)   (PC-relative, -fropi)
@@ -141,23 +127,33 @@ CFLAGS = [
 
 # ---- minimal ELF32 LE parser (section headers + symtab) ----
 def parse_elf(path):
-    d = open(path, "rb").read()
-    assert d[:4] == b"\x7fELF" and d[4] == 1 and d[5] == 1, "not ELF32-LE"
+    """Read ELF32-LE section headers; reject truncated or malformed inputs."""
+    with open(path, "rb") as f:
+        d = f.read()
+    if len(d) < 52 or d[:6] != b"\x7fELF\x01\x01":
+        raise BuildError(f"{path}: not ELF32-LE")
     (e_shoff,) = struct.unpack_from("<I", d, 0x20)
     e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", d, 0x2e)
+    if (e_shentsize != 40 or not e_shnum or e_shstrndx >= e_shnum
+            or e_shoff + e_shnum * e_shentsize > len(d)):
+        raise BuildError(f"{path}: invalid section table")
     secs = []
     for i in range(e_shnum):
         off = e_shoff + i * e_shentsize
         name, typ, flags, addr, offset, size, link, info, align, entsz = \
             struct.unpack_from("<IIIIIIIIII", d, off)
+        if typ != 8 and offset + size > len(d):  # NOBITS has no file payload.
+            raise BuildError(f"{path}: section outside the file")
         secs.append(dict(name=name, type=typ, flags=flags, offset=offset,
                          size=size, link=link, info=info, align=align, entsize=entsz))
     shstr = secs[e_shstrndx]
-    def sname(n):
-        s = d[shstr["offset"] + n:]
-        return s[:s.index(b"\0")].decode()
+    strings = d[shstr["offset"]:shstr["offset"] + shstr["size"]]
     for s in secs:
-        s["sname"] = sname(s["name"])
+        start = s["name"]
+        end = strings.find(b"\0", start)
+        if start >= len(strings) or end < 0:
+            raise BuildError(f"{path}: invalid section name")
+        s["sname"] = strings[start:end].decode()
     return d, secs
 
 def section(secs, name):
@@ -170,7 +166,9 @@ class BuildError(Exception):
     pass
 
 SHT_PROGBITS = 1
+SHT_RELA     = 4
 SHT_REL      = 9
+SHT_ARM_EXIDX = 0x70000001
 SHF_WRITE    = 0x1
 SHF_ALLOC    = 0x2
 SHF_EXECINSTR = 0x4
@@ -184,102 +182,146 @@ def _is_rodata(sec):
             and not (sec["flags"] & (SHF_WRITE | SHF_EXECINSTR)))
 
 def compile_text(src, extra=()):
-    """Compile `src` to Thumb-2 and return (blob, funcs, rodata_len). `blob` is the
-    .text bytes followed by any referenced .rodata* (both relocation families
-    resolved in place; see module docstring); `funcs` is a list of (name, offset,
-    size) with offsets blob-relative (== .text-relative, since .text is first) and
-    sizes resolved; `rodata_len` is the count of trailing data bytes. Raises
-    BuildError on any relocation that can't be resolved position-independently or
-    any reference to an external/undefined symbol. Sizes are resolved from st_size,
-    falling back to the gap to the next function (or end of .text) when 0."""
+    """Compile C with the original flags and return (blob, functions, rodata_len).
+
+    All offsets are relative to the blob. rodata_len includes data alignment
+    after its last executable section; it is zero for code-only objects.
+    """
     obj = obj_path(src, ".o")
     subprocess.run([CLANG, *CFLAGS, *extra, "-c", src, "-o", obj], check=True)
+    blob, funcs, layout = link_pic_object(obj)
+    _, secs = parse_elf(obj)
+    executable = {s["sname"] for s in secs if s["flags"] & SHF_EXECINSTR}
+    executable_end = max((off + size for name, off, size in layout
+                          if name in executable), default=0)
+    return blob, funcs, len(blob) - executable_end
 
+
+def link_pic_object(obj):
+    """Resolve a closed ARM relocatable object into a movable code/data blob.
+
+    Return bytes, (name, offset, size) functions and (section, offset, size)
+    layout. No writable state, external calls or runtime loader is allowed.
+    Load the blob on an address aligned for its most-aligned emitted section.
+    """
     d, secs = parse_elf(obj)
-    text = section(secs, ".text")
-    text_idx = secs.index(text)
-
-    # Lay out the blob: .text first, then every referenced-able read-only data
-    # section, each aligned to its own sh_addralign. `base[shndx]` maps a section
-    # index to where it starts in the blob, so a symbol's blob address is
-    # base[sym.shndx] + sym.value and a relocation site's blob offset is
-    # base[target_section] + r_offset -- all blob-relative, hence load-independent.
-    blob = bytearray(d[text["offset"]:text["offset"] + text["size"]])
-    text_len = len(blob)
-    base = {text_idx: 0}
+    if struct.unpack_from("<HH", d, 16) != (1, 40):  # ET_REL, EM_ARM.
+        raise BuildError(f"{obj}: expected an ARM relocatable object")
+    emitted = [(i, s) for i, s in enumerate(secs)
+               if s["type"] == SHT_PROGBITS and s["flags"] & SHF_ALLOC
+               and s["flags"] & SHF_EXECINSTR]
+    emitted.sort(key=lambda item: (item[1]["sname"] != ".text", item[0]))
+    emitted += [(i, s) for i, s in enumerate(secs) if _is_rodata(s)]
+    emitted_indices = {i for i, _ in emitted}
     for i, s in enumerate(secs):
-        if i == text_idx or not _is_rodata(s):
+        if not s["size"] or not s["flags"] & SHF_ALLOC:
             continue
-        align = max(s["align"], 1)
-        while len(blob) % align:
-            blob.append(0)
+        if (s["flags"] & SHF_WRITE or s["sname"].startswith(
+                (".got", ".init", ".fini", ".ctors", ".dtors", ".ARM.extab"))):
+            raise BuildError(f"{obj}: forbidden allocated section {s['sname']}")
+        if s["sname"].startswith(".ARM.exidx"):
+            # Clang emits these even with -fno-unwind-tables. Dropping an
+            # actual unwind recipe would silently produce incomplete code.
+            if s["type"] != SHT_ARM_EXIDX or s["size"] % 8:
+                raise BuildError(f"{obj}: invalid ARM exception index")
+            for p in range(s["offset"] + 4, s["offset"] + s["size"], 8):
+                if struct.unpack_from("<I", d, p)[0] != 1:  # EXIDX_CANTUNWIND.
+                    raise BuildError(f"{obj}: unwind tables are unsupported")
+        elif i not in emitted_indices:
+            raise BuildError(f"{obj}: unknown allocated section {s['sname']}")
+    blob, base = bytearray(), {}
+    for i, s in emitted:
+        align = max(1, s["align"])
+        if align & (align - 1):
+            raise BuildError(f"{obj}: invalid section alignment")
+        blob.extend(b"\0" * ((-len(blob)) % align))
         base[i] = len(blob)
-        blob += d[s["offset"]:s["offset"] + s["size"]]
-    rodata_len = len(blob) - text_len
+        blob.extend(d[s["offset"]:s["offset"] + s["size"]])
 
-    # collect all symbols (name, value, size, type, section index)
-    symtab = section(secs, ".symtab")
-    strtab = secs[symtab["link"]]
+    tab = section(secs, ".symtab")
+    if (tab is None or tab["entsize"] != 16 or tab["size"] % 16
+            or tab["link"] >= len(secs)):
+        raise BuildError(f"{obj}: invalid symbol table")
+    strings = secs[tab["link"]]
+    names = d[strings["offset"]:strings["offset"] + strings["size"]]
     syms = []
-    for i in range(symtab["size"] // 16):
-        o = symtab["offset"] + i * 16
-        st_name, st_value, st_size, st_info, st_other, st_shndx = \
-            struct.unpack_from("<IIIBBH", d, o)
-        nm = d[strtab["offset"] + st_name:]
-        nm = nm[:nm.index(b"\0")].decode()
-        syms.append(dict(name=nm, value=st_value, size=st_size,
-                         typ=st_info & 0xf, shndx=st_shndx))
+    for p in range(tab["offset"], tab["offset"] + tab["size"], 16):
+        name, value, size, info, _, shndx = struct.unpack_from("<IIIBBH", d, p)
+        end = names.find(b"\0", name)
+        if name >= len(names) or end < 0:
+            raise BuildError(f"{obj}: invalid symbol name")
+        nm = names[name:end].decode()
+        if nm and shndx == 0:
+            raise BuildError(f"{obj}: undefined symbol {nm!r}")
+        if shndx in base:
+            offset = value & ~1 if info & 15 == 2 else value
+            if offset + size > secs[shndx]["size"]:
+                raise BuildError(f"{obj}: symbol outside its section: {nm!r}")
+        syms.append(dict(name=nm, value=value, size=size,
+                         typ=info & 15, shndx=shndx))
 
-    # Resolve relocations against any section we laid into the blob. clang emits
-    # ELF REL for ARM (`.rel.<sec>`, 8-byte entries, addend in-place); `.rela.*`
-    # (12-byte) is tolerated for iteration. Two families are resolvable, both fully
-    # PC-relative so the fixup is a blob-internal constant:
-    #   * intra-.text BL/B.W  (R_ARM_THM_CALL / JUMP24 to a .text symbol)
-    #   * PC-relative rodata refs (R_ARM_THM_MOVW_PREL_NC / MOVT_PREL, -fropi)
-    # Anything else -- absolute rodata refs, data-to-data pointer relocs, external
-    # branch targets -- is a hard error (no linker to bake in an absolute address).
-    bad = []
     for rs in secs:
-        if rs["type"] != SHT_REL and not rs["sname"].startswith(".rela"):
+        if rs["type"] not in (SHT_REL, SHT_RELA) or not rs["size"]:
             continue
-        target = rs["info"]                 # sh_info = section these relocs apply to
-        if target not in base:              # e.g. .rel.ARM.exidx, .rel.debug_* -> ignore
+        if rs["info"] >= len(secs):
+            raise BuildError(f"{obj}: invalid relocation section")
+        if rs["info"] not in base:  # Nonloaded debug/CANTUNWIND metadata.
             continue
-        ent = 12 if rs["sname"].startswith(".rela") else 8
-        for i in range(rs["size"] // ent):
-            r_offset, r_info = struct.unpack_from("<II", d, rs["offset"] + i * ent)
-            r_type = r_info & 0xff
-            sym = syms[r_info >> 8]
-            wpos = base[target] + r_offset  # blob offset of the site being patched
-            if (r_type in (R_ARM_THM_CALL, R_ARM_THM_JUMP24)
-                    and target == text_idx and sym["shndx"] == text_idx):
-                resolve_thumb_branch(blob, wpos, sym["value"] & ~1)
-            elif r_type in (R_ARM_THM_MOVW_PREL_NC, R_ARM_THM_MOVT_PREL) \
-                    and sym["shndx"] in base:
-                resolve_movwt(blob, wpos, base[sym["shndx"]] + sym["value"],
-                              high=(r_type == R_ARM_THM_MOVT_PREL))
+        if (rs["type"] != SHT_REL or rs["entsize"] != 8
+                or rs["size"] % 8 or rs["link"] != secs.index(tab)):
+            raise BuildError(f"{obj}: expected ARM ELF REL relocations")
+        for p in range(rs["offset"], rs["offset"] + rs["size"], 8):
+            site, info = struct.unpack_from("<II", d, p)
+            if info >> 8 >= len(syms):
+                raise BuildError(f"{obj}: invalid relocation symbol")
+            kind, sym = info & 255, syms[info >> 8]
+            if sym["shndx"] not in base:
+                raise BuildError(f"{obj}: relocation to nonloaded {sym['name']!r}")
+            if site > secs[rs["info"]]["size"] - 4:
+                raise BuildError(f"{obj}: relocation outside its section")
+            place = base[rs["info"]] + site
+            target = base[sym["shndx"]] + sym["value"]
+            if kind in (R_ARM_THM_CALL, R_ARM_THM_JUMP24):
+                if not secs[sym["shndx"]]["flags"] & SHF_EXECINSTR:
+                    raise BuildError(f"{obj}: branch target is not executable")
+                hw1, hw2 = struct.unpack_from("<HH", blob, place)
+                opcode = 0xD000 if kind == R_ARM_THM_CALL else 0x9000
+                if hw1 & 0xF800 != 0xF000 or hw2 & 0xD000 != opcode:
+                    raise BuildError(f"{obj}: unsupported Thumb branch opcode")
+                sign = (hw1 >> 10) & 1
+                i1 = 1 ^ ((hw2 >> 13) & 1) ^ sign
+                i2 = 1 ^ ((hw2 >> 11) & 1) ^ sign
+                addend = ((sign << 24) | (i1 << 23) | (i2 << 22)
+                          | ((hw1 & 1023) << 12) | ((hw2 & 2047) << 1))
+                if sign:
+                    addend -= 1 << 25
+                # ELF stores S + A - P; the encoder takes a target for PC=P+4.
+                resolve_thumb_branch(blob, place, (target & ~1) + addend + 4)
+            elif kind == R_ARM_REL32:
+                addend, = struct.unpack_from("<I", blob, place)
+                struct.pack_into("<I", blob, place,
+                                 (target + addend - place) & 0xFFFFFFFF)
+            elif kind in (R_ARM_THM_MOVW_PREL_NC, R_ARM_THM_MOVT_PREL):
+                resolve_movwt(blob, place, target, high=(kind == R_ARM_THM_MOVT_PREL))
             else:
-                bad.append(f"  {rs['sname']}+{r_offset:#x} type={r_type} -> "
-                           f"{sym['name']!r} (shndx={sym['shndx']}); only intra-.text "
-                           f"BL/B.W and PC-relative (-fropi) rodata refs are resolvable")
-    if bad:
-        raise BuildError(f"{src}: unresolvable relocation(s) — call firmware entry "
-                         f"points via absolute-constant fn-ptrs (not by name), and keep "
-                         f"read-only data free of pointers into other data:\n"
-                         + "\n".join(bad))
+                raise BuildError(f"{obj}: unsupported relocation {kind} to {sym['name']!r}")
 
-    # collect STT_FUNC symbols for the report / patch_compress
-    raw_funcs = [(s["name"], s["value"] & ~1, s["size"])
-                 for s in syms if s["typ"] == 2 and s["shndx"] == text_idx]
-    # resolve sizes: st_size, else gap to next function, else end of .text
-    raw_funcs.sort(key=lambda x: x[1])
+    raw_funcs = sorted((s["name"], base[s["shndx"]] + (s["value"] & ~1),
+                        s["size"], s["shndx"])
+                       for s in syms if s["typ"] == 2 and s["shndx"] in base)
+    raw_funcs.sort(key=lambda f: f[1])
     funcs = []
-    for i, (nm, val, sz) in enumerate(raw_funcs):
-        if not sz:
-            nxt = raw_funcs[i + 1][1] if i + 1 < len(raw_funcs) else text_len
-            sz = nxt - val
-        funcs.append((nm, val, sz))
-    return bytes(blob), funcs, rodata_len
+    for i, (name, offset, size, shndx) in enumerate(raw_funcs):
+        if not secs[shndx]["flags"] & SHF_EXECINSTR:
+            raise BuildError(f"{obj}: function outside executable sections")
+        if not size:
+            end = base[shndx] + secs[shndx]["size"]
+            following = [f[1] for f in raw_funcs[i + 1:]
+                         if f[3] == shndx and f[1] > offset]
+            size = min(following, default=end) - offset
+        funcs.append((name, offset, size))
+    layout = [(s["sname"], base[i], s["size"]) for i, s in emitted]
+    return bytes(blob), funcs, layout
 
 def build_dict(src, extra=()):
     blob, funcs, rodata_len = compile_text(src, extra)
