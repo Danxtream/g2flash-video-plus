@@ -60,9 +60,12 @@ its selection. Missing, duplicate or ambiguous mappings fail the build.
 
 The -O2 frontend emits preopt.ll; hot functions compile at -O2 and cold functions
 at -Oz with minsize/optsize attributes. There is no LTO or automatic promotion.
-Each function has one owner. All table initializers remain solely in the cold
-module; the hot module receives external declarations. Optimizer visibility of
-those values is a separate build change.
+Each function has one owner. Read-only table values are visible to the hot
+optimizer through available_externally initializers, so it can fold constants
+without emitting another table copy. The cold module retains sole ownership of
+table storage; its IR and COMDAT membership remain unchanged. Symbols and
+independent links verify that the hot module emits no data and every retained
+named table has exactly one copy.
 
 The output contains IR, full membership/mappings, object files, stack usage,
 commands, a closed PIC object and decoder.bin/decoder.json. The selection hash

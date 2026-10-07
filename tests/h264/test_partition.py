@@ -224,12 +224,46 @@ class PartitionBuildTests(unittest.TestCase):
         self.assertEqual(sum(v == "hot" for v in self.membership["functions"].values()), 253)
         hot = (self.arm / "hot.ll").read_text(encoding="utf-8")
         cold = (self.arm / "cold.ll").read_text(encoding="utf-8")
-        self.assertNotIn("available_externally", hot)
+        self.assertIn("available_externally", hot)
         self.assertNotIn("ds_profile", hot + cold)
         self.assertIn("DecodeTrace", hot)
         for name in self.membership["constants"]:
-            self.assertRegex(hot, r"(?m)^@" + re.escape(name) + " = external ")
+            self.assertRegex(hot, r"(?m)^@" + re.escape(name) + " = available_externally ")
             self.assertEqual(len(re.findall(r"(?m)^@" + re.escape(name) + " = ", cold)), 1)
+
+    def object_symbols(self, path):
+        data, sections = builder.linker.parse_elf(path)
+        table = builder.linker.section(sections, ".symtab")
+        strings = sections[table["link"]]
+        result = []
+        for offset in range(table["offset"], table["offset"] + table["size"], 16):
+            name, value, size, info, other, index = struct.unpack_from("<IIIBBH", data, offset)
+            if info & 15 == 1 and index:
+                result.append(data[strings["offset"] + name:].split(b"\0", 1)[0].decode())
+        return result, sections
+
+    def assert_constant_copies(self, path):
+        cold, _ = self.object_symbols(self.arm / "cold.o")
+        closed, _ = self.object_symbols(self.arm / "closed.o")
+        linked, _ = self.object_symbols(path)
+        retained = 0
+        for name in self.membership["constants"]:
+            aliases = {name, ".L" + name}
+            counts = [sum(symbol in aliases for symbol in objects) for objects in (cold, closed, linked)]
+            self.assertTrue(all(count <= 1 for count in counts), (name, counts))
+            if not name.startswith("."):
+                self.assertEqual(counts[1], counts[2], name)
+                if counts[1]:
+                    self.assertEqual(counts[0], 1, name)
+                    retained += 1
+        self.assertGreater(retained, 0)
+
+    def test_optimizer_only_constants_emit_no_hot_storage(self):
+        objects, sections = self.object_symbols(self.arm / "hot.o")
+        self.assertEqual(objects, [])
+        self.assertFalse([s["sname"] for s in sections if s["size"] and
+                          s["sname"].startswith((".rodata", ".data", ".bss"))])
+        self.assert_constant_copies(self.arm / "closed.o")
 
     def test_real_native_promotions_map_uniquely(self):
         mapping = self.native_membership["promotion_mapping"]
@@ -253,6 +287,7 @@ class PartitionBuildTests(unittest.TestCase):
             data, sections = builder.linker.parse_elf(elf)
             section = builder.linker.section(sections, ".blob")
             self.assertEqual(blob, data[section["offset"]:section["offset"] + section["size"]])
+            self.assert_constant_copies(elf)
 
     def test_two_clean_builds_are_identical(self):
         second = self.directory / "second"

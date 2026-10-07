@@ -29,6 +29,7 @@ def load_module(name, path):
 
 toolchain = load_module("h264_toolchain", HERE / "toolchain.py")
 partition_ir = load_module("h264_partition", HERE / "partition_ir.py")
+constant_visibility = load_module("h264_constants", HERE / "constant_visibility.py")
 linker = load_module("h264_linker", ROOT / "patches/build.py")
 
 
@@ -119,6 +120,8 @@ def compile_modules(output, flags, source=HERE / "g2_h264.cpp", native=False,
     ir = preopt.read_text(encoding="utf-8")
     mapping, external = resolve_promotions(ir, config, native)
     hot, cold, membership = partition_ir.partition(ir, config["hot_groups"], sorted(mapping.values()))
+    hot = constant_visibility.expose(hot, cold, membership["constants"])
+    membership["constant_policy"] = "available_externally hot initializers; sole cold owner"
     objects = []
     for name, text, optimization in (("hot", hot, "-O2"), ("cold", cold, "-Oz")):
         path = directory / (name + ".ll")
