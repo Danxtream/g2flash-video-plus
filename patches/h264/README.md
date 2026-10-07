@@ -44,4 +44,34 @@ in Ubuntu (WSL):
 Requires clang, clang++, ld.lld and ARM GCC/newlib development headers. Tests
 generate a tiny I/P stream in memory; optional fixture checks read ignored clips
 in place and keep all outputs in temporary directories. No binary or clip belongs
-in this folder. The final mixed partition/constant tooling is a later build step.
+in this folder.
+
+Build hot and cold decoder modules independently of the firmware image:
+
+    python3 patches/h264/build_decoder.py --output <output-directory>
+
+hot_functions.json freezes the 12 base hot groups and the 229 promotion symbols
+selected from the glasses speed tests. Small helpers, CAVLC residual parsing and
+P-macroblock decoding are promoted into the -O2 hot module. The list was
+recorded from the speed-test build, whose runtime provider was named
+imports(); it maps explicitly to g2_h264_runtime_current here. That explicit
+mapping leaves 228 promoted C++ definitions. Every decoder function retains
+its selection. Missing, duplicate or ambiguous mappings fail the build.
+
+The -O2 frontend emits preopt.ll; hot functions compile at -O2 and cold functions
+at -Oz with minsize/optsize attributes. There is no LTO or automatic promotion.
+Each function has one owner. All table initializers remain solely in the cold
+module; the hot module receives external declarations. Optimizer visibility of
+those values is a separate build change.
+
+The output contains IR, full membership/mappings, object files, stack usage,
+commands, a closed PIC object and decoder.bin/decoder.json. The selection hash
+covers the effective parsed configuration, including caller-supplied selections.
+The standalone link uses the inert C ABI plus runtime and existing C memory
+helpers; the firmware build does not invoke it yet. Include-root overrides are
+the same as toolchain.py.
+
+Partition tests compare every Y byte from independent whole/partitioned native
+builds under ASan/UBSan. Optional G2_H264_TEST_CLIPS adds local clip paths separated
+by the platform path separator. A test-only entry admits the long G2 fixture's
+large NALs; the production 4086-byte admission limit remains unchanged.
