@@ -101,6 +101,19 @@ class WrapperTests(unittest.TestCase):
         run(["clang++", *cls.native_flags, str(HERE / "g2_h264.cpp"),
              str(ROOT / "tests/h264/wrapper_smoke.cpp"), str(cls.runtime),
              "-o", str(cls.smoke)])
+        cls.context_smoke = cls.directory / "context-smoke"
+        run(["clang++", *cls.native_flags, "-DG2_H264_CONTEXT_TEST",
+             str(HERE / "g2_h264.cpp"), str(ROOT / "tests/h264/wrapper_smoke.cpp"),
+             str(cls.runtime), "-o", str(cls.context_smoke)])
+
+    def test_context_provider_stays_bound_through_lifecycle(self):
+        fixture = ROOT / "third-party/sub0h264/tests/fixtures/flat_black_baseline_640x480.h264"
+        paths = [str(fixture)] if fixture.is_file() else []
+        result = run([str(self.context_smoke), *paths])
+        self.assertIn("C interface PASS", result.stdout)
+        print(result.stdout, end="")
+        result = subprocess.run([str(self.context_smoke), "--fatal"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 71, result.stderr)
 
     def test_sanitized_lifecycle_nals_i_p_and_preflight_refusal(self):
         result = run([str(self.smoke)])

@@ -36,24 +36,24 @@ class DecoderBlobTests(unittest.TestCase):
             patches = root / "patches"
             output = root / "obj/h264"
             output.mkdir(parents=True)
-            (output / "decoder.bin").write_bytes(blob)
-            path = output / "decoder.json"
+            (output / "firmware.bin").write_bytes(blob)
+            path = output / "firmware.json"
             path.write_text(json.dumps(manifest), encoding="utf-8")
             with mock.patch.object(firmware, "SCRIPT_DIR", str(patches)), \
                     mock.patch.object(firmware.subprocess, "run") as run:
                 run.return_value = subprocess.CompletedProcess([], 0, "", "")
-                self.assertEqual(firmware.build_decoder_blob(), (blob, manifest))
+                self.assertEqual(firmware.build_firmware_blob(), {**manifest, "text": blob.hex()})
                 self.assertEqual(run.call_args.args[0],
                                  [sys.executable, str(patches / "h264/build_decoder.py"),
-                                  "--output", str(output)])
+                                  "--output", str(output), "--firmware-c", str(patches / "patches_main.c")])
                 for key, value in (("bytes", 1), ("sha256", "0" * 64),
                                    ("alignment", 0), ("alignment", 3), ("alignment", 8)):
                     path.write_text(json.dumps({**manifest, key: value}), encoding="utf-8")
                     with self.subTest(key=key, value=value), self.assertRaises(ValueError):
-                        firmware.build_decoder_blob()
+                        firmware.build_firmware_blob()
                 run.return_value = subprocess.CompletedProcess([], 1, "", "compiler failed")
                 with self.assertRaisesRegex(SystemExit, "compiler failed"):
-                    firmware.build_decoder_blob()
+                    firmware.build_firmware_blob()
 
 
 class FirmwareInclusionTests(unittest.TestCase):
@@ -66,33 +66,31 @@ class FirmwareInclusionTests(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.temp.cleanup)
         cls.directory = Path(cls.temp.name)
-        cls.manifest = builder.build_decoder(cls.directory)
-        cls.decoder = (cls.directory / "decoder.bin").read_bytes()
-        cls.c_build = builder.linker.build_dict(str(ROOT / "patches/patches_main.c"))
-        cls.c_blob = bytes.fromhex(cls.c_build["text"])
+        cls.manifest = builder.build_firmware(cls.directory, ROOT / "patches/patches_main.c")
+        cls.blob = (cls.directory / "firmware.bin").read_bytes()
+        cls.built = {**cls.manifest, "text": cls.blob.hex()}
 
-    def layout(self, decoder=None, ceiling=None):
-        if decoder is None:
-            decoder = self.decoder
+    def layout(self, ceiling=None):
         if ceiling is None:
             ceiling = firmware.APP_MAX_END
-        with mock.patch.object(firmware, "build_blob", return_value=self.c_build), \
-                mock.patch.object(firmware, "build_decoder_blob", return_value=(decoder, self.manifest)), \
+        with mock.patch.object(firmware, "build_firmware_blob", return_value=self.built), \
                 mock.patch.object(firmware, "APP_MAX_END", ceiling), \
                 contextlib.redirect_stdout(io.StringIO()):
             return firmware.layout(self.base)
 
-    def test_c_prefix_decoder_bytes_and_patch_sites_are_unchanged(self):
+    def test_combined_bytes_exports_and_stock_patch_guards(self):
         append, patches, (_, _, old_size) = self.layout()
-        c_only, old_patches, _ = self.layout(b"")
-        self.assertEqual(patches, old_patches)
         self.assertEqual(len(patches), 30)
-        self.assertEqual(append[:len(c_only)], c_only)
-        self.assertEqual(c_only[:len(self.c_blob)], self.c_blob)
-        start = firmware.align_up(old_size + len(c_only), firmware.BLOB_ALIGN) - old_size
-        self.assertEqual(append[start:], self.decoder)
+        start = firmware.align_up(old_size, firmware.BLOB_ALIGN) - old_size
+        self.assertEqual(append[start:], self.blob)
         self.assertEqual(hashlib.sha256(append[start:]).hexdigest(), self.manifest["sha256"])
         self.assertEqual(firmware.mram_addr(old_size + start) % self.manifest["alignment"], 0)
+        names = [item["name"] for item in self.manifest["functions"]]
+        for name in (*builder.EXPORTS, "g2_h264_runtime_current", "memcpy", "memmove", "memset"):
+            self.assertEqual(names.count(name), 1, name)
+        symbols = subprocess.check_output(["arm-none-eabi-nm", str(self.directory / "firmware-closed.o")], text=True)
+        self.assertRegex(symbols, r"(?m)^[0-9a-f]+ T g2_h264_runtime_current$")
+        self.assertNotRegex(symbols, r"(?m)^[0-9a-f]+ W g2_h264_runtime_current$")
         for offset, old, new, description in patches:
             expected = bytes.fromhex(old)
             self.assertEqual(self.base[offset:offset + len(expected)], expected, description)
@@ -120,35 +118,24 @@ class FirmwareInclusionTests(unittest.TestCase):
                 self.assertRaisesRegex(AssertionError, "absolute references"):
             firmware.layout(bytes(damaged))
 
-    def test_lld_reproduces_both_blobs_at_three_addresses(self):
-        c_object = ROOT / "obj/patches_main.o"
-        _, _, c_layout = builder.linker.link_pic_object(c_object)
-        prefixed = self.directory / "decoder-prefixed.o"
-        # Independent LLD needs unique symbols for the two closed helper sets.
-        # Renaming only this validation object changes no emitted instructions.
-        subprocess.run(["arm-none-eabi-objcopy", "--prefix-symbols=h264_",
-                        str(self.directory / "closed.o"), str(prefixed)], check=True)
-        offset = firmware.align_up(len(self.c_blob), firmware.BLOB_ALIGN)
-        expected = self.c_blob + b"\0" * (offset - len(self.c_blob)) + self.decoder
+    def test_lld_reproduces_combined_blob_at_three_addresses(self):
+        obj = self.directory / "firmware-closed.o"
         _, _, (_, _, old_size) = self.layout()
         actual = firmware.mram_addr(firmware.align_up(old_size, firmware.BLOB_ALIGN))
         for address in (actual, 0x7C0000, 0x20275000):
             lines = ["SECTIONS {", f".blob 0x{address:x} : {{", "FILL(0);"]
-            for obj, start, layout in ((c_object, 0, c_layout),
-                                       (prefixed, offset, self.manifest["layout"])):
-                for name, position, size in layout:
-                    lines += [f". = ADDR(.blob) + {start + position};",
-                              f"KEEP({obj}({name}))"]
+            for name, position, size in self.manifest["layout"]:
+                lines += [f". = ADDR(.blob) + {position};", f"KEEP({obj}({name}))"]
             lines += ["}", "/DISCARD/ : { *(.ARM.exidx*) *(.ARM.extab*) *(.comment)",
                       "*(.note*) *(.ARM.attributes) *(.llvm_addrsig) }", "}"]
             script = self.directory / f"firmware-{address:x}.ld"
             script.write_text("\n".join(lines) + "\n", encoding="utf-8")
             elf = script.with_suffix(".elf")
             subprocess.run(["ld.lld", "--no-relax", "--entry=0", "-T", str(script),
-                            str(c_object), str(prefixed), "-o", str(elf)], check=True)
+                            str(obj), "-o", str(elf)], check=True)
             data, sections = builder.linker.parse_elf(elf)
             section = builder.linker.section(sections, ".blob")
-            self.assertEqual(data[section["offset"]:section["offset"] + section["size"]], expected)
+            self.assertEqual(data[section["offset"]:section["offset"] + section["size"]], self.blob)
 
 
 if __name__ == "__main__":

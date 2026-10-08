@@ -40,3 +40,4 @@
 #include "debug.c"
 
 #include "ancs_relay.c"
+#include "video/runtime_provider.c"

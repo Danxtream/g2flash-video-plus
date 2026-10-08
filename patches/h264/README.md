@@ -4,17 +4,21 @@ This GPL-3.0 interface uses the vendored MIT Sub0h264 decoder, upstream revision
 15421eeade48774929bc0221ea0418a25462c222 plus the G2 changes in third-party/sub0h264.
 Its license, modification notes and Patent Notice are in the repository README.
 
-The firmware build appends this closed decoder after the existing C unit.
+The firmware build closes the decoder together with the existing C unit.
 Boot, transport and display do not call it. No decoder allocation occurs at boot.
-The default runtime provider is unbound, so initialization refuses to start.
-The later firmware owner supplies callbacks from its writable context.
+The runtime provider reads the existing writable context and remains unbound
+until a firmware owner publishes its callbacks, so idle initialization refuses
+to start. The standalone decoder retains the weak unbound provider for tests.
 
-The C blob and decoder are closed separately. Keeping both byte sequences intact
-preserves the existing C patch targets and allows direct verification of the
-embedded decoder against decoder.bin. The decoder retains its own memory-helper
-copies; no writable state, startup hook or external relocation is introduced.
-Both blobs share the existing payload-size, checksum and program-memory ceiling
-checks. Regenerate the patch list and update the output hash after build changes:
+Separately closed blobs cannot resolve the decoder's runtime provider across
+their boundary without a fixed address. The firmware instead links the C unit,
+hot/cold decoder objects and runtime into one closed PIC object, replacing the
+weak provider with its context-backed definition and sharing the C memory
+helpers. Stock hook targets use the combined function table; byte guards remain.
+No writable globals, startup hook or external relocation is introduced.
+The combined blob keeps the existing payload-size, checksum and program-memory
+ceiling checks. Regenerate the patch list and update the output hash after build
+changes:
 
     bash build_cfw.sh --skip-venv --update-patches
 
@@ -85,8 +89,9 @@ The output contains IR, full membership/mappings, object files, stack usage,
 commands, a closed PIC object and decoder.bin/decoder.json. The selection hash
 covers the effective parsed configuration, including caller-supplied selections.
 The standalone link uses the inert C ABI plus runtime and existing C memory
-helpers; the firmware build does not invoke it yet. Include-root overrides are
-the same as toolchain.py.
+helpers. The firmware link writes firmware.bin/firmware.json and its combined
+function table beside those intermediates. Include-root overrides are the same
+as toolchain.py.
 
 Partition tests compare every Y byte from independent whole/partitioned native
 builds under ASan/UBSan. Optional G2_H264_TEST_CLIPS adds local clip paths separated

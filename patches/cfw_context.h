@@ -1,6 +1,8 @@
 #pragma once
 #include <stdint.h>
 #include "message_transport.h"
+#include "h264/runtime.h"
+#include "video/lifecycle.h"
 
 /* Persistent CFW-owned state, independent of EvenHub image containers. The
  * full-panel shadow is an owned heap allocation. This context is anchored in
@@ -122,6 +124,11 @@ typedef struct {
     uint8_t ancs_connection, ancs_stage;
     uint16_t ancs_sequence;
     uint32_t ancs_token;
+    /* Append video ownership so every existing context offset stays intact.
+     * The runtime remains published through worker destruction/termination. */
+    void *video_owner;
+    const g2_h264_runtime *video_runtime;
+    video_lifecycle video;
 } customCfwContext;
 
 #define CFW_CTX_SLOT  0x2029f4a8U    /* first word of the CFW-reserved TLSF tail */

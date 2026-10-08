@@ -242,26 +242,26 @@ def build_blob(src):
         raise SystemExit(f"build.py failed for {src}:\n{r.stderr or r.stdout}")
     return json.loads(r.stdout)
 
-def build_decoder_blob():
-    """Build a closed decoder separately so existing C bytes stay unchanged."""
+def build_firmware_blob():
+    """Close the C unit and decoder together with a context-backed runtime."""
     output = os.path.join(os.path.dirname(SCRIPT_DIR), "obj", "h264")
     cmd = [sys.executable, os.path.join(SCRIPT_DIR, "h264", "build_decoder.py"),
-           "--output", output]
+           "--output", output, "--firmware-c", os.path.join(SCRIPT_DIR, "patches_main.c")]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        raise SystemExit(f"decoder build failed:\n{r.stderr or r.stdout}")
-    with open(os.path.join(output, "decoder.json"), encoding="utf-8") as f:
+        raise SystemExit(f"C/decoder build failed:\n{r.stderr or r.stdout}")
+    with open(os.path.join(output, "firmware.json"), encoding="utf-8") as f:
         manifest = json.load(f)
-    with open(os.path.join(output, "decoder.bin"), "rb") as f:
+    with open(os.path.join(output, "firmware.bin"), "rb") as f:
         blob = f.read()
     if (manifest["bytes"] != len(blob)
             or manifest["sha256"] != hashlib.sha256(blob).hexdigest()):
-        raise ValueError("decoder bytes do not match their build manifest")
+        raise ValueError("firmware bytes do not match their build manifest")
     alignment = manifest["alignment"]
     if (not alignment or alignment & (alignment - 1)
             or alignment > BLOB_ALIGN):
-        raise ValueError("decoder requires unsupported firmware alignment")
-    return blob, manifest
+        raise ValueError("firmware requires unsupported alignment")
+    return {**manifest, "text": blob.hex()}
 
 def _fn(blob, name):
     for f in blob["functions"]:
@@ -344,7 +344,7 @@ def validate_compass_calibration_stock(img):
 
 def layout(img):
     """Compile the single injected code blob (patches_main.c, which #includes every
-    patch source) and the closed H.264 decoder, and append both at the tail of the
+    patch source) together with the H.264 decoder, and append it at the tail of the
     main-app payload. Returns
     (append_bytes, in_place_patches, mainapp=(idx,off,old_ps)). Enforces the MRAM
     ceiling (duplicate of g2flash.check_mainapp_fits_mram)."""
@@ -387,9 +387,8 @@ def layout(img):
     # and each entry address here is just base + the function's offset in the one blob.
     blob_off = align_up(old_ps, BLOB_ALIGN)
     base = mram_addr(blob_off)
-    built = build_blob("patches_main.c")
+    built = build_firmware_blob()
     blob = bytes.fromhex(built["text"])
-    decoder, decoder_manifest = build_decoder_blob()
 
     # injected entry points, resolved from the single blob's function table. These are all
     # `bl` targets, so they stay even -- a bl keeps the core in Thumb state and needs no
@@ -414,22 +413,16 @@ def layout(img):
 
     # --- assemble the appended payload bytes (old_ps .. end) ---
     pad = blob_off - old_ps                     # alignment gap before the blob
-    # Keep the validated decoder bytes intact, including their memory helpers
-    # and unbound runtime. No C entry point calls it or allocates decoder state.
-    decoder_off = align_up(blob_off + len(blob), BLOB_ALIGN)
-    end_off = decoder_off + len(decoder)
+    end_off = blob_off + len(blob)
     append = bytearray(end_off - old_ps)
     append[pad:pad + len(blob)] = blob
-    decoder_pad = decoder_off - old_ps
-    append[decoder_pad:decoder_pad + len(decoder)] = decoder
 
     # --- MRAM ceiling check (duplicate of g2flash.check_mainapp_fits_mram) ---
     prog_end = mram_addr(end_off)   # exclusive MRAM end once flashed
     rodata = built.get("rodata_len", 0)
     print(f"  combined blob @ MRAM 0x{base:08x}  +{len(blob)} B "
           f"(.text {built['text_len'] - rodata} + rodata {rodata})")
-    print(f"  inert H.264 decoder @ MRAM 0x{mram_addr(decoder_off):08x} "
-          f"+{len(decoder)} B, SHA256 {decoder_manifest['sha256']}")
+    print(f"  C/decoder SHA256 {built['sha256']}")
     if prog_end > APP_MAX_END:
         over = prog_end - APP_MAX_END
         raise SystemExit(

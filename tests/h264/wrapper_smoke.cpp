@@ -57,9 +57,18 @@ static int preflight(const g2_h264_request *requests, uint32_t count,
 }
 static void fatal(uint32_t reason) { std::_Exit(70 + reason); }
 static g2_h264_runtime callbacks = {allocate, release, preflight, fatal};
+#ifdef G2_H264_CONTEXT_TEST
+#include "../../patches/cfw_context.h"
+static customCfwContext context = {};
+static customCfwContext *peekCustomCfwContext() {
+    return bound ? &context : nullptr;
+}
+#include "../../patches/video/runtime_provider.c"
+#else
 extern "C" const g2_h264_runtime *g2_h264_runtime_current() {
     return bound ? &callbacks : nullptr;
 }
+#endif
 
 /* Generate a flat 16x16 Baseline IDR and P-skip picture, per H.264 7.3.
  * This is a synthetic syntax fixture, not a copied/compressed video asset. */
@@ -243,6 +252,9 @@ static void clip(const char *path) {
 }
 
 int main(int argc, char **argv) {
+#ifdef G2_H264_CONTEXT_TEST
+    context.video_runtime = &callbacks;
+#endif
     if (argc == 2 && !std::strcmp(argv[1], "--fatal")) {
         failAlloc = true;
         Handle h;

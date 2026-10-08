@@ -178,16 +178,67 @@ def build_decoder(output, headers=None):
     return manifest
 
 
+def build_firmware(output, source, headers=None):
+    """Close the C unit and decoder together so the live provider resolves.
+
+    A separately closed decoder cannot bind a provider in another closed blob
+    without a fixed address. Keep the C compiler flags and share its helpers.
+    """
+    directory = Path(output).resolve()
+    headers = toolchain.discover_headers() if headers is None else headers
+    flags = toolchain.compiler_flags(headers)
+    objects, membership = compile_modules(directory, flags)
+    for name, path, extra in (("runtime", HERE / "runtime.c",
+                               ("-ffunction-sections", "-fdata-sections")),
+                              ("firmware", Path(source).resolve(), ())):
+        obj = directory / (name + ".o")
+        subprocess.run(["clang", *linker.CFLAGS, *extra, "-c", str(path),
+                        "-o", str(obj)], check=True)
+        objects.append(obj)
+    closed = directory / "firmware-closed.o"
+    # The provider roots the C unit's original single .text section, retaining
+    # all stock hook targets. Decoder exports remain available to the worker.
+    roots = [arg for name in (*EXPORTS, "g2_h264_runtime_current") for arg in ("-u", name)]
+    subprocess.run(["ld.lld", "-r", "--gc-sections", *roots, *map(str, objects),
+                    "-o", str(closed)], check=True)
+    blob, functions, layout = linker.link_pic_object(closed)
+    names = [name for name, offset, size in functions]
+    for name in (*EXPORTS, "g2_h264_runtime_current", "memcpy", "memmove", "memset"):
+        if names.count(name) != 1:
+            raise ValueError("firmware requires one definition of " + name)
+    code = sum(size for name, offset, size in layout if name.startswith(".text"))
+    _, sections = linker.parse_elf(closed)
+    emitted = {name for name, offset, size in layout}
+    alignment = max(1, *(section["align"] for section in sections
+                         if section["sname"] in emitted))
+    manifest = {"schema": 1, "name": "cfw-h264", "bytes": len(blob),
+                "alignment": alignment, "sha256": hashlib.sha256(blob).hexdigest(),
+                "text_len": len(blob), "rodata_len": len(blob) - code,
+                "functions": [{"name": name, "offset": offset, "size": size,
+                               "bytes": blob[offset:offset + size].hex()}
+                              for name, offset, size in functions],
+                "layout": layout, "flags": flags, "c_flags": linker.CFLAGS,
+                "selection_sha256": membership["selection_sha256"]}
+    (directory / "firmware.bin").write_bytes(blob)
+    (directory / "firmware.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return manifest
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--arm-gxx", default="arm-none-eabi-g++")
     parser.add_argument("--cxx-include-root", type=Path)
     parser.add_argument("--c-include-root", type=Path)
+    parser.add_argument("--firmware-c", type=Path)
     args = parser.parse_args()
     headers = toolchain.discover_headers(args.arm_gxx, args.cxx_include_root, args.c_include_root)
-    result = build_decoder(args.output, headers)
-    print(f"H.264 decoder: {result['bytes']} B, SHA256 {result['sha256']}")
+    if args.firmware_c:
+        result = build_firmware(args.output, args.firmware_c, headers)
+        print(f"C/H.264 firmware: {result['bytes']} B, SHA256 {result['sha256']}")
+    else:
+        result = build_decoder(args.output, headers)
+        print(f"H.264 decoder: {result['bytes']} B, SHA256 {result['sha256']}")
 
 
 if __name__ == "__main__":
