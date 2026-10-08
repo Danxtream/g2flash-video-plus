@@ -17,6 +17,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 EXPORTS = ("g2_h264_size", "g2_h264_alignment", "g2_h264_init",
            "g2_h264_destroy", "g2_h264_decode", "g2_h264_frame")
+WORKER_EXPORTS = ("video_worker_start", "video_worker_stop", "video_worker_reset",
+                  "video_worker_request_stop_locked", "video_worker_get_report")
 
 
 def load_module(name, path):
@@ -192,18 +194,19 @@ def build_firmware(output, source, headers=None):
                                ("-ffunction-sections", "-fdata-sections")),
                               ("firmware", Path(source).resolve(), ())):
         obj = directory / (name + ".o")
-        subprocess.run(["clang", *linker.CFLAGS, *extra, "-c", str(path),
+        subprocess.run(["clang", *linker.CFLAGS, *extra, "-fstack-usage", "-c", str(path),
                         "-o", str(obj)], check=True)
         objects.append(obj)
     closed = directory / "firmware-closed.o"
     # The provider roots the C unit's original single .text section, retaining
     # all stock hook targets. Decoder exports remain available to the worker.
-    roots = [arg for name in (*EXPORTS, "g2_h264_runtime_current") for arg in ("-u", name)]
+    roots = [arg for name in (*EXPORTS, *WORKER_EXPORTS, "g2_h264_runtime_current")
+             for arg in ("-u", name)]
     subprocess.run(["ld.lld", "-r", "--gc-sections", *roots, *map(str, objects),
                     "-o", str(closed)], check=True)
     blob, functions, layout = linker.link_pic_object(closed)
     names = [name for name, offset, size in functions]
-    for name in (*EXPORTS, "g2_h264_runtime_current", "memcpy", "memmove", "memset"):
+    for name in (*EXPORTS, *WORKER_EXPORTS, "g2_h264_runtime_current", "memcpy", "memmove", "memset"):
         if names.count(name) != 1:
             raise ValueError("firmware requires one definition of " + name)
     code = sum(size for name, offset, size in layout if name.startswith(".text"))

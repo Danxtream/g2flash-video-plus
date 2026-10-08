@@ -41,3 +41,6 @@
 
 #include "ancs_relay.c"
 #include "video/runtime_provider.c"
+#include "video/storage.c"
+#include "video/lifecycle.c"
+#include "video/worker.c"

@@ -69,7 +69,7 @@ void video_lifecycle_park(video_lifecycle *s, uint32_t token, uint32_t fault) {
 
 uint32_t video_lifecycle_state(video_lifecycle *s) {
     if (!s) return VIDEO_IDLE;
-    if (video_signal(&s->fault)) video_lifecycle_stop(s);
+    if (video_signal(&s->fault) || video_signal(&s->cancel)) video_lifecycle_stop(s);
     if (s->state == VIDEO_STARTING && video_signal(&s->ready) &&
         !video_signal(&s->cancel)) s->state = VIDEO_READY;
     return s->state;
@@ -93,16 +93,18 @@ int video_lifecycle_pin(video_lifecycle *s, uint32_t token, int callback) {
     if (!s || s->state != VIDEO_READY || token != s->generation ||
         video_lifecycle_cancelled(s, token)) return 0;
     uint32_t *count = callback ? &s->callback_users : &s->output_pins;
-    if (*count == UINT32_MAX) return 0;
-    ++*count;
+    uint32_t value = __atomic_load_n(count, __ATOMIC_ACQUIRE);
+    if (value == UINT32_MAX) return 0;
+    __atomic_store_n(count, value + 1, __ATOMIC_RELEASE);
     return 1;
 }
 
 int video_lifecycle_unpin(video_lifecycle *s, uint32_t token, int callback) {
     if (!s || token != s->token) return 0;
     uint32_t *count = callback ? &s->callback_users : &s->output_pins;
-    if (!*count) return 0;
-    --*count;
+    uint32_t value = __atomic_load_n(count, __ATOMIC_ACQUIRE);
+    if (!value) return 0;
+    __atomic_store_n(count, value - 1, __ATOMIC_RELEASE);
     return 1;
 }
 

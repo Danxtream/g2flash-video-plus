@@ -86,8 +86,10 @@ class FirmwareInclusionTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(append[start:]).hexdigest(), self.manifest["sha256"])
         self.assertEqual(firmware.mram_addr(old_size + start) % self.manifest["alignment"], 0)
         names = [item["name"] for item in self.manifest["functions"]]
-        for name in (*builder.EXPORTS, "g2_h264_runtime_current", "memcpy", "memmove", "memset"):
+        for name in (*builder.EXPORTS, *builder.WORKER_EXPORTS, "g2_h264_runtime_current",
+                     "memcpy", "memmove", "memset"):
             self.assertEqual(names.count(name), 1, name)
+        self.assertIn(".text.video", [item[0] for item in self.manifest["layout"]])
         symbols = subprocess.check_output(["arm-none-eabi-nm", str(self.directory / "firmware-closed.o")], text=True)
         self.assertRegex(symbols, r"(?m)^[0-9a-f]+ T g2_h264_runtime_current$")
         self.assertNotRegex(symbols, r"(?m)^[0-9a-f]+ W g2_h264_runtime_current$")
