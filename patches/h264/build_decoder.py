@@ -3,7 +3,7 @@
 SPDX-License-Identifier: GPL-3.0-only
 Run in Ubuntu from the repository root with --output <output-directory>.
 The decoder flags and configuration are those used for the glasses speed tests.
-The firmware build does not invoke this tool yet.
+The firmware build also uses this tool to append the closed, inert decoder.
 """
 import argparse
 import hashlib
@@ -161,7 +161,12 @@ def build_decoder(output, headers=None):
         raise ValueError("missing C decoder export")
     code = sum(size for name, offset, size in layout if name.startswith(".text"))
     constants = sum(size for name, offset, size in layout if not name.startswith(".text"))
+    _, sections = linker.parse_elf(closed)
+    emitted = {name for name, offset, size in layout}
+    alignment = max(1, *(section["align"] for section in sections
+                         if section["sname"] in emitted))
     manifest = {"schema": 1, "name": "h264-decoder", "bytes": len(blob),
+                "alignment": alignment,
                 "sha256": hashlib.sha256(blob).hexdigest(), "exports": exports,
                 "code_bytes": code, "constant_bytes": constants,
                 "padding_bytes": len(blob) - code - constants, "layout": layout,

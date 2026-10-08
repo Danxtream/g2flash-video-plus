@@ -4,10 +4,24 @@ This GPL-3.0 interface uses the vendored MIT Sub0h264 decoder, upstream revision
 15421eeade48774929bc0221ea0418a25462c222 plus the G2 changes in third-party/sub0h264.
 Its license, modification notes and Patent Notice are in the repository README.
 
-This step supplies the C interface and runtime only. It is not wired into the
-firmware build, boot, transport or display. No decoder allocation occurs at boot.
+The firmware build appends this closed decoder after the existing C unit.
+Boot, transport and display do not call it. No decoder allocation occurs at boot.
 The default runtime provider is unbound, so initialization refuses to start.
 The later firmware owner supplies callbacks from its writable context.
+
+The C blob and decoder are closed separately. Keeping both byte sequences intact
+preserves the existing C patch targets and allows direct verification of the
+embedded decoder against decoder.bin. The decoder retains its own memory-helper
+copies; no writable state, startup hook or external relocation is introduced.
+Both blobs share the existing payload-size, checksum and program-memory ceiling
+checks. Regenerate the patch list and update the output hash after build changes:
+
+    bash build_cfw.sh --skip-venv --update-patches
+
+The decoder's IR, objects, exports, sizes, alignment and SHA256 are recorded in
+obj/h264/. Inspect them with the standalone command below. The plain firmware
+build checks regeneration and replays the committed patch list without needing
+the C++ toolchain to apply it.
 
 Call size/alignment, allocate aligned object storage, then init. The runtime
 allocator, release, allocation-preflight and non-returning failure callbacks must
@@ -46,7 +60,7 @@ generate a tiny I/P stream in memory; optional fixture checks read ignored clips
 in place and keep all outputs in temporary directories. No binary or clip belongs
 in this folder.
 
-Build hot and cold decoder modules independently of the firmware image:
+Build hot and cold decoder modules separately for inspection:
 
     python3 patches/h264/build_decoder.py --output <output-directory>
 

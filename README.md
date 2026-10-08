@@ -222,6 +222,9 @@ exactly the reviewed image). Run `./build_cfw.sh --help` for options
     `cfw_patches.json`. Run it after editing the patch sources:
     `python3 patches/gen_patches.py g2_2.2.9.22.bin patches/cfw_patches.json`
     (or `./build_cfw.sh --update-patches`), then commit the JSON.
+    Regeneration also builds the H.264 decoder and needs `clang++`, `ld.lld` and
+    ARM GCC newlib headers; see
+    [decoder build instructions](patches/h264/README.md).
   - `patch_compress.py` — the all-in-one patcher (576 carrier lift + image
     compression + direct framebuffer presentation + capability field);
     `gen_patches.py` calls it to build the ops.
