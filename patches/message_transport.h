@@ -28,7 +28,16 @@ typedef struct {
     uint8_t ack_count, ack_capacity, packet_capacity;
     uint8_t ack_history[CFW_ACK_HISTORY][CFW_ACK_ENTRY_SIZE];
 } cfw_message_stream;
+/* Record metadata is copied by value; no transport storage escapes dispatch. */
+typedef struct {
+    uint8_t here, origin, targets, reply_capacity;
+    uint16_t ordinal;
+} cfw_message_route;
 int cfw_message_received(const uint8_t *data, uint16_t size, uint16_t checksum);
+int cfw_message_received_routed(const uint8_t *, uint16_t, uint16_t,
+                                const cfw_message_route *);
+/* Send a bounded video page through the ingress lens's copied reply path. */
+int cfw_message_video_reply(const cfw_message_route *, const uint8_t *, uint16_t);
 uint32_t cfw_receive_packet(uint8_t pipe, const uint8_t *packet, uint16_t length);
 uint32_t cfw_message_bridge_received(uint32_t app_id, const uint8_t *data,
                                      uint32_t length, uint16_t event);

@@ -6,12 +6,22 @@
 #include "message_transport.h"
 
 static int image_worker(const uint8_t *src, uint32_t srclen);
+static void cfw_video_keepalive(void);
 
 /* The stream parser owns data until this synchronous handler returns. */
 int cfw_message_received(const uint8_t *data, uint16_t size, uint16_t checksum) {
+    return cfw_message_received_routed(data, size, checksum, 0);
+}
+
+int cfw_message_received_routed(const uint8_t *data, uint16_t size,
+                                 uint16_t checksum, const cfw_message_route *route) {
     customCfwContext *ctx = getCustomCfwContext();
     if (!ctx) return -1;
     ctx->message_probe.snapshot = (uint32_t)size | ((uint32_t)checksum << 16);
+    if (data && size && data[0] == VIDEO_MESSAGE_ID) {
+        cfw_video_keepalive();
+        return video_control_received(data, size, route);
+    }
     return image_worker(data, size);
 }
 
@@ -272,6 +282,7 @@ static int is_shadow_message(const uint8_t *src, uint32_t srclen) {
 #define CFW_IMAGE_MUTEX_GIVE ((int (*)(uint32_t))0x00442ff7u)
 #define CFW_IMAGE_MUTEX_DELETE ((int (*)(uint32_t))0x00443049u)
 static int image_worker_locked(const uint8_t *src, uint32_t size);
+static void cfw_video_keepalive(void) { FW_KEEPALIVE_RESET(); }
 static int image_worker(const uint8_t *src, uint32_t size) {
     customCfwContext *ctx = getCustomCfwContext();
     if (!ctx) return -1;
@@ -307,6 +318,7 @@ static int image_worker_locked(const uint8_t *src, uint32_t srclen) {
      * alive on its own. The private transport still keeps the existing layout
      * alive while it is present; the reset helper only updates the global counter. */
     FW_KEEPALIVE_RESET();
+    if (video_control_blocks_custom(src, srclen)) return -1;
 
     /* Time this whole message. The display-task overlay can run before this worker
      * stores the new value, so its worker duration may lag by one update. */

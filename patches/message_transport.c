@@ -13,6 +13,7 @@
 
 #define CFW_BRIDGE_REQUEST 1u
 #define CFW_BRIDGE_RETURN 2u
+#define CFW_BRIDGE_VIDEO_RETURN 3u
 #define CFW_ACK_SIZE 9u
 #define CFW_ACK_MAX_SIZE (CFW_ACK_SIZE + CFW_ACK_HISTORY * CFW_ACK_ENTRY_SIZE)
 
@@ -22,7 +23,17 @@ static cfw_message_stream *cfw_message_state(uint8_t origin) {
     return ctx ? &ctx->message_streams[origin - 1] : 0;
 }
 #define CFW_STREAM_STATE cfw_message_state
-#define CFW_MESSAGE_MALLOC cfw_heap13_malloc
+/* Transport parsing runs in receive tasks, outside the image/display locks.
+ * Protect live video reserves before and after stock-coordinated allocation. */
+static void *cfw_video_message_allocate(uint32_t size) {
+    if (!video_transport_room(size)) return 0;
+    void *memory = cfw_heap13_malloc(size);
+    if (memory && !video_transport_room(0)) {
+        cfw_heap13_free(memory); return 0;
+    }
+    return memory;
+}
+#define CFW_MESSAGE_MALLOC cfw_video_message_allocate
 #define CFW_MESSAGE_FREE cfw_heap13_free
 #endif
 
@@ -63,6 +74,17 @@ static int cfw_message_bridge_send(uint8_t kind, uint8_t origin,
     envelope[1] = origin;
     memcpy(envelope + 2, body, length);
     return CFW_BRIDGE_SEND(CFW_MESSAGE_SID, envelope, length + 2, 0);
+}
+
+int cfw_message_video_reply(const cfw_message_route *route,
+                             const uint8_t *reply, uint16_t length) {
+    if (!route || !reply || length < 9 || length > route->reply_capacity ||
+        length > CFW_ACK_MAX_SIZE || reply[0] != 31 || reply[1] != route->here ||
+        (route->origin != CFW_MESSAGE_LEFT && route->origin != CFW_MESSAGE_RIGHT) ||
+        (route->here != CFW_MESSAGE_LEFT && route->here != CFW_MESSAGE_RIGHT) ||
+        !reply[7] || reply[7] > 64 || reply[6] >= reply[7]) return -1;
+    return route->here == route->origin ? CFW_BLE_SEND(1, CFW_MESSAGE_SID, reply, length) :
+        cfw_message_bridge_send(CFW_BRIDGE_VIDEO_RETURN, route->origin, reply, length);
 }
 
 static void cfw_message_discard(cfw_message_stream *stream) {
@@ -138,7 +160,9 @@ static uint32_t cfw_message_complete(cfw_message_stream *stream, uint8_t here,
     }
     uint16_t crc = valid ? cfw_message_crc(data, (uint16_t)size) : 0;
     valid = valid && crc == stream->checksum;
-    if (valid && cfw_message_received(data, (uint16_t)size, crc) != 0) valid = 0;
+    cfw_message_route route = {here, origin, stream->options,
+                               stream->ack_capacity, stream->message_id};
+    if (valid && cfw_message_received_routed(data, (uint16_t)size, crc, &route) != 0) valid = 0;
     if (!valid) {
         cfw_inflate_reset(stream);
         stream->context_valid = 0; /* only an explicit record reset can recover */
@@ -273,6 +297,13 @@ uint32_t cfw_message_bridge_received(uint32_t app_id, const uint8_t *data,
             (length - CFW_ACK_SIZE - 2) % CFW_ACK_ENTRY_SIZE != 0) return 0xbu;
         if ((data[2] != CFW_MESSAGE_ACK && data[2] != CFW_MESSAGE_NACK) || data[6] != (origin ^ CFW_MESSAGE_BOTH)) return 0xau;
         if (data[2] == CFW_MESSAGE_NACK && length != CFW_ACK_SIZE + 2) return 0xbu;
+        return CFW_BLE_SEND(1, CFW_MESSAGE_SID, data + 2, length - 2) == 0 ? 0 : 6;
+    }
+    if (data[0] == CFW_BRIDGE_VIDEO_RETURN) {
+        if (here != origin) return 0;
+        if (length < 11 || length > CFW_ACK_MAX_SIZE + 2) return 0xbu;
+        if (data[2] != 31 || data[3] != (origin ^ CFW_MESSAGE_BOTH) ||
+            !data[9] || data[9] > 64 || data[8] >= data[9]) return 0xau;
         return CFW_BLE_SEND(1, CFW_MESSAGE_SID, data + 2, length - 2) == 0 ? 0 : 6;
     }
     return 0xau;

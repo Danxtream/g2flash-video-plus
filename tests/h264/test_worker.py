@@ -61,3 +61,12 @@ class WorkerTests(unittest.TestCase):
 
     def test_stop_waits_for_paused_private_preparation_without_freeing_it(self):
         self.check_case("preparation")
+
+    def test_control_replies_replays_guarded_start_and_deferred_expiry_reaping(self):
+        self.check_case("controls")
+
+    def test_stop_invalidates_controls_before_claim_and_during_preparation(self):
+        self.check_case("control-preparation")
+
+    def test_status_reports_constructor_refusal_and_unknown_abi_quarantine(self):
+        self.check_case("control-failures")

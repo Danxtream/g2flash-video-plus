@@ -11,6 +11,7 @@
 #include "../../patches/video/storage.h"
 #include "../../patches/cfw_context.h"
 #define VIDEO_OS_THREAD_NEW new_thread
+#define VIDEO_POOL_DISPATCH pool_dispatch
 #include "../../patches/video/platform.h"
 
 /* Native threads need sanitizer stacks. The firmware's static stack is checked
@@ -38,6 +39,11 @@ typedef struct {
 static fake_event events[4];
 static video_heap_view views[3] = {{382756, 376832}, {285680, 278528}, {133924, 131072}};
 static uint32_t cached_used, cached_peak;
+static video_pool_item pool_jobs[8];
+static pthread_mutex_t pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t pool_count, fail_pool, pool_calls;
+static uint8_t control_reply[30];
+static uint32_t control_reply_size;
 static const uint32_t shadow_present = 1;
 
 static void test_zero(uint8_t *p, uint32_t n) { memset(p, 0, n); }
@@ -71,6 +77,20 @@ static int give(uint32_t m) {
 static uint32_t mutex_new(void *p) { assert(!p && !image_depth); ++mutex_calls; return 1; }
 static int mutex_delete(uint32_t m) { assert(m == 1 && !image_depth); return 0; }
 static uint32_t thread_id(void) { return worker_thread ? 2 : 3; }
+static int pool_dispatch(const video_pool_item *item) {
+    assert(!pthread_mutex_lock(&pool_mutex));
+    ++pool_calls;
+    assert(item && !item->data && !item->event && item->size && item->callback &&
+           item->app_id == VIDEO_MESSAGE_ID);
+    if (fail_pool) { assert(!pthread_mutex_unlock(&pool_mutex)); return 0; }
+    assert(pool_count < 8); pool_jobs[pool_count++] = *item;
+    assert(!pthread_mutex_unlock(&pool_mutex)); return 1;
+}
+int cfw_message_video_reply(const cfw_message_route *route, const uint8_t *p, uint16_t n) {
+    assert(!image_depth && route && n >= 9 && n <= route->reply_capacity &&
+           n <= sizeof(control_reply) && p[0] == VIDEO_MESSAGE_ID && p[1] == route->here);
+    memcpy(control_reply, p, n); control_reply_size = n; return 0;
+}
 static uint32_t new_thread(void (*fn)(void *), void *arg, const video_thread_attr *attr);
 static int terminate(uint32_t id);
 static int delay(uint32_t ms);
@@ -147,6 +167,8 @@ static void video_platform_release(void *p, void *v) { assert(!p); release(v); }
 #include "../../patches/video/storage.c"
 #include "../../patches/video/lifecycle.c"
 #include "../../patches/video/worker.c"
+#include "../../patches/video/controller.c"
+#include "../../patches/video/control.c"
 
 int worker_test_stream(void *);
 void worker_finish_call(void) {
@@ -281,6 +303,8 @@ static void configure(void) {
     mutex_calls = release_calls = runtime_at_release = 0;
     event_calls = fail_event = inject_cancel = inject_renew = worker_waits = longest_wait = renewed = 0;
     pause_at = preparing_paused = resume_preparation = start_result = stop_result = 0;
+    assert(!pool_count);
+    fail_pool = pool_calls = control_reply_size = 0;
     for (uint32_t i = 0; i < 4; ++i) assert(!events[i].control);
     views[0] = (video_heap_view){382756, 376832};
     views[1] = (video_heap_view){285680, 278528};
@@ -484,6 +508,182 @@ static void quarantine(void) {
         clean_quarantine();
     }
 }
+
+static void pool_drain(void) {
+    assert(!image_depth);
+    for (;;) {
+        assert(!pthread_mutex_lock(&pool_mutex));
+        if (!pool_count) { assert(!pthread_mutex_unlock(&pool_mutex)); break; }
+        video_pool_item item = pool_jobs[0];
+        memmove(pool_jobs, pool_jobs + 1, --pool_count * sizeof(*pool_jobs));
+        assert(!pthread_mutex_unlock(&pool_mutex));
+        item.callback(item.app_id, item.data, item.size, item.event);
+    }
+}
+static uint32_t pool_pending(void) {
+    assert(!pthread_mutex_lock(&pool_mutex));
+    uint32_t count = pool_count;
+    assert(!pthread_mutex_unlock(&pool_mutex)); return count;
+}
+static const cfw_message_route control_route = {1, 1, 3, 9, 0};
+static uint32_t request_next;
+static void control_command(uint8_t *p, uint32_t op, uint32_t stream) {
+    memset(p, 0, VIDEO_START_BYTES);
+    p[0] = VIDEO_MESSAGE_ID; p[1] = op; p[2] = VIDEO_PROTOCOL_VERSION;
+    video_write32(p + 4, ++request_next);
+    video_write32(p + 8, stream);
+    p[12] = VIDEO_FRAME_WIDTH & 255; p[13] = VIDEO_FRAME_WIDTH >> 8;
+    p[14] = VIDEO_FRAME_HEIGHT; p[16] = 1; p[17] = 2;
+    video_write32(p + 20, 63);
+}
+static uint8_t control_snapshot(const uint8_t *p, uint32_t n, uint8_t *snapshot) {
+    int result = video_control_received(p, n, &control_route);
+    assert(control_reply_size == 9 && control_reply[7] == VIDEO_STATUS_BYTES);
+    uint8_t page[9] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_PAGE, VIDEO_PROTOCOL_VERSION};
+    memcpy(page + 4, p + 4, 4);
+    for (uint32_t i = 0; i < VIDEO_STATUS_BYTES; ++i) {
+        page[8] = i;
+        assert(!video_control_received(page, sizeof(page), &control_route));
+        assert(control_reply[6] == i && control_reply[7] == VIDEO_STATUS_BYTES);
+        snapshot[i] = control_reply[8];
+    }
+    assert((result == 0) == (snapshot[2] == VIDEO_CONTROL_ACCEPTED));
+    return snapshot[2];
+}
+static void controls(void) {
+    uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+    configure(); request_next = 0;
+    control_command(p, VIDEO_CONTROL_CAPABILITIES, 0);
+    assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED);
+    assert(snapshot[1] == 1 && snapshot[3] == VIDEO_IDLE && !snapshot[50] &&
+           !allocations_live && !creates && !pool_calls);
+    control_command(p, VIDEO_CONTROL_START, 1);
+    context.texture_cache = (void *)(uintptr_t)1;
+    assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_LEASE && !pool_calls);
+    context.texture_cache = 0;
+    control_command(p, VIDEO_CONTROL_START, 1);
+    p[18] = 1;
+    assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_FORMAT && !pool_calls);
+    control_command(p, VIDEO_CONTROL_START, 1);
+    assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED && pool_count == 1);
+    assert(snapshot[3] == VIDEO_STARTING && !allocations_live);
+    assert(video_transport_room(65536));
+    views[1] = (video_heap_view){VIDEO_DISPLAY_RESERVE + 100, 100};
+    assert(video_transport_room(96) && !video_transport_room(97) &&
+           !video_transport_room(UINT32_MAX));
+    context.framebuffer_shadow = 0;
+    assert(!video_transport_room(1));
+    context.framebuffer_shadow = (void *)(uintptr_t)1;
+    views[1] = (video_heap_view){285680, 278528};
+    uint32_t calls = pool_calls;
+    assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED && pool_calls == calls);
+    p[20] ^= 1; assert(video_control_received(p, 24, &control_route)); p[20] ^= 1;
+    uint8_t custom[] = {18};
+    assert(video_control_blocks_custom(custom, 1));
+    /* STOP before dispatch invalidates even a not-yet-claimed owner. */
+    control_command(p, VIDEO_CONTROL_STOP, 1);
+    assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); assert(!allocations_live && !creates && !context.video_control.start_guard);
+    control_command(p, VIDEO_CONTROL_START, 2);
+    assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); await_ready(); assert(state() == VIDEO_READY);
+    control_command(p, VIDEO_CONTROL_STATUS, 0);
+    assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED && snapshot[3] == VIDEO_READY);
+    assert(video_read32(snapshot + 4) == 2 && !video_read32(snapshot + 52));
+    cfw_message_route bad = control_route; bad.targets = 2;
+    assert(video_control_received(p, 8, &bad));
+    bad = control_route; bad.origin = 2; bad.reply_capacity = 30;
+    control_command(p, VIDEO_CONTROL_STOP, 2);
+    assert(video_control_received(p, 12, &bad));
+    assert(context.video_control.replay[1][0].result == VIDEO_CONTROL_STALE);
+    control_command(p, VIDEO_CONTROL_RESET, 2);
+    assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); finish(); assert(!video_control_blocks_custom(custom, 1));
+    control_command(p, VIDEO_CONTROL_START, 2);
+    assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_FORMAT);
+    control_command(p, VIDEO_CONTROL_START, 3); fail_pool = 1;
+    assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_DISPATCH && !allocations_live);
+    fail_pool = 0;
+    control_command(p, VIDEO_CONTROL_START, 4);
+    assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); await_ready();
+    assert(!take(1, 0));
+    context.direct_lease_deadline = tick() + 50;
+    video_worker_wake_locked(context.video.token, VIDEO_WAKE_LEASE); give(1);
+    uint32_t limit = tick() + 3000;
+    while (!context.video.parked) { assert((int32_t)(limit - tick()) > 0); delay(1); }
+    while (!pool_pending()) { assert((int32_t)(limit - tick()) > 0); delay(1); }
+    pool_drain(); finish();
+    context.direct_lease_deadline = tick() + 60000;
+    context.video_control.controller_serial = UINT32_MAX;
+    control_command(p, VIDEO_CONTROL_START, 5);
+    assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_DISPATCH && !pool_count);
+    control_command(p, VIDEO_CONTROL_START, 6);
+    assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_DISPATCH && !pool_count);
+    puts("MTU23 paging, idempotent controls, guarded startup, pool refusal and expiry reaping PASS");
+}
+static void *pool_run(void *argument) { (void)argument; pool_drain(); return 0; }
+static void control_preparation(void) {
+    for (uint32_t allocation = 1; allocation <= 2; ++allocation) {
+        configure(); request_next = 0; pause_at = allocation;
+        uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+        control_command(p, VIDEO_CONTROL_START, 1);
+        assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pthread_t controller;
+        assert(!pthread_create(&controller, 0, pool_run, 0));
+        assert(!pthread_mutex_lock(&preparation));
+        while (!preparing_paused)
+            assert(!pthread_cond_wait(&preparation_changed, &preparation));
+        assert(!pthread_mutex_unlock(&preparation));
+        assert(context.video_control.controller_job && !creates &&
+               allocations_live == allocation - 1);
+        control_command(p, VIDEO_CONTROL_STOP, 1);
+        assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        assert(!context.video_control.start_guard && !creates);
+        assert(!pthread_mutex_lock(&preparation)); resume_preparation = 1;
+        assert(!pthread_cond_broadcast(&preparation_changed));
+        assert(!pthread_mutex_unlock(&preparation));
+        assert(!pthread_join(controller, 0));
+        assert(!allocations_live && !creates && !pool_pending() && state() == VIDEO_IDLE);
+        control_command(p, VIDEO_CONTROL_START, 2);
+        assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); await_ready();
+        control_command(p, VIDEO_CONTROL_STOP, 2);
+        assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); finish();
+    }
+    puts("control cancellation before claim and during private allocation PASS");
+}
+static void control_failures(void) {
+    for (uint32_t unknown_abi = 0; unknown_abi < 2; ++unknown_abi) {
+        configure(); request_next = 0;
+        if (unknown_abi) bad_tcb = 1;
+        else fail_at = 4; /* The worker's first constructor allocation. */
+        uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+        control_command(p, VIDEO_CONTROL_START, 1);
+        assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain();
+        uint32_t limit = tick() + 3000;
+        while (!__atomic_load_n(&context.video.parked, __ATOMIC_ACQUIRE)) {
+            assert((int32_t)(limit - tick()) > 0); delay(1);
+        }
+        while (context.video_control.controller_job || pool_pending()) {
+            pool_drain(); assert((int32_t)(limit - tick()) > 0);
+        }
+        control_command(p, VIDEO_CONTROL_STATUS, 0);
+        assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        if (unknown_abi) {
+            assert(snapshot[3] == VIDEO_QUARANTINED &&
+                   video_read32(snapshot + 24) == VIDEO_CONTROL_QUARANTINE && !terminates);
+            clean_quarantine();
+        } else {
+            assert(snapshot[3] == VIDEO_IDLE &&
+                   video_read32(snapshot + 24) == VIDEO_CONTROL_MEMORY && !allocations_live);
+            finish();
+        }
+    }
+    puts("asynchronous constructor refusal and unknown-ABI quarantine are reported PASS");
+}
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (!strcmp(argv[1], "normal")) normal();
@@ -494,6 +694,9 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "quarantine")) quarantine();
     else if (!strcmp(argv[1], "wakeups")) wakeups();
     else if (!strcmp(argv[1], "preparation")) preparation_cancel();
+    else if (!strcmp(argv[1], "controls")) controls();
+    else if (!strcmp(argv[1], "control-preparation")) control_preparation();
+    else if (!strcmp(argv[1], "control-failures")) control_failures();
     else assert(0);
     assert(!allocations_live && !task_live && !image_depth);
     printf("worker %s PASS\n", argv[1]);

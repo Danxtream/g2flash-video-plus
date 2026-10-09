@@ -4,6 +4,7 @@
 #include "h264/runtime.h"
 #include "video/lifecycle.h"
 #include "video/worker.h"
+#include "video/control.h"
 
 /* Persistent CFW-owned state, independent of EvenHub image containers. The
  * full-panel shadow is an owned heap allocation. This context is anchored in
@@ -133,6 +134,7 @@ typedef struct {
     uint32_t video_reaper;
     volatile uint32_t video_abort_token, video_quarantine_token, video_reclaimed_token;
     video_worker_report video_last_report;
+    video_control_state video_control;
 } customCfwContext;
 
 #define CFW_CTX_SLOT  0x2029f4a8U    /* first word of the CFW-reserved TLSF tail */

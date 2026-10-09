@@ -75,3 +75,51 @@ this C API provides no trace setter.
 Run the sanitized worker, storage and lifecycle checks with the existing suite:
 
     python3 -m unittest discover -s tests/h264 -v
+
+## Private transport controls
+
+ID 31 uses protocol version 1. The control header is ID, opcode, version,
+zero flags and a nonzero LE32 request ID. Named opcodes are capabilities (0),
+start (1), stop (2), reset (3), status (4) and page (5); NAL ingress (6) is
+reserved until implemented. Capabilities/status have only the eight-byte
+header. Stop/reset append the current LE32 stream ID. Reset ends ownership;
+a fresh start uses a strictly increasing stream ID after reclamation.
+
+Start is 24 bytes: header, LE32 stream ID, LE16 width/height, reference count,
+DPB frame count, zero presentation flags, zero reserved byte and LE32 interval
+in milliseconds. Only 320x192, one reference, two DPB frames and intervals
+10..1000 ms are accepted. Chroma remains skipped. Release the previous custom
+lease normally, reacquire the framebuffer lease, then start; an allocated
+texture cache or conflicting shadow/cache command refuses admission.
+
+Start replies accepted while preparation is pending, rather than claiming
+readiness. The existing stock task pool handles allocation and bounded teardown
+outside receive/image/display locks. Its copied 20-byte job carries no owner or
+transport pointer. Authenticate its 150-item queue identity and use only a
+zero-timeout Put; the stock dispatch wrapper instead waits on a mutex and must
+not be used. One callback owns controller waits; cancellation invalidates the
+start generation before claim and publication. Park notifications use stable
+context only. Queue failure or unconfirmed reclamation retains quarantine.
+No new timer, permanent task or boot-time video allocation is introduced.
+
+Four exact request/reply entries per ingress lens prevent repeated operations.
+Request IDs increase separately per ingress; older uncached IDs or conflicting
+duplicates refuse. Each reply freezes a 64-byte status snapshot. A page query
+has the original request ID and one page byte, and never executes the control.
+One response per query fits the proven notification capacity, including MTU23.
+Replies are ID31, source lens bit, LE32 request ID, page/count and snapshot bytes.
+The distinct bridge video-return envelope leaves upstream ACK/NACK validation
+unchanged. Send services copy each bounded stack reply before return.
+
+Snapshot bytes 0..3 are version, supported stage, control result and lifecycle
+state; LE32 values at 4/8/12/16/20/24/28 are stream, generation, left/right request
+high-water, stream high-water, last error and interval. Record/NAL maxima are
+LE32 at 32/36; geometry at 40/42, references/DPB at 44/45, forced chroma skip and
+single-slice limit at 46/47, planned four/six-slot bounds at 48/49. Current queue,
+NAL consumption and completed-picture fields remain zero: this is control-only
+support, without a receive/decode/display route. Transport ACK confirms only
+accepted command validation; refusals preserve upstream NACK/context-reset rules.
+
+Transport allocation checks preserve the heap-13 reserve and missing-shadow
+allowance before and after stock-coordinated allocation. Cached decoder sizes
+come from actual requests, including future compile-time feature changes.

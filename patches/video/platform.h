@@ -24,6 +24,32 @@ typedef struct {
     uint32_t cb_size;
 } video_event_attr;
 
+/* The donor pool copies this 20-byte item before waking one of its existing
+ * 4 KiB workers. Payload is NULL; size carries only a generation token. */
+typedef struct {
+    void (*callback)(uint32_t, const uint8_t *, uint32_t, uint16_t);
+    uint32_t app_id;
+    uint16_t event, reserved;
+    const uint8_t *data;
+    uint32_t size;
+} video_pool_item;
+
+#ifndef VIDEO_POOL_DISPATCH
+/* Bypass only the pool's blocking dispatch wrapper. CMSIS queue Put with a
+ * zero timeout copies or refuses without a mutex wait or heap allocation. */
+static int video_platform_dispatch(const video_pool_item *item) {
+    if (!*(const volatile uint8_t *)0x200773f0U) return 0;
+    uint32_t queue = *(const volatile uint32_t *)0x20076decU;
+    if (queue != 0x20074d70U ||
+        *(const uint32_t *)(uintptr_t)(queue + 60) != 150 ||
+        *(const uint32_t *)(uintptr_t)(queue + 64) != sizeof(*item)) return 0;
+    return ((int (*)(uint32_t, const void *, uint8_t, uint32_t))0x00443299U)
+        (queue, item, 0, 0) == 0;
+}
+#define VIDEO_POOL_DISPATCH video_platform_dispatch
+_Static_assert(sizeof(video_pool_item) == 20, "copied pool item ABI");
+#endif
+
 #ifndef VIDEO_OS_THREAD_NEW
 #define VIDEO_OS_THREAD_NEW ((uint32_t (*)(void (*)(void *), void *, const video_thread_attr *))0x00442897U)
 #define VIDEO_OS_THREAD_ID ((uint32_t (*)(void))0x0044295fU)

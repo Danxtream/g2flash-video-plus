@@ -44,6 +44,11 @@ typedef struct {
  * texture cache. ingress_allowance is the outstanding peak beyond live buffers,
  * including decoded scratch and actual inflater growth. No receive route here. */
 int video_worker_start(uint32_t ingress_allowance);
+/* Recheck a nonzero control generation before claiming or publishing storage.
+ * A STOP that arrives during allocation invalidates this guarded start. */
+int video_worker_start_guarded(uint32_t ingress_allowance, uint32_t generation);
+/* Lazily create only the shared command mutex, in task context outside locks. */
+int video_worker_ensure_mutex(void);
 /* Only cancellation, for callers already holding the image mutex. */
 void video_worker_request_stop_locked(void);
 /* Task-context hints, under the image mutex. Generation checks precede every

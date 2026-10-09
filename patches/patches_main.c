@@ -44,3 +44,5 @@
 #include "video/storage.c"
 #include "video/lifecycle.c"
 #include "video/worker.c"
+#include "video/controller.c"
+#include "video/control.c"

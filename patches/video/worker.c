@@ -15,6 +15,7 @@ typedef struct {
     customCfwContext *context;
     uint32_t token, thread, ingress_allowance, shadow_missing;
     uint32_t wake, complete;
+    uint32_t control_generation;
     volatile uint32_t armed;
     void *raw, *object_allocation, *object, *decoder, *stack_allocation;
     uint8_t *stack;
@@ -47,10 +48,12 @@ static int video_lease_valid(customCfwContext *ctx) {
 static void video_park_owner(video_owner *owner, uint32_t fault) __attribute__((noreturn));
 static void video_park_owner(video_owner *owner, uint32_t fault) {
     uint32_t wake = owner->wake, complete = owner->complete;
+    uint32_t token = owner->token, controlled = owner->control_generation;
     video_lifecycle_park(&owner->context->video, owner->token, fault);
     /* Do not dereference owner again. The controller terminates this different
      * static task before freeing its TCB/stack, including this suspended frame. */
     VIDEO_OS_EVENT_SET(complete, VIDEO_COMPLETE_PARKED);
+    if (controlled) video_controller_parked(token);
     for (;;) VIDEO_OS_EVENT_WAIT(wake, VIDEO_WAKE_ALL, 0, VIDEO_WAIT_FOREVER);
 }
 static void video_runtime_fail(uint32_t fault) __attribute__((noreturn));
@@ -217,7 +220,7 @@ static void video_abort_start(customCfwContext *ctx, uint32_t token) {
     video_stop_token(token, VIDEO_STOP_LIMIT_MS);
 }
 
-int video_worker_start(uint32_t ingress_allowance) {
+int video_worker_ensure_mutex(void) {
     customCfwContext *ctx = getCustomCfwContext();
     if (!ctx) return 0;
     if (!ctx->image_mutex) {
@@ -228,10 +231,17 @@ int video_worker_start(uint32_t ingress_allowance) {
                                          0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
             VIDEO_OS_MUTEX_DELETE(mutex);
     }
+    return 1;
+}
+
+int video_worker_start_guarded(uint32_t ingress_allowance, uint32_t generation) {
+    if (!video_worker_ensure_mutex()) return 0;
+    customCfwContext *ctx = peekCustomCfwContext();
     if (!video_control_take(ctx)) return 0;
     video_fold_signals(ctx);
     int eligible = !ctx->texture_cache && video_lease_valid(ctx) &&
-                   ctx->video.state == VIDEO_IDLE;
+                   ctx->video.state == VIDEO_IDLE &&
+                   (!generation || ctx->video_control.start_guard == generation);
     uint32_t missing = ctx->framebuffer_shadow == 0;
     video_control_give(ctx);
     if (!eligible) return 0;
@@ -248,6 +258,7 @@ int video_worker_start(uint32_t ingress_allowance) {
                                  ~(uintptr_t)(VIDEO_ALLOC_ALIGNMENT - 1u));
     bzero((uint8_t *)owner, sizeof(*owner));
     owner->raw = raw; owner->context = ctx;
+    owner->control_generation = generation;
     owner->ingress_allowance = ingress_allowance; owner->shadow_missing = missing;
     video_heap_ops heap = {0, video_platform_allocate, video_platform_release,
                           video_platform_heap_view};
@@ -265,6 +276,7 @@ int video_worker_start(uint32_t ingress_allowance) {
     if (!video_control_take(ctx)) { video_free_owner(owner); return 0; }
     video_fold_signals(ctx);
     uint32_t token = !ctx->texture_cache && video_lease_valid(ctx) &&
+        (!generation || ctx->video_control.start_guard == generation) &&
         (ctx->framebuffer_shadow == 0) == missing ? video_lifecycle_claim(&ctx->video) : 0;
     if (token) {
         owner->token = token;
@@ -301,6 +313,7 @@ int video_worker_start(uint32_t ingress_allowance) {
     int admitted = video_storage_admit(&owner->storage);
     if (!video_control_take(ctx)) { video_abort_start(ctx, token); return 0; }
     if (!admitted || ctx->texture_cache || !video_lease_valid(ctx) ||
+        (generation && ctx->video_control.start_guard != generation) ||
         (ctx->framebuffer_shadow == 0) != missing ||
         !video_lifecycle_publish(&ctx->video, token)) {
         video_control_give(ctx); video_abort_start(ctx, token); return 0;
@@ -312,6 +325,10 @@ int video_worker_start(uint32_t ingress_allowance) {
     VIDEO_OS_EVENT_SET(owner->wake, VIDEO_WAKE_ARM);
     video_control_give(ctx);
     return 1;
+}
+
+int video_worker_start(uint32_t ingress_allowance) {
+    return video_worker_start_guarded(ingress_allowance, 0);
 }
 
 void video_worker_request_stop_locked(void) {
