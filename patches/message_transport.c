@@ -82,7 +82,7 @@ int cfw_message_video_reply(const cfw_message_route *route,
         length > CFW_ACK_MAX_SIZE || reply[0] != 31 || reply[1] != route->here ||
         (route->origin != CFW_MESSAGE_LEFT && route->origin != CFW_MESSAGE_RIGHT) ||
         (route->here != CFW_MESSAGE_LEFT && route->here != CFW_MESSAGE_RIGHT) ||
-        !reply[7] || reply[7] > 64 || reply[6] >= reply[7]) return -1;
+        !reply[7] || reply[7] > CFW_VIDEO_REPLY_MAX_PAGES || reply[6] >= reply[7]) return -1;
     return route->here == route->origin ? CFW_BLE_SEND(1, CFW_MESSAGE_SID, reply, length) :
         cfw_message_bridge_send(CFW_BRIDGE_VIDEO_RETURN, route->origin, reply, length);
 }
@@ -303,7 +303,7 @@ uint32_t cfw_message_bridge_received(uint32_t app_id, const uint8_t *data,
         if (here != origin) return 0;
         if (length < 11 || length > CFW_ACK_MAX_SIZE + 2) return 0xbu;
         if (data[2] != 31 || data[3] != (origin ^ CFW_MESSAGE_BOTH) ||
-            !data[9] || data[9] > 64 || data[8] >= data[9]) return 0xau;
+            !data[9] || data[9] > CFW_VIDEO_REPLY_MAX_PAGES || data[8] >= data[9]) return 0xau;
         return CFW_BLE_SEND(1, CFW_MESSAGE_SID, data + 2, length - 2) == 0 ? 0 : 6;
     }
     return 0xau;

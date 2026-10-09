@@ -5,7 +5,52 @@
 #include <string.h>
 #include "../../patches/video/queue.c"
 
+static void ordering(void) {
+    const uint8_t permutations[6][3] = {{1,2,3},{1,3,2},{2,1,3},{2,3,1},{3,1,2},{3,2,1}};
+    uint8_t slots[VIDEO_QUEUE_INITIAL][VIDEO_SLOT_BYTES], extension[2 * VIDEO_SLOT_BYTES];
+    const uint8_t nal[] = {0x41, 0x55};
+    video_nal_queue q;
+    video_nal_view view;
+    for (uint32_t permutation = 0; permutation < 6; ++permutation) {
+        video_queue_init(&q, 17);
+        for (uint32_t i = 0; i < 4; ++i) assert(video_queue_attach(&q, slots[i]));
+        for (uint32_t i = 0; i < 3; ++i)
+            assert(video_queue_push(&q, permutations[permutation][i], nal, 2) == 1);
+        assert(video_queue_credits(&q) == 1 && !video_queue_claim(&q, 17, &view));
+        assert(!video_queue_push(&q, 4, nal, 2));
+        assert(video_queue_push(&q, 0, nal, 2) == 1);
+        assert(!video_queue_credits(&q) && q.accepted == 4);
+        assert(video_queue_push(&q, 2, nal, 2) == 2 && q.accepted == 4);
+        const uint8_t conflict[] = {0x41, 0x56};
+        assert(video_queue_push(&q, 2, conflict, 2) == VIDEO_QUEUE_CONFLICT);
+        for (uint32_t i = 0; i < 4; ++i) {
+            assert(video_queue_claim(&q, 17, &view) && view.sequence == i);
+            assert(video_queue_release(&q, &view));
+            assert(q.expected == i + 1 && q.consumed == i + 1);
+            assert(video_queue_push(&q, i, nal, 2) == 2 && q.accepted == 4);
+            assert(video_queue_push(&q, i, conflict, 2) == VIDEO_QUEUE_CONFLICT);
+        }
+        uint32_t overwritten = q.slots[0].sequence;
+        assert(video_queue_push(&q, 4, nal, 2) == 1);
+        assert(video_queue_push(&q, overwritten, nal, 2) == VIDEO_QUEUE_STALE);
+        assert(video_queue_extend(&q, extension) && q.capacity == 6);
+        assert(!video_queue_extend(&q, extension));
+        assert(video_queue_push(&q, 9, nal, 2) == 1);
+        assert(!video_queue_push(&q, 10, nal, 2));
+    }
+    video_queue_init(&q, 19);
+    for (uint32_t i = 0; i < 4; ++i) assert(video_queue_attach(&q, slots[i]));
+    q.expected = UINT32_MAX - 1;
+    assert(video_queue_push(&q, UINT32_MAX - 1, nal, 2) == 1);
+    assert(video_queue_claim(&q, 19, &view) && video_queue_release(&q, &view));
+    assert(q.expected == UINT32_MAX && video_queue_push(&q, UINT32_MAX, nal, 2) == VIDEO_QUEUE_WRAP);
+    q.accepted = UINT32_MAX;
+    assert(video_queue_push(&q, UINT32_MAX - 1, nal, 2) == 2);
+    puts("all future permutations, reserved expected slot, exact retry history and wrap refusal PASS");
+}
+
 int main(void) {
+    ordering();
     video_nal_queue q, other;
     uint8_t slots[VIDEO_QUEUE_INITIAL][VIDEO_SLOT_BYTES];
     uint8_t peer[VIDEO_QUEUE_INITIAL][VIDEO_SLOT_BYTES];
@@ -28,7 +73,7 @@ int main(void) {
     assert(!video_queue_push(&q, 4, nal, sizeof(nal)));
     assert(!memcmp(&q, &frozen, sizeof(q)));
     assert(q.accepted == 4 && !q.consumed && !other.count);
-    assert(video_queue_push(&other, 30, nal, 1) && other.count == 1);
+    assert(video_queue_push(&other, 0, nal, 1) && other.count == 1);
     video_nal_view view, stale;
     assert(!video_queue_claim(&q, 8, &view));
     for (uint32_t i = 0; i < VIDEO_QUEUE_INITIAL; ++i) {

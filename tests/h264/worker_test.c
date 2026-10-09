@@ -556,7 +556,7 @@ static void controls(void) {
     configure(); request_next = 0;
     control_command(p, VIDEO_CONTROL_CAPABILITIES, 0);
     assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED);
-    assert(snapshot[1] == 2 && snapshot[3] == VIDEO_IDLE && !snapshot[50] &&
+    assert(snapshot[1] == 3 && snapshot[3] == VIDEO_IDLE && !snapshot[50] &&
            !allocations_live && !creates && !pool_calls);
     control_command(p, VIDEO_CONTROL_START, 1);
     context.texture_cache = (void *)(uintptr_t)1;
@@ -739,6 +739,46 @@ static void nal_input(void) {
     }
     puts("raw NAL snapshot, full rollback, owned four-slot admission and partial-start reclaim PASS");
 }
+static void queue_extension(void) {
+    for (uint32_t mode = 0; mode < 3; ++mode) {
+        configure(); request_next = 0;
+        uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+        control_command(p, VIDEO_CONTROL_START, 1);
+        assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); await_ready();
+        video_owner *owner = context.video_owner;
+        assert(!video_worker_picture_complete(owner->token, 1)); /* Wrong task. */
+        assert(owner->queue.capacity == 4 && !owner->extension_attempted);
+        uint32_t used = owner->storage.used;
+        worker_thread = 1; /* Fake consumer at its decoder-call boundary. */
+        assert(video_worker_picture_complete(owner->token, 0));
+        assert(owner->queue.pictures == 1 && owner->queue.capacity == 4 &&
+               !owner->extension_attempted);
+        if (mode == 1) fail_at = allocation_calls + 1;
+        if (mode == 2) views[0].max_alloc = 8000;
+        assert(video_worker_picture_complete(owner->token, 1));
+        worker_thread = 0;
+        if (!mode) {
+            assert(owner->queue.capacity == 6 && owner->storage.limit == 231480 &&
+                   owner->storage.used == used + 8228);
+        } else assert(owner->queue.capacity == 4 && owner->storage.limit == 223288 &&
+                      owner->storage.used == used);
+        assert(owner->queue.pictures == 2 && owner->extension_attempted);
+        uint32_t allocations = allocation_calls;
+        worker_thread = 1;
+        assert(video_worker_picture_complete(owner->token, 1));
+        worker_thread = 0;
+        assert(allocation_calls == allocations); /* At most one allocation attempt. */
+        control_command(p, VIDEO_CONTROL_STATUS, 0);
+        assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED &&
+               snapshot[50] == (!mode ? 6 : 4) && video_read32(snapshot + 64) == 3 &&
+               !video_read32(snapshot + 56) && !video_read32(snapshot + 60));
+        control_command(p, VIDEO_CONTROL_STOP, 1);
+        assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); finish();
+    }
+    puts("explicit picture/DPB signal, single extension attempt and fragmented/OOM four-slot fallback PASS");
+}
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (!strcmp(argv[1], "normal")) normal();
@@ -753,6 +793,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "control-preparation")) control_preparation();
     else if (!strcmp(argv[1], "control-failures")) control_failures();
     else if (!strcmp(argv[1], "nal-input")) nal_input();
+    else if (!strcmp(argv[1], "queue-extension")) queue_extension();
     else assert(0);
     assert(!allocations_live && !task_live && !image_depth);
     printf("worker %s PASS\n", argv[1]);

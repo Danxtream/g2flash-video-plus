@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #define CFW_MESSAGE_SID 0xf0u
+#define CFW_VIDEO_REPLY_MAX_PAGES 128u
 #define CFW_MESSAGE_LEFT 1u
 #define CFW_MESSAGE_RIGHT 2u
 #define CFW_MESSAGE_BOTH (CFW_MESSAGE_LEFT | CFW_MESSAGE_RIGHT)

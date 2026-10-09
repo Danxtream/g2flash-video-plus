@@ -106,7 +106,7 @@ No new timer, permanent task or boot-time video allocation is introduced.
 
 Four exact request/reply entries per ingress lens prevent repeated operations.
 Request IDs increase separately per ingress; older uncached IDs or conflicting
-duplicates refuse. Each reply freezes a 64-byte status snapshot. A page query
+duplicates refuse. Each reply freezes an 80-byte status snapshot. A page query
 has the original request ID and one page byte, and never executes the control.
 One response per query fits the proven notification capacity, including MTU23.
 Replies are ID31, source lens bit, LE32 request ID, page/count and snapshot bytes.
@@ -118,8 +118,8 @@ state; LE32 values at 4/8/12/16/20/24/28 are stream, generation, left/right requ
 high-water, stream high-water, last error and interval. Record/NAL maxima are
 LE32 at 32/36; geometry at 40/42, references/DPB at 44/45, forced chroma skip and
 single-slice limit at 46/47, four/six-slot bounds at 48/49. Capacity/free slots are bytes 50/51; LE32
-accepted/consumed NAL counts are at 56/60. Expected sequence at 52 remains
-reserved until ordering is implemented. Stage 2 announces owned ingress with
+accepted/consumed NAL counts are at 56/60. Expected sequence is LE32 at 52. Completed pictures are LE32 at 64;
+bytes 68..79 are reserved for recovery details. Stage 3 announces ordered ingress with
 no NAL consumer or completed-picture/presentation support. Transport ACK confirms only
 accepted command validation; refusals preserve upstream NACK/context-reset rules.
 
@@ -136,3 +136,17 @@ Its four cached snapshots include any consumer-active slot. Borrowed transport
 bytes never escape dispatch. A future consumer claims/releases a generation-
 checked owned view; this receive-only firmware retains every accepted slot and
 refuses at capacity. A NAL, transport record and completed picture are distinct.
+
+Sequence zero starts a new stream. At capacity four, at most three future NALs
+fit ahead of the expected one; sequence distance is strictly below capacity.
+Only the expected sequence can be claimed. Matching queued/recently released
+bytes are idempotent; conflicting duplicates refuse. Released slot bytes are
+the bounded exact replay history until reuse, after which older retries refuse.
+The highest sequence is reserved to prevent wrap; start a new stream instead.
+
+A worker-only completed-picture notification may attempt one 8 KiB extension
+when the decoder reports its two-frame DPB fully allocated. Allocation happens
+outside image/display locks, with fresh live heap/reserve checks. The two slots
+publish together; failure restores the prior cap and keeps four slots. This
+receive-only firmware never emits that notification. Native fake consumers
+exercise the extension and separate NAL/picture counters.

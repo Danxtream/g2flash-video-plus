@@ -16,7 +16,7 @@ typedef struct {
     customCfwContext *context;
     uint32_t token, thread, ingress_allowance, shadow_missing;
     uint32_t wake, complete;
-    uint32_t control_generation;
+    uint32_t control_generation, extension_attempted;
     volatile uint32_t armed;
     void *raw, *object_allocation, *object, *decoder, *stack_allocation;
     uint8_t *stack;
@@ -355,8 +355,44 @@ int video_worker_receive_nal_locked(uint32_t stream, uint32_t sequence,
         video_lifecycle_state(&ctx->video) != VIDEO_READY ||
         video_lifecycle_cancelled(&ctx->video, owner->token)) return 0;
     int copied = video_queue_push(&owner->queue, sequence, p, n);
-    if (copied) video_worker_wake_locked(owner->token, VIDEO_WAKE_INPUT);
+    if (copied > 0) video_worker_wake_locked(owner->token, VIDEO_WAKE_INPUT);
     return copied;
+}
+
+int video_worker_picture_complete(uint32_t token, int dpb_full) {
+    video_owner *owner = video_current_owner();
+    if (!owner || token != owner->token || !owner->control_generation || !owner->thread ||
+        owner->thread != VIDEO_OS_THREAD_ID()) return 0;
+    customCfwContext *ctx = owner->context;
+    if (!video_control_take(ctx)) return 0;
+    if (video_lifecycle_state(&ctx->video) != VIDEO_READY ||
+        video_lifecycle_cancelled(&ctx->video, token) || owner->queue.pictures == UINT32_MAX) {
+        video_control_give(ctx); return 0;
+    }
+    ++owner->queue.pictures;
+    int attempt = dpb_full && owner->queue.capacity == VIDEO_QUEUE_INITIAL &&
+                  !owner->extension_attempted;
+    if (attempt) owner->extension_attempted = 1;
+    video_control_give(ctx);
+    if (!attempt) return 1;
+    uint32_t original_limit = owner->storage.limit;
+    owner->storage.limit += (VIDEO_QUEUE_MAX - VIDEO_QUEUE_INITIAL) * VIDEO_SLOT_BYTES;
+    /* The caller is the worker at a decoder boundary. It cannot acknowledge
+     * park or be reclaimed while its own ledger allocation is in progress. */
+    uint8_t *bytes = video_storage_alloc(&owner->storage,
+        (VIDEO_QUEUE_MAX - VIDEO_QUEUE_INITIAL) * VIDEO_SLOT_BYTES);
+    int published = 0;
+    if (bytes && video_control_take(ctx)) {
+        if (!video_lifecycle_cancelled(&ctx->video, token) && video_lease_valid(ctx))
+            published = video_queue_extend(&owner->queue, bytes);
+        video_control_give(ctx);
+    }
+    if (!published) {
+        if (bytes && !video_storage_release(&owner->storage, bytes))
+            video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
+        owner->storage.limit = original_limit;
+    }
+    return 1;
 }
 
 int video_worker_queue_report_locked(video_queue_report *report) {
@@ -366,8 +402,8 @@ int video_worker_queue_report_locked(video_queue_report *report) {
     *report = (video_queue_report){0};
     if (!owner || ctx->video.preparing || !ctx->video.published) return 0;
     video_nal_queue *q = &owner->queue;
-    *report = (video_queue_report){q->capacity, q->capacity - q->count,
-                                  q->accepted, q->consumed};
+    *report = (video_queue_report){q->capacity, video_queue_credits(q),
+                                  q->accepted, q->consumed, q->expected, q->pictures};
     return 1;
 }
 

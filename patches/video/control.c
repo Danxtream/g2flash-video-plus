@@ -24,7 +24,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     uint8_t *p = entry->snapshot;
     bzero(p, VIDEO_STATUS_BYTES);
     p[0] = VIDEO_PROTOCOL_VERSION;
-    p[1] = 2; /* Owned NAL ingress; no consumer or presentation. */
+    p[1] = 3; /* Ordered NAL ingress; no live consumer or presentation. */
     p[2] = entry->result;
     p[3] = video_lifecycle_state(&ctx->video);
     if (p[3] == VIDEO_IDLE && s->start_guard) p[3] = VIDEO_STARTING;
@@ -46,8 +46,10 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     video_queue_report queue;
     video_worker_queue_report_locked(&queue);
     p[50] = queue.capacity; p[51] = queue.credits;
+    video_write32(p + 52, queue.expected);
     video_write32(p + 56, queue.accepted);
     video_write32(p + 60, queue.consumed);
+    video_write32(p + 64, queue.pictures);
 }
 
 static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
@@ -110,7 +112,7 @@ int video_control_received(const uint8_t *data, uint16_t size,
             video_read32(data + 6), data + VIDEO_NAL_HEADER_BYTES,
             size - VIDEO_NAL_HEADER_BYTES, route->origin);
         video_control_give(ctx);
-        return copied ? 0 : -1;
+        return copied > 0 ? 0 : -1;
     }
     if (!data || size < VIDEO_CONTROL_HEADER_BYTES || data[0] != VIDEO_MESSAGE_ID ||
         data[2] != VIDEO_PROTOCOL_VERSION || data[3] || !video_route_valid(route)) return -1;
