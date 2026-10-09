@@ -297,7 +297,10 @@ inline void inverseQuantize4x4(int16_t* coeffs, int32_t qp, bool isDc = false) n
         // Matches the spec when combined with the weightScale.
         static constexpr int32_t cDefaultWeightScale = 16;
         int32_t qmul = normAdjust * cDefaultWeightScale << (qpDiv6 + 2);
-        int32_t val = (static_cast<int32_t>(coeffs[i]) * qmul + 32) >> 6;
+        // Preserve modulo-2^32 arithmetic without signed multiplication overflow.
+        uint32_t product = static_cast<uint32_t>(coeffs[i]) *
+                           static_cast<uint32_t>(qmul) + 32U;
+        int32_t val = static_cast<int32_t>(product) >> 6;
 
         coeffs[i] = static_cast<int16_t>(val);
     }
@@ -330,7 +333,10 @@ inline void inverseQuantize4x4Scaled(int16_t* coeffs, int32_t qp,
         int32_t posClass = cDequantPosClass[i];
         int32_t normAdjust = cDequantScale[qpMod6][posClass];
         int32_t qmul = normAdjust * weightScaleRaster[i] << (qpDiv6 + 2);
-        int32_t val = (static_cast<int32_t>(coeffs[i]) * qmul + 32) >> 6;
+        // Scaling lists can overflow the same product; retain its low 32 bits.
+        uint32_t product = static_cast<uint32_t>(coeffs[i]) *
+                           static_cast<uint32_t>(qmul) + 32U;
+        int32_t val = static_cast<int32_t>(product) >> 6;
         coeffs[i] = static_cast<int16_t>(val);
     }
 }
