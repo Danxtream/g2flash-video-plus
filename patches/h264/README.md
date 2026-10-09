@@ -34,7 +34,11 @@ failure reports and parks that worker; its owner must terminate it before freein
 partially constructed state. Bounded cached allocation and that lifecycle belong
 to the worker integration. This interface does not provide an OOM recovery loop.
 
-Chroma is always skipped. Feed raw NALs including the header, without Annex-B
+Chroma reconstruction and U/V storage are compiled out by setting
+SUB0H264_ENABLE_CHROMA_RECONSTRUCTION=0 in config.hpp. The vendored default is
+enabled for color builds. Chroma syntax and CAVLC/CABAC neighbor state remain;
+the firmware's runtime setting cannot re-enable reconstruction.
+Feed raw NALs including the header, without Annex-B
 prefixes. The current 4096-byte record leaves 4086 bytes for each NAL; RBSP scratch
 is reserved once at 4096 bytes. CONSUMED and FRAME_READY are distinct: input is
 not a picture count. A borrowed Y view exists only after FRAME_READY and expires
@@ -68,13 +72,15 @@ Build hot and cold decoder modules separately for inspection:
 
     python3 patches/h264/build_decoder.py --output <output-directory>
 
-hot_functions.json freezes the 12 base hot groups and the 229 promotion symbols
+hot_functions.json freezes the 12 base hot groups and the 219 promotion symbols
 selected from the glasses speed tests. Small helpers, CAVLC residual parsing and
 P-macroblock decoding are promoted into the -O2 hot module. The list was
 recorded from the speed-test build, whose runtime provider was named
 imports(); it maps explicitly to g2_h264_runtime_current here. That explicit
-mapping leaves 228 promoted C++ definitions. Every decoder function retains
-its selection. Missing, duplicate or ambiguous mappings fail the build.
+mapping leaves 218 promoted C++ definitions. Only definitions eliminated by
+disabled chroma reconstruction are removed from the selection; entropy helpers
+and the remaining functions retain their placement. Missing, duplicate or
+ambiguous mappings fail the build.
 
 The -O2 frontend emits preopt.ll; hot functions compile at -O2 and cold functions
 at -Oz with minsize/optsize attributes. There is no LTO or automatic promotion.
