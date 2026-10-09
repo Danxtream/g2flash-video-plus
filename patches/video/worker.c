@@ -2,6 +2,7 @@
 #include "worker.h"
 #include "storage.h"
 #include "lifecycle.h"
+#include "queue.h"
 #include "../cfw_context.h"
 #include "../h264/g2_h264.h"
 #include "platform.h"
@@ -22,6 +23,7 @@ typedef struct {
     uint8_t tcb[VIDEO_THREAD_CONTROL_BYTES] __attribute__((aligned(8)));
     uint8_t wake_control[VIDEO_EVENT_CONTROL_BYTES] __attribute__((aligned(8)));
     uint8_t complete_control[VIDEO_EVENT_CONTROL_BYTES] __attribute__((aligned(8)));
+    video_nal_queue queue;
     video_storage storage;
     g2_h264_runtime runtime;
 } video_owner;
@@ -91,7 +93,7 @@ static void video_worker_entry(void *argument) {
         video_storage_finish_call(&owner->storage);
         video_lifecycle_ready(&ctx->video, token);
     }
-    /* No receive/decode/present route yet. A future worker command loop must
+    /* No NAL consumer or presenter yet. A future worker command loop must
      * finish each decoder call and drain output pins before its next call. */
     while (!video_lifecycle_cancelled(&ctx->video, token)) {
         uint32_t now = VIDEO_TICK;
@@ -280,6 +282,7 @@ int video_worker_start_guarded(uint32_t ingress_allowance, uint32_t generation) 
         (ctx->framebuffer_shadow == 0) == missing ? video_lifecycle_claim(&ctx->video) : 0;
     if (token) {
         owner->token = token;
+        video_queue_init(&owner->queue, token);
         ctx->video_last_report = (video_worker_report){0};
         __atomic_store_n(&ctx->video_owner, owner, __ATOMIC_RELEASE);
     }
@@ -297,6 +300,19 @@ int video_worker_start_guarded(uint32_t ingress_allowance, uint32_t generation) 
     }
     owner->object = (void *)(((uintptr_t)owner->object_allocation + alignment - 1u) &
                              ~(uintptr_t)(alignment - 1u));
+    if (generation) {
+        owner->storage.limit += VIDEO_INPUT_ALLOWANCE;
+        for (uint32_t i = 0; i < VIDEO_QUEUE_INITIAL; ++i) {
+            /* Replace the outstanding payload allowance with each actual
+             * ledger charge, including alignment and stock TLSF overhead. */
+            owner->storage.cached_allowance -= VIDEO_SLOT_BYTES;
+            uint8_t *bytes = video_storage_alloc(&owner->storage, VIDEO_SLOT_BYTES);
+            if (!bytes || !video_queue_attach(&owner->queue, bytes) ||
+                video_lifecycle_cancelled(&ctx->video, token)) {
+                video_abort_start(ctx, token); return 0;
+            }
+        }
+    }
     video_fill_stack(owner);
     owner->runtime = (g2_h264_runtime){video_runtime_alloc, video_runtime_release,
                                       video_runtime_preflight, video_runtime_fail};
@@ -324,6 +340,34 @@ int video_worker_start_guarded(uint32_t ingress_allowance, uint32_t generation) 
     VIDEO_OS_EVENT_SET(owner->complete, VIDEO_COMPLETE_PREPARED);
     VIDEO_OS_EVENT_SET(owner->wake, VIDEO_WAKE_ARM);
     video_control_give(ctx);
+    return 1;
+}
+
+int video_worker_receive_nal_locked(uint32_t stream, uint32_t sequence,
+                                      const uint8_t *p, uint16_t n, uint8_t origin) {
+    customCfwContext *ctx = peekCustomCfwContext();
+    video_owner *owner = ctx ? ctx->video_owner : 0;
+    if (!owner || !p || !n || n > VIDEO_RAW_NAL_BYTES || (p[0] & 0x80) ||
+        !(p[0] & 31) || (p[0] & 31) > 23 || !video_lease_valid(ctx) ||
+        !owner->control_generation || origin != ctx->video_control.owner_origin ||
+        stream != ctx->video_control.stream ||
+        ctx->video_control.start_guard != owner->control_generation ||
+        video_lifecycle_state(&ctx->video) != VIDEO_READY ||
+        video_lifecycle_cancelled(&ctx->video, owner->token)) return 0;
+    int copied = video_queue_push(&owner->queue, sequence, p, n);
+    if (copied) video_worker_wake_locked(owner->token, VIDEO_WAKE_INPUT);
+    return copied;
+}
+
+int video_worker_queue_report_locked(video_queue_report *report) {
+    customCfwContext *ctx = peekCustomCfwContext();
+    video_owner *owner = ctx ? ctx->video_owner : 0;
+    if (!report) return 0;
+    *report = (video_queue_report){0};
+    if (!owner || ctx->video.preparing || !ctx->video.published) return 0;
+    video_nal_queue *q = &owner->queue;
+    *report = (video_queue_report){q->capacity, q->capacity - q->count,
+                                  q->accepted, q->consumed};
     return 1;
 }
 

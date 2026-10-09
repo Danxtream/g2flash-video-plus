@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "control.h"
 #include "worker.h"
+#include "queue.h"
 #include "../cfw_context.h"
 
 #pragma clang section text=".text.video"
@@ -23,7 +24,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     uint8_t *p = entry->snapshot;
     bzero(p, VIDEO_STATUS_BYTES);
     p[0] = VIDEO_PROTOCOL_VERSION;
-    p[1] = 1; /* Control-only support; no NAL consumer or presentation. */
+    p[1] = 2; /* Owned NAL ingress; no consumer or presentation. */
     p[2] = entry->result;
     p[3] = video_lifecycle_state(&ctx->video);
     if (p[3] == VIDEO_IDLE && s->start_guard) p[3] = VIDEO_STARTING;
@@ -41,7 +42,12 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     p[44] = VIDEO_FRAME_REFERENCES; p[45] = VIDEO_FRAME_DPB;
     p[46] = 1; /* Chroma skipped; completed pictures remain zero. */
     p[47] = 1; /* Multiple slices per picture are not implemented. */
-    p[48] = 4; p[49] = 6; /* Initial/optional queue contract, not allocated yet. */
+    p[48] = VIDEO_QUEUE_INITIAL; p[49] = VIDEO_QUEUE_MAX;
+    video_queue_report queue;
+    video_worker_queue_report_locked(&queue);
+    p[50] = queue.capacity; p[51] = queue.credits;
+    video_write32(p + 56, queue.accepted);
+    video_write32(p + 60, queue.consumed);
 }
 
 static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
@@ -93,6 +99,19 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
 
 int video_control_received(const uint8_t *data, uint16_t size,
                             const cfw_message_route *route) {
+    if (data && size >= 2 && data[0] == VIDEO_MESSAGE_ID &&
+        data[1] == VIDEO_CONTROL_NAL) {
+        if (size <= VIDEO_NAL_HEADER_BYTES || size > VIDEO_RECORD_LIMIT ||
+            !video_route_valid(route)) return -1;
+        customCfwContext *ctx = peekCustomCfwContext();
+        if (!ctx || !ctx->image_mutex || !video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) return -1;
+        video_fold_signals(ctx);
+        int copied = video_worker_receive_nal_locked(video_read32(data + 2),
+            video_read32(data + 6), data + VIDEO_NAL_HEADER_BYTES,
+            size - VIDEO_NAL_HEADER_BYTES, route->origin);
+        video_control_give(ctx);
+        return copied ? 0 : -1;
+    }
     if (!data || size < VIDEO_CONTROL_HEADER_BYTES || data[0] != VIDEO_MESSAGE_ID ||
         data[2] != VIDEO_PROTOCOL_VERSION || data[3] || !video_route_valid(route)) return -1;
     uint32_t request = video_read32(data + 4);

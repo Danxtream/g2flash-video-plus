@@ -40,9 +40,16 @@ typedef struct {
     uint32_t free_bytes[3], max_alloc[3]; /* cached, display, other heap */
 } video_worker_report;
 
+typedef struct { uint32_t capacity, credits, accepted, consumed; } video_queue_report;
+/* Copy one validated raw NAL while holding image_mutex; never invoke C++. */
+int video_worker_receive_nal_locked(uint32_t stream, uint32_t sequence,
+                                    const uint8_t *, uint16_t, uint8_t origin);
+/* Snapshot queue accounting under image_mutex, without sampling decoder data. */
+int video_worker_queue_report_locked(video_queue_report *);
+
 /* Call outside image/display locks. Requires a live framebuffer lease and no
  * texture cache. ingress_allowance is the outstanding peak beyond live buffers,
- * including decoded scratch and actual inflater growth. No receive route here. */
+ * including decoded scratch and actual inflater growth. */
 int video_worker_start(uint32_t ingress_allowance);
 /* Recheck a nonzero control generation before claiming or publishing storage.
  * A STOP that arrives during allocation invalidates this guarded start. */

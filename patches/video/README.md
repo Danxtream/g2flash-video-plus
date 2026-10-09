@@ -14,7 +14,9 @@ operation, task termination or worker wait occurs while those locks are held.
 Heap 20 owns the decoder's actual size/alignment, all requested tables/planes and
 scratch, the allocation ledger, static task/event control blocks and 16 KiB stack.
 Requests determine sizes, including untagged STL growth; tags are diagnostic.
-The owner byte cap is 206,904 bytes, excluding the future four 4 KiB input slots.
+The decoder-only cap is 206,904 bytes; a transport-controlled start raises it
+to 223,288 bytes, including four lazy 4 KiB input slots and their actual ledger
+charges. Outstanding slot allowances decrease as their bytes are allocated.
 Retain 32 KiB in cached heap 20, 32 KiB in display heap 13 and 16 KiB in heap 27.
 Live free/max views do not reserve memory: each allocation and its resulting
 reserve is checked. Heap 13 admission includes the missing 153,600-byte shadow
@@ -80,8 +82,8 @@ Run the sanitized worker, storage and lifecycle checks with the existing suite:
 
 ID 31 uses protocol version 1. The control header is ID, opcode, version,
 zero flags and a nonzero LE32 request ID. Named opcodes are capabilities (0),
-start (1), stop (2), reset (3), status (4) and page (5); NAL ingress (6) is
-reserved until implemented. Capabilities/status have only the eight-byte
+start (1), stop (2), reset (3), status (4), page (5) and NAL ingress (6).
+Capabilities/status have only the eight-byte
 header. Stop/reset append the current LE32 stream ID. Reset ends ownership;
 a fresh start uses a strictly increasing stream ID after reclamation.
 
@@ -115,11 +117,22 @@ Snapshot bytes 0..3 are version, supported stage, control result and lifecycle
 state; LE32 values at 4/8/12/16/20/24/28 are stream, generation, left/right request
 high-water, stream high-water, last error and interval. Record/NAL maxima are
 LE32 at 32/36; geometry at 40/42, references/DPB at 44/45, forced chroma skip and
-single-slice limit at 46/47, planned four/six-slot bounds at 48/49. Current queue,
-NAL consumption and completed-picture fields remain zero: this is control-only
-support, without a receive/decode/display route. Transport ACK confirms only
+single-slice limit at 46/47, four/six-slot bounds at 48/49. Capacity/free slots are bytes 50/51; LE32
+accepted/consumed NAL counts are at 56/60. Expected sequence at 52 remains
+reserved until ordering is implemented. Stage 2 announces owned ingress with
+no NAL consumer or completed-picture/presentation support. Transport ACK confirms only
 accepted command validation; refusals preserve upstream NACK/context-reset rules.
 
 Transport allocation checks preserve the heap-13 reserve and missing-shadow
 allowance before and after stock-coordinated allocation. Cached decoder sizes
 come from actual requests, including future compile-time feature changes.
+
+NAL ingress has a separate ten-byte header: ID31, opcode6, LE32 stream and
+LE32 NAL sequence, followed by exactly one raw NAL (no Annex-B start code).
+The record limit is 4,096 bytes and raw NAL limit 4,086 bytes. START selects
+the version; data does not carry a second version byte. The owner rejects
+wrong streams/origins, invalid headers, oversize records and cancelled input.
+Its four cached snapshots include any consumer-active slot. Borrowed transport
+bytes never escape dispatch. A future consumer claims/releases a generation-
+checked owned view; this receive-only firmware retains every accepted slot and
+refuses at capacity. A NAL, transport record and completed picture are distinct.

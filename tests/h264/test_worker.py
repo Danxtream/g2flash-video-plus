@@ -70,3 +70,6 @@ class WorkerTests(unittest.TestCase):
 
     def test_status_reports_constructor_refusal_and_unknown_abi_quarantine(self):
         self.check_case("control-failures")
+
+    def test_owned_nal_slots_bound_borrowed_input_and_rollback_partial_start(self):
+        self.check_case("nal-input")

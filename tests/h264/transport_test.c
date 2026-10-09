@@ -11,10 +11,10 @@
 static cfw_message_stream streams[2];
 static uint32_t side = 2, received, refused, stock_calls, live;
 static cfw_message_route last_route;
-static uint8_t last_payload[128];
+static uint8_t last_payload[4096];
 static uint16_t last_size;
 typedef struct { uint16_t size; uint8_t bytes[265]; } test_packet;
-static test_packet ble[256], bridge[256];
+static test_packet ble[2048], bridge[2048];
 static uint32_t ble_count, bridge_count;
 
 static void *test_alloc(uint32_t n) {
@@ -32,11 +32,11 @@ static uint32_t test_stock_bridge(uint32_t app, const uint8_t *p, uint32_t n, ui
 }
 static uint32_t test_side(void) { return side; }
 static int test_ble(uint8_t pipe, uint8_t sid, const uint8_t *p, uint16_t n) {
-    assert(pipe == 1 && sid == CFW_MESSAGE_SID && n <= 30 && ble_count < 256);
+    assert(pipe == 1 && sid == CFW_MESSAGE_SID && n <= 30 && ble_count < 2048);
     ble[ble_count].size = n; memcpy(ble[ble_count++].bytes, p, n); return 0;
 }
 static int test_bridge(uint16_t app, const uint8_t *p, uint16_t n, void *argument) {
-    assert(app == CFW_MESSAGE_SID && !argument && n <= 265 && bridge_count < 256);
+    assert(app == CFW_MESSAGE_SID && !argument && n <= 265 && bridge_count < 2048);
     bridge[bridge_count].size = n; memcpy(bridge[bridge_count++].bytes, p, n); return 0;
 }
 #define CFW_STOCK_RECEIVE test_stock
@@ -70,7 +70,7 @@ int cfw_message_received_routed(const uint8_t *p, uint16_t n, uint16_t crc,
 
 static void send_record(const uint8_t *p, uint16_t n, uint8_t targets,
                          uint8_t flags, uint8_t sequence, z_stream *z) {
-    uint8_t wire[256], record[261];
+    uint8_t wire[8192], record[8197];
     uint32_t wire_size = n;
     if (z) {
         z->next_in = (void *)p; z->avail_in = n;
@@ -148,6 +148,14 @@ int main(void) {
     z = (z_stream){0}; assert(deflateInit(&z, 6) == Z_OK);
     send_record(body, 24, 1, CFW_MESSAGE_RESET_CONTEXT, 80, &z);
     assert(received == 4 && ble[ble_count - 1].bytes[0] == CFW_MESSAGE_ACK);
+    deflateEnd(&z); cleanup();
+    uint8_t nal_record[4096]; memset(nal_record, 0x55, sizeof(nal_record));
+    nal_record[0] = 31; nal_record[1] = 6; nal_record[10] = 0x67;
+    send_record(nal_record, sizeof(nal_record), 1, CFW_MESSAGE_RESET_CONTEXT, 90, 0);
+    assert(received == 1 && last_size == 4096 && !memcmp(last_payload, nal_record, 4096));
+    cleanup(); z = (z_stream){0}; assert(deflateInit(&z, 6) == Z_OK);
+    send_record(nal_record, sizeof(nal_record), 1, CFW_MESSAGE_RESET_CONTEXT, 91, &z);
+    assert(received == 1 && last_size == 4096 && !memcmp(last_payload, nal_record, 4096));
     deflateEnd(&z); cleanup();
     assert(cfw_receive_packet(1, body, 24) == 17);
     assert(cfw_message_bridge_received(9, body, 24, 0) == 19 && stock_calls == 2);

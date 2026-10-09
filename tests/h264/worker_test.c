@@ -166,6 +166,7 @@ static void video_platform_release(void *p, void *v) { assert(!p); release(v); }
 #include "../../patches/video/runtime_provider.c"
 #include "../../patches/video/storage.c"
 #include "../../patches/video/lifecycle.c"
+#include "../../patches/video/queue.c"
 #include "../../patches/video/worker.c"
 #include "../../patches/video/controller.c"
 #include "../../patches/video/control.c"
@@ -555,7 +556,7 @@ static void controls(void) {
     configure(); request_next = 0;
     control_command(p, VIDEO_CONTROL_CAPABILITIES, 0);
     assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED);
-    assert(snapshot[1] == 1 && snapshot[3] == VIDEO_IDLE && !snapshot[50] &&
+    assert(snapshot[1] == 2 && snapshot[3] == VIDEO_IDLE && !snapshot[50] &&
            !allocations_live && !creates && !pool_calls);
     control_command(p, VIDEO_CONTROL_START, 1);
     context.texture_cache = (void *)(uintptr_t)1;
@@ -658,7 +659,7 @@ static void control_failures(void) {
     for (uint32_t unknown_abi = 0; unknown_abi < 2; ++unknown_abi) {
         configure(); request_next = 0;
         if (unknown_abi) bad_tcb = 1;
-        else fail_at = 4; /* The worker's first constructor allocation. */
+        else fail_at = 8; /* Four receive slots precede the constructor. */
         uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
         control_command(p, VIDEO_CONTROL_START, 1);
         assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
@@ -684,6 +685,60 @@ static void control_failures(void) {
     }
     puts("asynchronous constructor refusal and unknown-ABI quarantine are reported PASS");
 }
+static void nal_input(void) {
+    configure(); request_next = 0;
+    uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+    uint8_t record[VIDEO_SLOT_BYTES + 1];
+    memset(record, 0x55, sizeof(record));
+    record[0] = VIDEO_MESSAGE_ID; record[1] = VIDEO_CONTROL_NAL;
+    video_write32(record + 2, 1); video_write32(record + 6, 0);
+    record[VIDEO_NAL_HEADER_BYTES] = 0x67;
+    assert(video_control_received(record, VIDEO_SLOT_BYTES, &control_route));
+    control_command(p, VIDEO_CONTROL_START, 1);
+    assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); await_ready();
+    video_owner *owner = context.video_owner;
+    assert(owner->queue.capacity == 4 && !owner->queue.count &&
+           !owner->storage.cached_allowance && owner->storage.limit == 223288);
+    uint32_t allocations = allocation_calls;
+    uint32_t request_high = context.video_control.request_high[0];
+    for (uint32_t n = 2; n <= VIDEO_NAL_HEADER_BYTES; ++n)
+        assert(video_control_received(record, n, &control_route));
+    assert(context.video_control.request_high[0] == request_high);
+    for (uint32_t i = 0; i < 4; ++i) {
+        video_write32(record + 6, i); record[11] = i;
+        assert(!video_control_received(record, VIDEO_SLOT_BYTES, &control_route));
+    }
+    memset(record + VIDEO_NAL_HEADER_BYTES, 0xee, VIDEO_RAW_NAL_BYTES);
+    assert(owner->queue.count == 4 && owner->queue.accepted == 4 &&
+           !owner->queue.consumed && allocation_calls == allocations);
+    for (uint32_t i = 0; i < 4; ++i)
+        assert(owner->queue.slots[i].bytes[0] == 0x67 &&
+               owner->queue.slots[i].bytes[1] == i);
+    video_write32(record + 6, 4); record[10] = 0x41;
+    video_nal_queue before = owner->queue;
+    assert(video_control_received(record, VIDEO_SLOT_BYTES, &control_route));
+    assert(!memcmp(&before, &owner->queue, sizeof(before)));
+    assert(video_control_received(record, VIDEO_SLOT_BYTES + 1, &control_route));
+    assert(video_control_received(record, VIDEO_NAL_HEADER_BYTES, &control_route));
+    cfw_message_route wrong = control_route; wrong.origin = 2;
+    assert(video_control_received(record, VIDEO_SLOT_BYTES, &wrong));
+    control_command(p, VIDEO_CONTROL_STATUS, 0);
+    assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED &&
+           snapshot[50] == 4 && !snapshot[51] && video_read32(snapshot + 56) == 4 &&
+           !video_read32(snapshot + 60));
+    control_command(p, VIDEO_CONTROL_STOP, 1);
+    assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+    assert(video_control_received(record, VIDEO_SLOT_BYTES, &control_route));
+    pool_drain(); finish();
+    for (uint32_t allocation = 4; allocation <= 7; ++allocation) {
+        configure(); request_next = 0; fail_at = allocation;
+        control_command(p, VIDEO_CONTROL_START, 1);
+        assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); finish(); assert(!creates && allocation_calls == allocation);
+    }
+    puts("raw NAL snapshot, full rollback, owned four-slot admission and partial-start reclaim PASS");
+}
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (!strcmp(argv[1], "normal")) normal();
@@ -697,6 +752,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "controls")) controls();
     else if (!strcmp(argv[1], "control-preparation")) control_preparation();
     else if (!strcmp(argv[1], "control-failures")) control_failures();
+    else if (!strcmp(argv[1], "nal-input")) nal_input();
     else assert(0);
     assert(!allocations_live && !task_live && !image_depth);
     printf("worker %s PASS\n", argv[1]);
