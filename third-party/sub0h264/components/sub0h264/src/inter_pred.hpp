@@ -412,6 +412,7 @@ inline void lumaMotionComp(const Frame& ref,
  *
  *  Reference: ITU-T H.264 §8.4.2.2.2
  */
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
 inline void chromaMotionComp(const Frame& ref,
                               int32_t refX, int32_t refY,
                               uint32_t dx, uint32_t dy,
@@ -474,6 +475,7 @@ inline void chromaMotionComp(const Frame& ref,
         }
     }
 }
+#endif
 
 /** Apply explicit weighted prediction to a prediction block — §8.4.2.3.1.
  *

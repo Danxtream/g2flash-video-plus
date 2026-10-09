@@ -86,10 +86,25 @@ public:
     H264Decoder() = default;
 
     /** Choose reconstruction before feeding any NAL; create a new decoder to change it. */
-    explicit H264Decoder(Settings settings) noexcept : skipChroma_(settings.skipChroma) {}
+    explicit H264Decoder(Settings settings) noexcept
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
+        : skipChroma_(settings.skipChroma)
+#endif
+    {
+#if !SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
+        (void)settings;
+#endif
+    }
 
     /** @return Whether chroma reconstruction and frame storage are disabled. */
-    bool skipChroma() const noexcept { return skipChroma_; }
+    bool skipChroma() const noexcept
+    {
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
+        return skipChroma_;
+#else
+        return true;
+#endif
+    }
 
     /** Feed a complete Annex-B byte stream and decode all frames.
      *
@@ -209,7 +224,9 @@ public:
     }
 
 private:
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
     bool skipChroma_ = false;
+#endif
     DecodeTrace trace_;
     SectionProfile* profile_ = nullptr;
     ParamSets paramSets_;
@@ -386,10 +403,12 @@ private:
      *  [CHECKED §7.4.2.2] — clampQpIdx implements Clip3(0,51,·) and cChromaQpTable
      *  matches spec Table 8-15.
      */
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
     static int32_t computeChromaQp(int32_t qp, int32_t offset) noexcept
     {
         return cChromaQpTable[clampQpIdx(qp + offset)];
     }
+#endif
 
     /** Decode transform_size_8x8_flag via CABAC — §9.3.3.1.1.10.
      *  ctxInc = condTermFlagA + condTermFlagB from neighbor transform flags.
@@ -411,6 +430,7 @@ private:
      *  `weightScale00` passes that factor; flat lists use 16 (the identity).
      *  [CHECKED FM-10]
      */
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
     static void dequantChromaDcValues(int16_t dc[4], int32_t chromaQp,
                                        int32_t weightScale00 = 16) noexcept
     {
@@ -448,6 +468,7 @@ private:
 #endif
         }
     }
+#endif
 
     /** Chroma AC coded_block_flag context increment — §9.3.3.1.1.9 (ctxBlockCat=4).
      *
@@ -1121,6 +1142,7 @@ private:
             // Fallback: activeFrame_ was currentFrame_ → copy to DPB
             std::memcpy(decodeTarget->yData(), activeFrame_->yData(),
                         activeFrame_->yStride() * activeFrame_->height());
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
             if (!skipChroma())
             {
                 std::memcpy(decodeTarget->uData(), activeFrame_->uData(),
@@ -1128,6 +1150,7 @@ private:
                 std::memcpy(decodeTarget->vData(), activeFrame_->vData(),
                             activeFrame_->uvStride() * (activeFrame_->height() / 2U));
             }
+#endif
         }
 
         if (profile_) profile_->overheadUs += sub0h264TimerUs() - syncT0;
@@ -1821,6 +1844,7 @@ private:
             }
         }
 
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
         if (skipChroma())
             return;
 
@@ -1859,6 +1883,11 @@ private:
             inverseDct4x4AddPred(crCoeffs, predV + blkY * 8U + blkX, 8U,
                                  chromaFrame.vMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
         }
+#else
+        (void)pps;
+        (void)chromaPredMode;
+        (void)qp;
+#endif
     }
 
     // ── P-frame decode methods ──────────────────────────────────────────
@@ -2017,6 +2046,7 @@ private:
                               sh.lumaLog2WeightDenom_, w.lumaWeight, w.lumaOffset, w.lumaWeightFlag);
         }
 
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
         if (!skipChroma())
         {
             int32_t chromaRefX = static_cast<int32_t>(mbX * cChromaBlockSize) + (skipMv.x >> 3);
@@ -2042,6 +2072,7 @@ private:
                                   sh.chromaLog2WeightDenom_, w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
             }
         }
+#endif
 
         // NNZ = 0 for skip MBs
         std::fill_n(&nnzLuma_[mbIdx * 16U], 16U, static_cast<uint8_t>(0U));
@@ -2343,7 +2374,9 @@ private:
         };
 
         uint8_t predLuma[256];
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
         uint8_t predU[64], predV[64];
+#endif
 
         if (mbTypeRaw <= 2U && numParts == 1U)
         {
@@ -2364,6 +2397,7 @@ private:
                                   sh.lumaLog2WeightDenom_, w.lumaWeight, w.lumaOffset, w.lumaWeightFlag);
             }
 
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
             if (!skipChroma())
             {
                 int32_t cRefX = static_cast<int32_t>(mbX * cChromaBlockSize) + (mv.x >> 3);
@@ -2384,6 +2418,7 @@ private:
                                       sh.chromaLog2WeightDenom_, w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
                 }
             }
+#endif
         }
         else if (mbTypeRaw == 1U)
         {
@@ -2402,7 +2437,6 @@ private:
                                16U, 8U,
                                predLuma + partOffY * cMbSize, cMbSize);
 
-                uint32_t cPartOffY = p * 4U;
                 if (sh.hasWeightTable_)
                 {
                     const auto& w = sh.weightL0_[refIdxL0[p]];
@@ -2410,8 +2444,10 @@ private:
                                       sh.lumaLog2WeightDenom_, w.lumaWeight, w.lumaOffset, w.lumaWeightFlag);
                 }
 
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
                 if (!skipChroma())
                 {
+                    uint32_t cPartOffY = p * 4U;
                     int32_t cRefX = static_cast<int32_t>(mbX * cChromaBlockSize) + (mv.x >> 3);
                     int32_t cRefY = static_cast<int32_t>(mbY * cChromaBlockSize + cPartOffY) + (mv.y >> 3);
                     chromaMotionComp(ref, cRefX, cRefY,
@@ -2434,6 +2470,7 @@ private:
                                           sh.chromaLog2WeightDenom_, w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
                     }
                 }
+#endif
             }
         }
         else if (mbTypeRaw == 2U)
@@ -2453,7 +2490,6 @@ private:
                                8U, 16U,
                                predLuma + partOffX, cMbSize);
 
-                uint32_t cPartOffX = p * 4U;
                 if (sh.hasWeightTable_)
                 {
                     const auto& w = sh.weightL0_[refIdxL0[p]];
@@ -2461,8 +2497,10 @@ private:
                                       sh.lumaLog2WeightDenom_, w.lumaWeight, w.lumaOffset, w.lumaWeightFlag);
                 }
 
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
                 if (!skipChroma())
                 {
+                    uint32_t cPartOffX = p * 4U;
                     int32_t cRefX = static_cast<int32_t>(mbX * cChromaBlockSize + cPartOffX) + (mv.x >> 3);
                     int32_t cRefY = static_cast<int32_t>(mbY * cChromaBlockSize) + (mv.y >> 3);
                     chromaMotionComp(ref, cRefX, cRefY,
@@ -2485,6 +2523,7 @@ private:
                                           sh.chromaLog2WeightDenom_, w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
                     }
                 }
+#endif
             }
         }
         else
@@ -2493,8 +2532,10 @@ private:
             // 4 sub-partitions: TL(0), TR(1), BL(2), BR(3), each 8x8 luma / 4x4 chroma.
             static constexpr uint32_t subLumaOffX[4] = {0, 8, 0, 8};
             static constexpr uint32_t subLumaOffY[4] = {0, 0, 8, 8};
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
             static constexpr uint32_t subChromaOffX[4] = {0, 4, 0, 4};
             static constexpr uint32_t subChromaOffY[4] = {0, 0, 4, 4};
+#endif
 
             for (uint32_t s = 0U; s < 4U; ++s)
             {
@@ -2510,7 +2551,6 @@ private:
                                8U, 8U,
                                predLuma + loy * cMbSize + lox, cMbSize);
 
-                uint32_t cox = subChromaOffX[s], coy = subChromaOffY[s];
                 if (sh.hasWeightTable_)
                 {
                     const auto& w = sh.weightL0_[refIdxL0[s]];
@@ -2518,8 +2558,10 @@ private:
                                       sh.lumaLog2WeightDenom_, w.lumaWeight, w.lumaOffset, w.lumaWeightFlag);
                 }
 
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
                 if (!skipChroma())
                 {
+                    uint32_t cox = subChromaOffX[s], coy = subChromaOffY[s];
                     int32_t cRefX = static_cast<int32_t>(mbX * cChromaBlockSize + cox) + (mv.x >> 3);
                     int32_t cRefY = static_cast<int32_t>(mbY * cChromaBlockSize + coy) + (mv.y >> 3);
                     chromaMotionComp(ref, cRefX, cRefY,
@@ -2542,6 +2584,7 @@ private:
                                           sh.chromaLog2WeightDenom_, w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
                     }
                 }
+#endif
             }
         }
 
@@ -2659,6 +2702,7 @@ private:
             }
         }
 
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
         if (!skipChroma())
         {
             int32_t chromaQp = computeChromaQp(qp, pps.chromaQpIndexOffset_);
@@ -2691,6 +2735,7 @@ private:
                                      chromaFrame.vMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
             }
         }
+#endif
         mbQp = qp; // Propagate accumulated QP to next MB
         trace_.onMbEnd(mbX, mbY, static_cast<uint32_t>(br.bitOffset()));
     }
@@ -3560,13 +3605,18 @@ private:
         // mb4x/mb4y declared earlier for MVD context derivation
         uint32_t mbIdx = mbY * widthInMbs_ + mbX;
 
-        uint8_t predLuma[256], predU[64], predV[64];
+        uint8_t predLuma[256];
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
+        uint8_t predU[64], predV[64];
+#endif
         std::memset(predLuma, 128U, 256U);
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
         if (!skipChroma())
         {
             std::memset(predU, 128U, 64U);
             std::memset(predV, 128U, 64U);
         }
+#endif
 
         // Per-partition reference lookup via DPB L0 list — §8.4.2
         auto getRef = [this](uint8_t idx) -> const Frame& {
@@ -3631,9 +3681,6 @@ private:
             lumaMotionComp(ref, refX, refY, dx, dy, partW, partH,
                            predLuma + partY * cMbSize + partX, cMbSize);
 
-            // Chroma MC
-            uint32_t cPartX = partX / 2U, cPartY = partY / 2U;
-            uint32_t cPartW = partW / 2U, cPartH = partH / 2U;
             if (sh.hasWeightTable_)
             {
                 const auto& w = sh.weightL0_[partRefIdx];
@@ -3642,8 +3689,12 @@ private:
                                   w.lumaWeight, w.lumaOffset, w.lumaWeightFlag);
             }
 
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
             if (!skipChroma())
             {
+                // Chroma MC
+                uint32_t cPartX = partX / 2U, cPartY = partY / 2U;
+                uint32_t cPartW = partW / 2U, cPartH = partH / 2U;
                 int32_t cRefX = static_cast<int32_t>(mbX * cChromaBlockSize + cPartX) + (mv.x >> 3);
                 int32_t cRefY = static_cast<int32_t>(mbY * cChromaBlockSize + cPartY) + (mv.y >> 3);
                 uint32_t cdx = static_cast<uint32_t>(mv.x) & 7U;
@@ -3665,6 +3716,7 @@ private:
                                       w.chromaWeight[1], w.chromaOffset[1], w.chromaWeightFlag);
                 }
             }
+#endif
         };
 
         // (per-step bp trace for this MB printed inline in MVD decode loop)
@@ -3877,6 +3929,7 @@ private:
             }
         }
 
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
         if (!skipChroma())
         {
             int32_t chromaQp = computeChromaQp(qp, pps.chromaQpIndexOffset_);
@@ -3913,6 +3966,7 @@ private:
                                      chromaFrame.vMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
             }
         }
+#endif
     }
 
     /** Decode chroma using CABAC residual. */
@@ -3959,6 +4013,7 @@ private:
             }
         }
 
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
         if (skipChroma())
             return;
 
@@ -3999,6 +4054,11 @@ private:
             inverseDct4x4AddPred(crCoeffs, predV + blkY * 8U + blkX, 8U,
                                  chromaFrame.vMb(mbX, mbY) + blkY * uvStride + blkX, uvStride);
         }
+#else
+        (void)pps;
+        (void)chromaPredMode;
+        (void)qp;
+#endif
     }
 };
 

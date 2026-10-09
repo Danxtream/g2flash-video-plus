@@ -224,6 +224,7 @@ inline void filterLumaStrong(uint8_t& p0, uint8_t& p1, uint8_t& p2,
 /** Apply chroma filter (BS=1-3, weak) to one pixel crossing.
  *  Reference: ITU-T H.264 §8.7.2.3 (chroma variant).
  */
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
 inline void filterChromaWeak(uint8_t& p0, const uint8_t& p1,
                               uint8_t& q0, const uint8_t& q1,
                               int32_t alpha, int32_t beta, int32_t tc0) noexcept
@@ -242,10 +243,12 @@ inline void filterChromaWeak(uint8_t& p0, const uint8_t& p1,
     p0 = static_cast<uint8_t>(clipU8(ip0 + delta));
     q0 = static_cast<uint8_t>(clipU8(iq0 - delta));
 }
+#endif
 
 /** Apply chroma filter (BS=4, strong) to one pixel crossing.
  *  Reference: ITU-T H.264 §8.7.2.4 (chroma variant).
  */
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
 inline void filterChromaStrong(uint8_t& p0, const uint8_t& p1,
                                 uint8_t& q0, const uint8_t& q1,
                                 int32_t alpha, int32_t beta) noexcept
@@ -259,10 +262,12 @@ inline void filterChromaStrong(uint8_t& p0, const uint8_t& p1,
     p0 = static_cast<uint8_t>((2 * ip1 + ip0 + iq1 + 2) >> 2);
     q0 = static_cast<uint8_t>((2 * iq1 + iq0 + ip1 + 2) >> 2);
 }
+#endif
 
 // ── MB-level deblocking ─────────────────────────────────────────────────
 
 /** Filter U/V using the boundary strengths already computed for luma. */
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
 inline void deblockChromaMb(Frame& frame, uint32_t mbX, uint32_t mbY,
                             int32_t alphaOffset, int32_t betaOffset,
                             const int32_t* mbQps, int32_t chromaQpIndexOffset,
@@ -351,6 +356,7 @@ inline void deblockChromaMb(Frame& frame, uint32_t mbX, uint32_t mbY,
         }
     }
 }
+#endif
 
 /** Deblock one macroblock (luma + chroma).
  *
@@ -563,10 +569,14 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
         }
     }
     // Chroma filtering is independent of Y, so choose once for the whole MB.
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
     if (!skipChroma)
         deblockChromaMb(frame, mbX, mbY, alphaOffset, betaOffset,
                         mbQps, chromaQpIndexOffset, widthInMbs,
                         verticalBs, horizontalBs);
+#else
+    (void)skipChroma;
+#endif
 
 }
 

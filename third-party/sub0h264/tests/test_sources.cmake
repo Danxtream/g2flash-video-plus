@@ -34,6 +34,7 @@ set(SUB0H264_TEST_SOURCES
     test_frame_verify.cpp
     test_allocation_preflight.cpp
     test_skip_chroma.cpp
+    test_build_features.cpp
     test_debug_flatblack.cpp
     test_bench.cpp
     test_reconstruct.cpp

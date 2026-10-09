@@ -35,6 +35,7 @@
 // >>6 causes different rounding behavior that diverges from ffmpeg on noisy content.
 // #define SUB0H264_DEQUANT_NORM
 
+#include "features.hpp"
 #include <cstdint>
 #include <algorithm>
 #include <array>
@@ -238,6 +239,7 @@ inline void inverseHadamard4x4(int16_t* dc) noexcept
  *  §8.5.11: H2⊗H2 transform verified. [CHECKED §8.5.11]
  *  @param[in,out] dc  4 DC coefficients, transformed in-place
  */
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
 inline void inverseHadamard2x2(int16_t* dc) noexcept
 {
     // ITU-T H.264 §8.5.12.2: 2x2 Hadamard for chroma DC (4:2:0).
@@ -255,6 +257,7 @@ inline void inverseHadamard2x2(int16_t* dc) noexcept
     dc[2] = static_cast<int16_t>(z1 + z2);
     dc[3] = static_cast<int16_t>(z1 - z2);
 }
+#endif
 
 // ── Inverse Quantization — ITU-T H.264 §8.5.12.1 ───────────────────────
 

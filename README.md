@@ -370,6 +370,11 @@ is vendored in `third-party/sub0h264/` from commit
 with modifications for the G2 decoder. Sub0h264 and these modifications are
 licensed under MIT; see [LICENSE.md](third-party/sub0h264/LICENSE.md).
 
+The decoder modifications include the build-time
+`SUB0H264_ENABLE_CHROMA_RECONSTRUCTION` switch. It defaults to enabled;
+disabling it omits U/V reconstruction and storage while retaining chroma syntax
+parsing and entropy contexts needed to decode Y correctly.
+
 > **Patent Notice:** H.264/AVC may be covered by patents in some jurisdictions.
 > The patent portfolio is administered by [Via Licensing Alliance](https://via-la.com/licensing-programs/avc-h-264/)
 > (formerly MPEG LA). Most patents have expired; the last known US patents expire

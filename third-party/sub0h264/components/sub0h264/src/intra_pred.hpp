@@ -387,6 +387,7 @@ inline void intraPred16x16(Intra16x16Mode mode,
  *  @param isU        True for U (Cb) plane, false for V (Cr)
  *  @param[out] pred  Output 8x8 prediction block (stride=8)
  */
+#if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
 inline void intraPredChroma8x8(IntraChromaMode mode,
                                 const Frame& frame, uint32_t mbX, uint32_t mbY,
                                 bool isU, uint8_t* pred) noexcept
@@ -521,6 +522,7 @@ inline void intraPredChroma8x8(IntraChromaMode mode,
         break;
     }
 }
+#endif
 
 // ── Intra 8x8 prediction — ITU-T H.264 §8.3.2 ─────────────────────────
 
