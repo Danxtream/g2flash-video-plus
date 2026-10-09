@@ -24,6 +24,18 @@ static uint32_t fail_at, fail_task, bad_tcb, fail_terminate, fail_view;
 static uint32_t cancel_new, expire_new, fail_publication, defer_reclaimed;
 static uint32_t feed, fed, stream_ok, corrupt_guard, suppress_park;
 static uint32_t mutex_calls, release_calls, runtime_at_release;
+static uint32_t event_calls, fail_event, inject_cancel, inject_renew;
+static uint32_t worker_waits, longest_wait, renewed;
+static pthread_mutex_t preparation = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t preparation_changed = PTHREAD_COND_INITIALIZER;
+static uint32_t pause_at, preparing_paused, resume_preparation, start_result, stop_result;
+typedef struct {
+    void *control;
+    pthread_mutex_t mutex;
+    pthread_cond_t condition;
+    uint32_t bits, waiters;
+} fake_event;
+static fake_event events[4];
 static video_heap_view views[3] = {{382756, 376832}, {285680, 278528}, {133924, 131072}};
 static uint32_t cached_used, cached_peak;
 static const uint32_t shadow_present = 1;
@@ -36,14 +48,20 @@ static uint32_t tick(void) {
     return (uint32_t)(t.tv_sec * 1000u + t.tv_nsec / 1000000u);
 }
 static int take(uint32_t m, uint32_t timeout) {
-    assert(m == 1 && !timeout);
+    assert(m == 1 && (!timeout || !image_depth) && timeout <= 2000);
     if (fail_publication && creates && !worker_thread) {
         --fail_publication; return -1;
     }
     if (defer_reclaimed && !task_live && creates && !allocations_live) {
         --defer_reclaimed; return -1;
     }
-    if (pthread_mutex_trylock(&image)) return -1;
+    if (timeout) {
+        struct timespec limit; assert(!clock_gettime(CLOCK_REALTIME, &limit));
+        limit.tv_sec += timeout / 1000;
+        limit.tv_nsec += (timeout % 1000) * 1000000u;
+        if (limit.tv_nsec >= 1000000000) { ++limit.tv_sec; limit.tv_nsec -= 1000000000; }
+        if (pthread_mutex_timedlock(&image, &limit)) return -1;
+    } else if (pthread_mutex_trylock(&image)) return -1;
     assert(!image_depth); ++image_depth; return 0;
 }
 static int give(uint32_t m) {
@@ -56,10 +74,21 @@ static uint32_t thread_id(void) { return worker_thread ? 2 : 3; }
 static uint32_t new_thread(void (*fn)(void *), void *arg, const video_thread_attr *attr);
 static int terminate(uint32_t id);
 static int delay(uint32_t ms);
+static uint32_t event_new(const video_event_attr *);
+static uint32_t event_set(uint32_t, uint32_t);
+static uint32_t event_wait(uint32_t, uint32_t, uint32_t, uint32_t);
+static int video_platform_event_quiescent(uint32_t);
 static void *allocate(uint32_t size) {
     assert(!image_depth);
     ++allocation_calls;
     if (allocation_calls == fail_at) return 0;
+    if (allocation_calls == pause_at) {
+        assert(!pthread_mutex_lock(&preparation)); preparing_paused = 1;
+        assert(!pthread_cond_broadcast(&preparation_changed));
+        while (!resume_preparation)
+            assert(!pthread_cond_wait(&preparation_changed, &preparation));
+        assert(!pthread_mutex_unlock(&preparation));
+    }
     uint32_t charge = ((size + 3u) & ~3u) + 4u;
     assert(size <= views[0].max_alloc && charge <= views[0].free_bytes - cached_used);
     uint32_t *raw = malloc(size + 8); assert(raw); *raw = charge;
@@ -74,6 +103,15 @@ static void release(void *p) {
         assert(context.video_runtime); ++runtime_at_release;
     }
     uint32_t *raw = (uint32_t *)p - 2;
+    for (uint32_t i = 0; i < 4; ++i) {
+        uintptr_t control = (uintptr_t)events[i].control;
+        if (control >= (uintptr_t)p && control < (uintptr_t)p + *raw) {
+            assert(!events[i].waiters);
+            assert(!pthread_cond_destroy(&events[i].condition));
+            assert(!pthread_mutex_destroy(&events[i].mutex));
+            memset(&events[i], 0, sizeof(events[i]));
+        }
+    }
     assert(*raw <= cached_used && allocations_live);
     cached_used -= *raw; --allocations_live; ++release_calls; free(raw);
 }
@@ -98,6 +136,9 @@ static void video_platform_release(void *p, void *v) { assert(!p); release(v); }
 #define VIDEO_OS_MUTEX_TAKE take
 #define VIDEO_OS_MUTEX_GIVE give
 #define VIDEO_OS_MUTEX_DELETE mutex_delete
+#define VIDEO_OS_EVENT_NEW event_new
+#define VIDEO_OS_EVENT_SET event_set
+#define VIDEO_OS_EVENT_WAIT event_wait
 #define VIDEO_TICK tick()
 #define VIDEO_OWNER_ALLOC allocate
 #define VIDEO_OWNER_FREE release
@@ -136,6 +177,43 @@ static uint32_t new_thread(void (*fn)(void *), void *arg, const video_thread_att
 }
 static int delay(uint32_t ms) {
     assert(!image_depth);
+    struct timespec t = {0, ms >= 1000 ? 1000000 : ms * 1000000u};
+    nanosleep(&t, 0); return 0;
+}
+static uint32_t event_new(const video_event_attr *attr) {
+    assert(!image_depth && attr && attr->cb_mem && attr->cb_size == 32);
+    if (++event_calls == fail_event) return 0;
+    for (uint32_t i = 0; i < 4; ++i) {
+        if (events[i].control) continue;
+        events[i].control = attr->cb_mem;
+        assert(!pthread_mutex_init(&events[i].mutex, 0));
+        assert(!pthread_cond_init(&events[i].condition, 0));
+        return i + 1;
+    }
+    assert(0); return 0;
+}
+static uint32_t event_set(uint32_t id, uint32_t bits) {
+    assert(id && id <= 4 && events[id - 1].control && bits && !(bits & 0xff000000u));
+    fake_event *event = &events[id - 1];
+    assert(!pthread_mutex_lock(&event->mutex));
+    event->bits |= bits;
+    uint32_t result = event->bits;
+    assert(!pthread_cond_broadcast(&event->condition));
+    assert(!pthread_mutex_unlock(&event->mutex));
+    return result;
+}
+static void cancelled_wait(void *argument) {
+    fake_event *event = argument;
+    assert(event->waiters); --event->waiters;
+    assert(!pthread_mutex_unlock(&event->mutex));
+}
+static uint32_t event_wait(uint32_t id, uint32_t mask, uint32_t options, uint32_t timeout) {
+    assert(!image_depth && id && id <= 4 && events[id - 1].control && !options);
+    if (worker_thread) {
+        ++worker_waits;
+        if (timeout != UINT32_MAX && timeout > longest_wait) longest_wait = timeout;
+    }
+    /* Feed through the same wait seam that later input wakeups will use. */
     if (worker_thread && feed && !__atomic_load_n(&fed, __ATOMIC_ACQUIRE) &&
         __atomic_load_n(&context.video.ready, __ATOMIC_ACQUIRE) &&
         !video_lifecycle_cancelled(&context.video, context.video.token)) {
@@ -144,11 +222,47 @@ static int delay(uint32_t ms) {
         if (!stream_ok) video_runtime_fail(VIDEO_FAULT_INIT);
         __atomic_store_n(&fed, 1, __ATOMIC_RELEASE);
     }
+    if (worker_thread && inject_cancel && context.video.ready) {
+        inject_cancel = 0;
+        assert(!take(1, 0)); video_worker_request_stop_locked(); give(1);
+    }
+    if (worker_thread && inject_renew && context.video.ready) {
+        inject_renew = 0; renewed = 1;
+        assert(!take(1, 0));
+        __atomic_store_n(&context.direct_lease_deadline, tick() + 5000, __ATOMIC_RELEASE);
+        assert(video_worker_wake_locked(context.video.token, VIDEO_WAKE_LEASE)); give(1);
+    }
     if (worker_thread && suppress_park &&
         __atomic_load_n(&context.video.parked, __ATOMIC_ACQUIRE))
         __atomic_store_n(&context.video.parked, 0, __ATOMIC_RELEASE);
-    struct timespec t = {0, ms >= 1000 ? 1000000 : ms * 1000000u};
-    nanosleep(&t, 0); return 0;
+    fake_event *event = &events[id - 1];
+    assert(!pthread_mutex_lock(&event->mutex)); ++event->waiters;
+    uint32_t result = 0;
+    pthread_cleanup_push(cancelled_wait, event);
+    struct timespec limit; assert(!clock_gettime(CLOCK_REALTIME, &limit));
+    if (timeout != UINT32_MAX) {
+        limit.tv_sec += timeout / 1000;
+        limit.tv_nsec += (timeout % 1000) * 1000000u;
+        if (limit.tv_nsec >= 1000000000) { ++limit.tv_sec; limit.tv_nsec -= 1000000000; }
+    }
+    while (!(event->bits & mask)) {
+        if (!timeout) break;
+        int status = timeout == UINT32_MAX ?
+            pthread_cond_wait(&event->condition, &event->mutex) :
+            pthread_cond_timedwait(&event->condition, &event->mutex, &limit);
+        if (status) break;
+    }
+    result = event->bits & mask;
+    event->bits &= ~result;
+    pthread_cleanup_pop(0);
+    --event->waiters;
+    assert(!pthread_mutex_unlock(&event->mutex));
+    return result ? result : 0xfffffffeu;
+}
+static int video_platform_event_quiescent(uint32_t id) {
+    if (!id) return 1;
+    assert(id <= 4 && events[id - 1].control);
+    return !events[id - 1].waiters;
 }
 static int terminate(uint32_t id) {
     assert(!image_depth && !worker_thread && id == 2 && task_live &&
@@ -165,6 +279,9 @@ static void configure(void) {
     fail_at = fail_task = bad_tcb = fail_terminate = fail_view = cancel_new = expire_new = 0;
     fail_publication = defer_reclaimed = feed = fed = stream_ok = corrupt_guard = suppress_park = 0;
     mutex_calls = release_calls = runtime_at_release = 0;
+    event_calls = fail_event = inject_cancel = inject_renew = worker_waits = longest_wait = renewed = 0;
+    pause_at = preparing_paused = resume_preparation = start_result = stop_result = 0;
+    for (uint32_t i = 0; i < 4; ++i) assert(!events[i].control);
     views[0] = (video_heap_view){382756, 376832};
     views[1] = (video_heap_view){285680, 278528};
     views[2] = (video_heap_view){133924, 131072};
@@ -277,9 +394,71 @@ static void pins(void) {
     assert(!video_worker_stop(1) && task_live); give(1);
     delay(10); assert(!__atomic_load_n(&context.video.parked, __ATOMIC_ACQUIRE));
     assert(!take(1, 0));
-    assert(video_lifecycle_unpin(&context.video, token, 0));
-    assert(video_lifecycle_unpin(&context.video, token, 1)); give(1);
+    assert(video_worker_unpin_locked(token, 0));
+    assert(video_worker_unpin_locked(token, 1)); give(1);
     finish(); assert(!video_lifecycle_pin(&context.video, token, 0));
+}
+static void wakeups(void) {
+    for (uint32_t i = 1; i <= 2; ++i) {
+        configure(); fail_event = i;
+        assert(!video_worker_start(0)); finish();
+        assert(event_calls == i && !creates);
+    }
+    configure(); inject_cancel = 1;
+    assert(video_worker_start(0)); await_ready(); finish();
+    assert(!inject_cancel); /* cancel exactly between predicate and wait */
+    configure(); context.direct_lease_deadline = tick() + 100;
+    inject_renew = 1;
+    assert(video_worker_start(0)); await_ready();
+    uint32_t limit = tick() + 3000;
+    while (!renewed || longest_wait < 4000) { assert((int32_t)(limit - tick()) > 0); delay(1); }
+    delay(120); assert(!context.video.parked && state() == VIDEO_READY);
+    uint32_t waits = worker_waits; delay(30); assert(worker_waits == waits);
+    assert(!take(1, 0));
+    assert(!video_worker_wake_locked(context.video.token + 1, VIDEO_WAKE_INPUT));
+    assert(!video_worker_wake_locked(context.video.token, 0x80000000u));
+    assert(!video_worker_unpin_locked(context.video.token + 1, 0)); give(1);
+    finish();
+    configure(); assert(video_worker_start(0)); await_ready();
+    uint32_t old_token = context.video.token;
+    finish();
+    assert(video_worker_start(0)); await_ready();
+    assert(video_stop_token(old_token, 100) && state() == VIDEO_READY);
+    finish();
+    configure(); context.direct_lease_deadline = tick() + 60;
+    assert(video_worker_start(0)); await_ready();
+    limit = tick() + 3000;
+    while (!context.video.parked) { assert((int32_t)(limit - tick()) > 0); delay(1); }
+    finish();
+    puts("sticky cancel/renewal, idle blocking, stale wake, event rollback and lease deadline PASS");
+}
+static void *prepare_session(void *argument) {
+    (void)argument; start_result = video_worker_start(0); return 0;
+}
+static void *stop_preparing_session(void *argument) {
+    (void)argument; stop_result = video_worker_stop(2000); return 0;
+}
+static void preparation_cancel(void) {
+    configure(); pause_at = 2;
+    pthread_t starter, stopper;
+    assert(!pthread_create(&starter, 0, prepare_session, 0));
+    assert(!pthread_mutex_lock(&preparation));
+    while (!preparing_paused)
+        assert(!pthread_cond_wait(&preparation_changed, &preparation));
+    assert(!pthread_mutex_unlock(&preparation));
+    assert(!take(1, 0));
+    assert(context.video.preparing && context.video_owner && !creates);
+    video_worker_request_stop_locked(); give(1);
+    assert(!pthread_create(&stopper, 0, stop_preparing_session, 0));
+    delay(20);
+    assert(allocations_live == 1 && context.video_owner && context.video.preparing);
+    assert(!pthread_mutex_lock(&preparation)); resume_preparation = 1;
+    assert(!pthread_cond_broadcast(&preparation_changed));
+    assert(!pthread_mutex_unlock(&preparation));
+    assert(!pthread_join(starter, 0)); assert(!pthread_join(stopper, 0));
+    assert(!start_result && stop_result && !creates);
+    finish();
+    puts("completion remains reachable while private allocation is paused PASS");
 }
 static void quarantine(void) {
     for (uint32_t mode = 0; mode < 4; ++mode) {
@@ -313,6 +492,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "reserves")) reserves();
     else if (!strcmp(argv[1], "pins")) pins();
     else if (!strcmp(argv[1], "quarantine")) quarantine();
+    else if (!strcmp(argv[1], "wakeups")) wakeups();
+    else if (!strcmp(argv[1], "preparation")) preparation_cancel();
     else assert(0);
     assert(!allocations_live && !task_live && !image_depth);
     printf("worker %s PASS\n", argv[1]);

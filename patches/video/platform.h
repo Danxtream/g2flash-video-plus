@@ -15,6 +15,15 @@ typedef struct {
     uint32_t tz_module, reserved;
 } video_thread_attr;
 
+/* CMSIS event attributes use caller-owned storage. This donor's static event
+ * group is 32 bytes, with a wait list at offset 4 and a static flag at 28. */
+typedef struct {
+    const char *name;
+    uint32_t attr_bits;
+    void *cb_mem;
+    uint32_t cb_size;
+} video_event_attr;
+
 #ifndef VIDEO_OS_THREAD_NEW
 #define VIDEO_OS_THREAD_NEW ((uint32_t (*)(void (*)(void *), void *, const video_thread_attr *))0x00442897U)
 #define VIDEO_OS_THREAD_ID ((uint32_t (*)(void))0x0044295fU)
@@ -24,6 +33,9 @@ typedef struct {
 #define VIDEO_OS_MUTEX_TAKE ((int (*)(uint32_t, uint32_t))0x00442f91U)
 #define VIDEO_OS_MUTEX_GIVE ((int (*)(uint32_t))0x00442ff7U)
 #define VIDEO_OS_MUTEX_DELETE ((int (*)(uint32_t))0x00443049U)
+#define VIDEO_OS_EVENT_NEW ((uint32_t (*)(const video_event_attr *))0x00442d45U)
+#define VIDEO_OS_EVENT_SET ((uint32_t (*)(uint32_t, uint32_t))0x00442d99U)
+#define VIDEO_OS_EVENT_WAIT ((uint32_t (*)(uint32_t, uint32_t, uint32_t, uint32_t))0x00442e77U)
 #define VIDEO_TICK FW_MS_TICK
 #define VIDEO_OWNER_ALLOC cfw_malloc
 #define VIDEO_OWNER_FREE FW_FREE
@@ -64,5 +76,14 @@ static void video_platform_release(void *argument, void *memory) {
     (void)argument;
     FW_FREE(memory);
 }
+/* This donor's CMSIS block exposes no event-delete entry. Static groups have no
+ * global registry: after all task-context users have drained, their empty
+ * wait list and caller-owned flag permit reclaiming the supplied storage.
+ * ISR setters are forbidden because they defer a pointer to the timer queue. */
+static int video_platform_event_quiescent(uint32_t event) {
+    const uint8_t *control = (const void *)(uintptr_t)event;
+    return !event || (control[28] == 1 && *(const uint32_t *)(control + 4) == 0);
+}
 _Static_assert(sizeof(video_thread_attr) == 36, "static thread attribute ABI");
+_Static_assert(sizeof(video_event_attr) == 16, "static event attribute ABI");
 #endif

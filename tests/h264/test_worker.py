@@ -55,3 +55,9 @@ class WorkerTests(unittest.TestCase):
 
     def test_termination_timeout_guard_and_unknown_abi_quarantine(self):
         self.check_case("quarantine")
+
+    def test_sticky_wakeups_deadline_renewal_and_static_event_rollback(self):
+        self.check_case("wakeups")
+
+    def test_stop_waits_for_paused_private_preparation_without_freeing_it(self):
+        self.check_case("preparation")

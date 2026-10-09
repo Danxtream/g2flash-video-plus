@@ -12,7 +12,7 @@ order and pins borrowed output with the generation token. No decoder call, heap
 operation, task termination or worker wait occurs while those locks are held.
 
 Heap 20 owns the decoder's actual size/alignment, all requested tables/planes and
-scratch, the allocation ledger, static task control block and 16 KiB stack.
+scratch, the allocation ledger, static task/event control blocks and 16 KiB stack.
 Requests determine sizes, including untagged STL growth; tags are diagnostic.
 The owner byte cap is 206,904 bytes, excluding the future four 4 KiB input slots.
 Retain 32 KiB in cached heap 20, 32 KiB in display heap 13 and 16 KiB in heap 27.
@@ -36,8 +36,26 @@ osThreadNew accepts a 112-byte caller-owned TCB and supplied stack; its static
 flag is 2 at byte 109. osThreadTerminate synchronously reclaims a different task;
 prvDeleteTCB preserves both supplied buffers with that flag. Check the flag after
 creation and never terminate the current worker from itself. Priority 8 and
-bounded sleeps leave services, interrupts and the watchdog running normally.
+event waits leave services, interrupts and the watchdog running normally.
 The firmware's exact-base hash guard also authenticates these service bytes.
+
+Two caller-owned 32-byte event groups are created during explicit start, before
+the private claim and worker. The private owner and completion handle stay
+reachable during preparation, so cancellation does not poll startup. Sticky
+wake bits cover arm, input, cancellation, pin drainage and lease renewal; state
+and generation are checked after every wake. Idle waits end at the current lease
+deadline, and stop waits on completion with a bounded deadline outside locks.
+Signal through the locked wake/unpin APIs: releasing a pin without its drain
+wake can strand teardown until its deadline.
+
+Only task-context setters are permitted. ISR event setters defer pointers to
+the timer service and could outlive ownership. The donor's static event creation
+initializes a local wait list without a global registration; its CMSIS block has
+no event-delete entry. After all callers drain and the worker is terminated,
+reclaim only groups whose wait lists are empty and static flag is intact.
+Completion waiters are serialized by the existing controller claim. Normal
+senders hold the image mutex until SET returns; the parked worker is terminated
+before either group is reclaimed. Failure retains the owner in quarantine.
 
 After termination, video_worker_get_report exposes requested object bytes,
 cached storage peak, heap free/max snapshots, both stack guards and downward
