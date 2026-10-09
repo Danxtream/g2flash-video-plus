@@ -712,9 +712,11 @@ static int cfw_cleanup_session(void) {
     customCfwContext *ctx = peekCustomCfwContext();
     if (ctx == 0) return 0;
 
+    video_control_cancel_locked();
+
     /* Publish fail-open ownership first. image_worker holds the display gate,
      * making it safe to discard any direct job/pointer left by this session. */
-    ctx->direct_lease_deadline = 0;
+    __atomic_store_n(&ctx->direct_lease_deadline, 0, __ATOMIC_RELEASE);
     ctx->direct_active = 0;
     ctx->direct_pending = 0;
     ctx->direct_shadow = 0;
@@ -771,9 +773,10 @@ void display_copy_hook(void) {
     customCfwContext *ctx = peekCustomCfwContext();
     if (ctx == 0 || !ctx->direct_pending || ctx->direct_shadow == 0) {
         if (ctx && ctx->direct_active) {
-            uint32_t deadline = ctx->direct_lease_deadline;
+            uint32_t deadline = __atomic_load_n(&ctx->direct_lease_deadline, __ATOMIC_ACQUIRE);
             if (deadline != 0 && (int32_t)(deadline - FW_MS_TICK) > 0)
                 return;                                  /* preserve the physical direct frame */
+            video_control_notify_lease(1);
             ctx->direct_active = 0;                       /* fail open to the stock compositor */
         }
         FW_DISPLAY_COPY();

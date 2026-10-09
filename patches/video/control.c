@@ -88,12 +88,14 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         s->stream = s->stream_high = stream;
         s->interval = interval;
         s->owner_origin = origin;
-        s->start_guard = ++s->control_generation;
+        uint32_t generation = s->control_generation + 1;
+        __atomic_store_n(&s->control_generation, generation, __ATOMIC_RELEASE);
+        __atomic_store_n(&s->start_guard, generation, __ATOMIC_RELEASE);
         uint32_t deadline = VIDEO_TICK + VIDEO_INACTIVITY_LIMIT_MS;
         __atomic_store_n(&s->active_deadline, deadline ? deadline : 1, __ATOMIC_RELEASE);
         s->error = 0;
         if (!video_controller_request_locked(VIDEO_CONTROLLER_START)) {
-            s->start_guard = 0; s->error = VIDEO_CONTROL_DISPATCH;
+            __atomic_store_n(&s->start_guard, 0, __ATOMIC_RELEASE); s->error = VIDEO_CONTROL_DISPATCH;
             __atomic_fetch_and(&s->controller_reasons, ~VIDEO_CONTROLLER_START, __ATOMIC_ACQ_REL);
             return VIDEO_CONTROL_DISPATCH;
         }
@@ -103,7 +105,7 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         if (n != 12) return VIDEO_CONTROL_FORMAT;
         if (!s->stream || video_read32(p + 8) != s->stream || origin != s->owner_origin)
             return VIDEO_CONTROL_STALE;
-        s->start_guard = 0; /* Cancels even before a private owner is claimed. */
+        __atomic_store_n(&s->start_guard, 0, __ATOMIC_RELEASE); /* Cancels even before a private owner is claimed. */
         video_worker_request_stop_locked();
         if (!video_controller_request_locked(VIDEO_CONTROLLER_STOP)) {
             s->error = VIDEO_CONTROL_DISPATCH;
@@ -141,7 +143,7 @@ int video_control_received(const uint8_t *data, uint16_t size,
     video_fold_signals(ctx);
     video_control_state *s = &ctx->video_control;
     if (__atomic_exchange_n(&s->controller_failed, 0, __ATOMIC_ACQ_REL)) {
-        s->start_guard = 0;
+        __atomic_store_n(&s->start_guard, 0, __ATOMIC_RELEASE);
         s->error = VIDEO_CONTROL_DISPATCH;
         if (ctx->video.state != VIDEO_IDLE) video_lifecycle_quarantine(&ctx->video);
     }

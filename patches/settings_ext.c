@@ -126,9 +126,11 @@ __attribute__((used, noinline)) int cfw_wake_lease_active(void) {
  * by compatibility-sensitive EvenHub hooks such as long-press forwarding. */
 __attribute__((used, noinline)) int cfw_fb_lease_active(void) {
     customCfwContext *ctx = faceclaw_context_if_valid();
-    if (!ctx || ctx->direct_lease_deadline == 0) return 0;
-    if ((int32_t)(ctx->direct_lease_deadline - FW_MS_TICK) <= 0) {
-        ctx->direct_lease_deadline = 0;
+    uint32_t deadline = ctx ? __atomic_load_n(&ctx->direct_lease_deadline, __ATOMIC_ACQUIRE) : 0;
+    if (!deadline) return 0;
+    if ((int32_t)(deadline - FW_MS_TICK) <= 0) {
+        __atomic_store_n(&ctx->direct_lease_deadline, 0, __ATOMIC_RELEASE);
+        video_control_notify_lease(1);
         ctx->direct_active = 0;
         cfw_texture_cache_release(ctx);
         return 0;
@@ -349,14 +351,17 @@ static void faceclaw_apply_control(const uint8_t *data, uint32_t len) {
     } else if (op == FACECLAW_OP_FB_ACQUIRE) {
         /* A fresh lease must earn preservation with a newly presented direct
          * frame; a renewal keeps the current one. */
-        if (ctx->direct_lease_deadline == 0 ||
-            (int32_t)(ctx->direct_lease_deadline - FW_MS_TICK) <= 0) {
+        uint32_t deadline = __atomic_load_n(&ctx->direct_lease_deadline, __ATOMIC_ACQUIRE);
+        if (deadline == 0 || (int32_t)(deadline - FW_MS_TICK) <= 0) {
+            video_control_notify_lease(1);
             ctx->direct_active = 0;
             cfw_texture_cache_release(ctx);
         }
-        ctx->direct_lease_deadline = FW_MS_TICK + FACECLAW_LEASE_MS;
+        __atomic_store_n(&ctx->direct_lease_deadline, FW_MS_TICK + FACECLAW_LEASE_MS, __ATOMIC_RELEASE);
+        video_control_notify_lease(0);
     } else if (op == FACECLAW_OP_FB_RELEASE) {
-        ctx->direct_lease_deadline = 0;
+        __atomic_store_n(&ctx->direct_lease_deadline, 0, __ATOMIC_RELEASE);
+        video_control_notify_lease(1);
         ctx->direct_active = 0;
         cfw_texture_cache_release(ctx);
     } else if (op == FACECLAW_OP_WEAR_QUERY) {

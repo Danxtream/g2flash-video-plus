@@ -60,11 +60,12 @@ static uint32_t video_fault_reason(uint32_t fault) {
 }
 static int video_control_generation_valid(customCfwContext *ctx, uint32_t generation) {
     uint32_t deadline = __atomic_load_n(&ctx->video_control.active_deadline, __ATOMIC_ACQUIRE);
-    return !generation || (ctx->video_control.start_guard == generation && deadline &&
+    uint32_t released = __atomic_load_n(&ctx->video_control.notify_release_generation, __ATOMIC_ACQUIRE);
+    return !generation || (ctx->video_control.start_guard == generation && released != generation && deadline &&
                            (int32_t)(deadline - VIDEO_TICK) > 0);
 }
 static void video_fault_locked(customCfwContext *ctx, uint32_t fault) {
-    ctx->video_control.start_guard = 0;
+    __atomic_store_n(&ctx->video_control.start_guard, 0, __ATOMIC_RELEASE);
     ctx->video_control.error = video_fault_reason(fault);
     __atomic_fetch_and(&ctx->video_control.controller_reasons, ~VIDEO_CONTROLLER_START,
                        __ATOMIC_ACQ_REL);
@@ -126,6 +127,11 @@ static void video_worker_entry(void *argument) {
      * finish each decoder call and drain output pins before its next call. */
     while (!video_lifecycle_cancelled(&ctx->video, token)) {
         uint32_t now = VIDEO_TICK;
+        if (owner->control_generation && __atomic_load_n(
+            &ctx->video_control.notify_release_generation, __ATOMIC_ACQUIRE) == owner->control_generation) {
+            __atomic_store_n(&ctx->video.cancel, 1, __ATOMIC_RELEASE);
+            break;
+        }
         uint32_t deadline = __atomic_load_n(&ctx->direct_lease_deadline, __ATOMIC_ACQUIRE);
         if (!deadline || (int32_t)(deadline - now) <= 0) {
             __atomic_store_n(&ctx->video.cancel, 1, __ATOMIC_RELEASE);
@@ -223,6 +229,14 @@ static video_worker_report video_completed_report(video_owner *owner) {
  * is stored in the stable context if its short publication lock is unavailable;
  * a later controller folds it under that lock, without losing the raw owner. */
 static void video_fold_signals(customCfwContext *ctx) {
+    uint32_t failed = __atomic_exchange_n(&ctx->video_control.notify_failed_generation, 0, __ATOMIC_ACQ_REL);
+    if (failed && failed == ctx->video_control.control_generation &&
+        (ctx->video_control.start_guard || ctx->video.state != VIDEO_IDLE)) {
+        __atomic_store_n(&ctx->video_control.start_guard, 0, __ATOMIC_RELEASE);
+        ctx->video_control.error = VIDEO_CONTROL_DISPATCH;
+        if (ctx->video.token)
+            __atomic_store_n(&ctx->video_quarantine_token, ctx->video.token, __ATOMIC_RELEASE);
+    }
     uint32_t token = __atomic_exchange_n(&ctx->video_abort_token, 0, __ATOMIC_ACQ_REL);
     if (token && token == ctx->video.token && ctx->video.preparing) {
         video_lifecycle_abort_start(&ctx->video, token,
@@ -236,6 +250,7 @@ static void video_fold_signals(customCfwContext *ctx) {
     token = __atomic_exchange_n(&ctx->video_quarantine_token, 0, __ATOMIC_ACQ_REL);
     if (token && token == ctx->video.token) {
         video_lifecycle_quarantine(&ctx->video);
+        video_worker_wake_locked(token, VIDEO_WAKE_CANCEL);
         ctx->video_reaper = 0;
         ctx->video_last_report = (video_worker_report){0};
         ctx->video_last_report.state = VIDEO_QUARANTINED;
@@ -396,6 +411,11 @@ int video_worker_receive_nal_locked(uint32_t stream, uint32_t sequence,
         ctx->video_control.start_guard != owner->control_generation ||
         video_lifecycle_state(&ctx->video) != VIDEO_READY ||
         video_lifecycle_cancelled(&ctx->video, owner->token)) return 0;
+    if (__atomic_load_n(&ctx->video_control.notify_release_generation, __ATOMIC_ACQUIRE) ==
+        owner->control_generation) {
+        video_control_cancel_locked();
+        return 0;
+    }
     uint32_t now = VIDEO_TICK;
     uint32_t activity = __atomic_load_n(&ctx->video_control.active_deadline, __ATOMIC_ACQUIRE);
     uint32_t fault = !activity || (int32_t)(activity - now) <= 0 ? VIDEO_FAULT_INACTIVITY :

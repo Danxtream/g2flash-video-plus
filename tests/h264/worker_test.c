@@ -19,7 +19,7 @@
 static customCfwContext context;
 static pthread_mutex_t image = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t worker;
-static _Thread_local uint32_t image_depth, worker_thread;
+static _Thread_local uint32_t image_depth, worker_thread, service_context;
 static uint32_t task_live, creates, terminates, allocation_calls, allocations_live;
 static uint32_t fail_at, fail_task, bad_tcb, fail_terminate, fail_view;
 static uint32_t cancel_new, expire_new, fail_publication, defer_reclaimed;
@@ -54,7 +54,7 @@ static uint32_t tick(void) {
     return (uint32_t)(t.tv_sec * 1000u + t.tv_nsec / 1000000u);
 }
 static int take(uint32_t m, uint32_t timeout) {
-    assert(m == 1 && (!timeout || !image_depth) && timeout <= 2000);
+    assert(!service_context && m == 1 && (!timeout || !image_depth) && timeout <= 2000);
     if (fail_publication && creates && !worker_thread) {
         --fail_publication; return -1;
     }
@@ -99,7 +99,7 @@ static uint32_t event_set(uint32_t, uint32_t);
 static uint32_t event_wait(uint32_t, uint32_t, uint32_t, uint32_t);
 static int video_platform_event_quiescent(uint32_t);
 static void *allocate(uint32_t size) {
-    assert(!image_depth);
+    assert(!service_context && !image_depth);
     ++allocation_calls;
     if (allocation_calls == fail_at) return 0;
     if (allocation_calls == pause_at) {
@@ -116,7 +116,7 @@ static void *allocate(uint32_t size) {
     ++allocations_live; return raw + 2;
 }
 static void release(void *p) {
-    assert(!image_depth && p);
+    assert(!service_context && !image_depth && p);
     /* Publication and binding must survive C++ destruction. Only the final
      * raw reclaim is allowed after the controller clears the provider. */
     if (worker_thread) {
@@ -136,7 +136,7 @@ static void release(void *p) {
     cached_used -= *raw; --allocations_live; ++release_calls; free(raw);
 }
 static int video_platform_heap_view(void *p, uint32_t heap, video_heap_view *out) {
-    assert(!p && !image_depth);
+    assert(!service_context && !p && !image_depth);
     uint32_t i = heap == 20 ? 0 : heap == 13 ? 1 : 2;
     if (fail_view) return 0;
     *out = views[i];
@@ -216,7 +216,7 @@ static uint32_t event_new(const video_event_attr *attr) {
     assert(0); return 0;
 }
 static uint32_t event_set(uint32_t id, uint32_t bits) {
-    assert(id && id <= 4 && events[id - 1].control && bits && !(bits & 0xff000000u));
+    assert(!service_context && id && id <= 4 && events[id - 1].control && bits && !(bits & 0xff000000u));
     fake_event *event = &events[id - 1];
     assert(!pthread_mutex_lock(&event->mutex));
     event->bits |= bits;
@@ -889,6 +889,164 @@ static void inactivity(void) {
     puts("delayed START, nonrenewing replay, fresh activity and event-only deadlines PASS");
 }
 
+static uint32_t stock_cache_releases, stock_shadow_releases, timer_stops, timer_deletes;
+static uint32_t buzzer_resets, microphone_cleanups, als_cleanups, compass_stops, dashboard_starts;
+static uint32_t delete_fail;
+static void cfw_texture_cache_release(customCfwContext *ctx) {
+    assert(!service_context);
+    ++stock_cache_releases; ctx->texture_cache = 0;
+}
+static void cfw_shadow_release(customCfwContext *ctx) {
+    ++stock_shadow_releases; ctx->framebuffer_shadow = 0;
+}
+static int stock_timer_stop(uint32_t timer) { assert(timer); ++timer_stops; return 0; }
+static int stock_timer_delete(uint32_t timer) {
+    ++timer_deletes; return timer == 77 && delete_fail ? -1 : 0;
+}
+static void mic_cleanup_session(void) { ++microphone_cleanups; }
+static void als_cleanup_session(void) { ++als_cleanups; }
+static customCfwContext *faceclaw_context_if_valid(void) { return &context; }
+static void faceclaw_launch_pending_dashboard(customCfwContext *ctx) { (void)ctx; assert(0); }
+static void faceclaw_arm_fallback(customCfwContext *ctx, uint32_t ms) { (void)ctx; (void)ms; assert(0); }
+static void faceclaw_send_wear_event(uint32_t worn) { (void)worn; assert(0); }
+int cfw_wake_lease_active(void) { return 0; }
+#undef FW_MS_TICK
+#define FW_MS_TICK tick()
+#define FW_TIMER_STOP stock_timer_stop
+#define FW_TIMER_DELETE stock_timer_delete
+#define FW_BUZZ_RESET() (++buzzer_resets)
+#define FW_SIDE() 1
+#define FW_COMPASS_STOP() (++compass_stops)
+#define FW_APP_START(a, b, c, d) (++dashboard_starts)
+#define FW_DISPLAY_START(a, b, c, d) ((void)0)
+#define FW_WEAR_STATUS() 1u
+#define FACECLAW_PROTO_VERSION 1u
+#define FACECLAW_LEASE_MS 90000u
+#define FACECLAW_CLAIMED_MS 5000u
+#define FACECLAW_OP_ACQUIRE 1u
+#define FACECLAW_OP_RELEASE 2u
+#define FACECLAW_OP_CLAIM 3u
+#define FACECLAW_OP_READY 4u
+#define FACECLAW_OP_FB_ACQUIRE 5u
+#define FACECLAW_OP_FB_RELEASE 6u
+#define FACECLAW_OP_WEAR_QUERY 7u
+#include "upstream_cleanup.h"
+
+static void cleanup(void) {
+    uint8_t p[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
+    for (uint32_t pending = 0; pending < 2; ++pending) {
+        configure(); request_next = 0;
+        stock_cache_releases = stock_shadow_releases = timer_stops = timer_deletes = 0;
+        buzzer_resets = microphone_cleanups = als_cleanups = compass_stops = dashboard_starts = 0;
+        control_command(p, VIDEO_CONTROL_START, 1);
+        assert(control_snapshot(p, 24, report) == VIDEO_CONTROL_ACCEPTED);
+        if (!pending) { pool_drain(); await_ready(); }
+        uint32_t allocations = allocations_live, freed = release_calls, stopped = terminates;
+        context.texture_cache = (void *)(uintptr_t)1;
+        context.seq_timer = 77; context.wake_fallback_timer = 78;
+        context.seq_count = context.seq_cursor = context.compass_forward = context.wake_dashboard_pending = 1;
+        context.direct_pending = context.direct_active = context.direct_failed = context.wake_nonce = 1;
+        context.direct_shadow = (void *)(uintptr_t)1;
+        delete_fail = 1;
+        assert(!take(1, 0)); assert(!cfw_cleanup_session()); give(1);
+        assert(!context.video_control.start_guard && allocations_live == allocations &&
+               release_calls == freed && terminates == stopped);
+        assert(!context.direct_lease_deadline && !context.direct_active && !context.direct_pending &&
+               !context.direct_shadow && !context.direct_failed && !context.texture_cache &&
+               !context.framebuffer_shadow && !context.seq_count && !context.seq_cursor &&
+               !context.compass_forward && !context.wake_dashboard_pending && !context.wake_nonce &&
+               !context.wake_fallback_timer && context.seq_timer == 77 && context.diag_hide);
+        assert(stock_cache_releases == 1 && stock_shadow_releases == 1 && timer_stops == 2 &&
+               timer_deletes == 2 && buzzer_resets == 1 && microphone_cleanups == 1 &&
+               als_cleanups == 1 && compass_stops == 1 && dashboard_starts == 1);
+        await_reclaimed();
+        delete_fail = 0;
+        assert(!take(1, 0)); assert(!cfw_cleanup_session()); give(1);
+        assert(!context.seq_timer && timer_deletes == 3 && compass_stops == 1 && dashboard_starts == 1);
+        finish();
+    }
+    for (uint32_t allocation = 1; allocation <= 2; ++allocation) {
+        configure(); request_next = 0; pause_at = allocation;
+        control_command(p, VIDEO_CONTROL_START, 1);
+        assert(control_snapshot(p, 24, report) == VIDEO_CONTROL_ACCEPTED);
+        pthread_t controller;
+        assert(!pthread_create(&controller, 0, pool_run, 0));
+        assert(!pthread_mutex_lock(&preparation));
+        while (!preparing_paused)
+            assert(!pthread_cond_wait(&preparation_changed, &preparation));
+        assert(!pthread_mutex_unlock(&preparation));
+        assert(!take(1, 0)); assert(!cfw_cleanup_session()); give(1);
+        assert(!context.video_control.start_guard && !creates);
+        assert(!pthread_mutex_lock(&preparation)); resume_preparation = 1;
+        assert(!pthread_cond_broadcast(&preparation_changed));
+        assert(!pthread_mutex_unlock(&preparation));
+        assert(!pthread_join(controller, 0));
+        await_reclaimed(); finish();
+    }
+    puts("actual mode-11 effects, failed timer delete retry and deferred pending/live reclaim PASS");
+}
+static void lease_notifications(void) {
+    uint8_t p[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
+    configure(); request_next = 0;
+    service_context = 1;
+    video_control_notify_lease(1); video_control_notify_lease(0);
+    service_context = 0;
+    assert(!pool_calls && !allocations_live); /* Boot/idle has no video work. */
+    control_command(p, VIDEO_CONTROL_START, 1);
+    assert(control_snapshot(p, 24, report) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); await_ready();
+    uint32_t freed = release_calls, stopped = terminates, allocations = allocation_calls;
+    service_context = 1;
+    video_control_notify_lease(0); video_control_notify_lease(1);
+    service_context = 0;
+    assert(release_calls == freed && terminates == stopped && allocation_calls == allocations &&
+           context.video_control.start_guard); /* Notification only posts stable signals. */
+    assert(receive_header(1, 0, 0x67)); /* Refuse before deferred controller executes. */
+    assert(release_calls == freed && terminates == stopped);
+    await_reclaimed();
+    control_command(p, VIDEO_CONTROL_START, 2);
+    assert(control_snapshot(p, 24, report) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); await_ready();
+    uint32_t current = context.video_control.control_generation;
+    __atomic_store_n(&context.video_control.notify_release_generation, current - 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&context.video_control.notify_failed_generation, current - 1, __ATOMIC_RELEASE);
+    assert(!take(1, 0)); assert(video_controller_request_locked(VIDEO_CONTROLLER_LEASE)); give(1);
+    pool_drain(); assert(state() == VIDEO_READY); /* An older tag cannot stop this owner. */
+    const uint8_t acquire[] = {'F','C',1,5,0,0}, release[] = {'F','C',1,6,0,0};
+    faceclaw_apply_control(acquire, 6); pool_drain(); assert(state() == VIDEO_READY);
+    faceclaw_apply_control(release, 6); await_reclaimed();
+    assert(!context.direct_lease_deadline && !cfw_fb_lease_active());
+    context.direct_lease_deadline = tick() + 60000;
+    control_command(p, VIDEO_CONTROL_START, 3);
+    assert(control_snapshot(p, 24, report) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); await_ready();
+    __atomic_store_n(&context.direct_lease_deadline, tick() - 1, __ATOMIC_RELEASE);
+    faceclaw_apply_control(acquire, 6); await_reclaimed(); /* Renewing expired lease is a fresh session. */
+    control_command(p, VIDEO_CONTROL_START, 4);
+    assert(control_snapshot(p, 24, report) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); await_ready();
+    __atomic_store_n(&context.direct_lease_deadline, tick() - 1, __ATOMIC_RELEASE);
+    assert(!cfw_fb_lease_active()); await_reclaimed();
+    finish();
+    configure(); request_next = 0;
+    control_command(p, VIDEO_CONTROL_START, 1);
+    assert(control_snapshot(p, 24, report) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); await_ready();
+    freed = release_calls; stopped = terminates;
+    fail_pool = 1; service_context = 1;
+    video_control_notify_lease(0);
+    service_context = 0;
+    assert(release_calls == freed && terminates == stopped);
+    fail_pool = 0;
+    control_command(p, VIDEO_CONTROL_STATUS, 0);
+    assert(control_snapshot(p, 8, report) == VIDEO_CONTROL_ACCEPTED && report[3] == VIDEO_QUARANTINED &&
+           video_read32(report + 24) == VIDEO_CONTROL_DISPATCH && allocations_live && !terminates);
+    uint32_t limit = tick() + 3000;
+    while (!context.video.parked) { assert((int32_t)(limit - tick()) > 0); delay(1); }
+    pool_drain(); clean_quarantine();
+    puts("service-only atomic signals, old-generation refusal and actual FB lease release/expiry PASS");
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (!strcmp(argv[1], "normal")) normal();
@@ -906,6 +1064,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "queue-extension")) queue_extension();
     else if (!strcmp(argv[1], "recovery")) recovery();
     else if (!strcmp(argv[1], "inactivity")) inactivity();
+    else if (!strcmp(argv[1], "cleanup")) cleanup();
+    else if (!strcmp(argv[1], "lease-notifications")) lease_notifications();
     else assert(0);
     assert(!allocations_live && !task_live && !image_depth);
     printf("worker %s PASS\n", argv[1]);

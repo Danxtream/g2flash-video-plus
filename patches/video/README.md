@@ -174,3 +174,25 @@ bits, offset 72 is the gap deadline and offset 76 the first missing receipt
 sequence. Expected consumption at offset 52 and completed pictures at 64 remain
 separate. All pending queue bytes belong to the retired owner, never the next
 stream, and the worker still does not consume or decode them.
+
+### Upstream session cleanup
+
+Mode 11 cancels acceptance and pending START while holding the existing image
+mutex, then requests the controller without joining/freeing there. All existing
+shadow/cache, timer, buzzer, microphone, ALS, compass and dashboard cleanup
+effects remain. The controller leaves image/display locks before any video heap
+wrapper, worker wait, termination or reclamation.
+
+Existing framebuffer release/expiry and renewal paths post only atomic
+generation-tagged signals and copied zero-timeout task-pool jobs. They never
+take a mutex, touch an owned event/stack pointer or call the stock heap wrappers.
+Older notifications cannot cancel a newer stream. The controller folds release
+under the publication lock and wakes renewed lease waits. A dispatch/termination
+failure retains quarantine. No new timer, device-login or bonding hook is added.
+Unobservable connection loss falls back to the thirty-second inactivity bound;
+packet RESET/context reset and NACK rebuild transport, not the video owner.
+
+The native controller tests and mocked PC receive client cover cleanup, partial
+startup, generation tags, repeated sessions and paged MTU-23 replies. The client
+sequences NALs independently and asserts no consumption/presentation. Live
+device validation is separate from these mocks and boot/update-start checks.

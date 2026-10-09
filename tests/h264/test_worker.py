@@ -17,8 +17,26 @@ class WorkerTests(unittest.TestCase):
         cls.addClassCleanup(cls.temp.cleanup)
         directory = Path(cls.temp.name)
         cls.exe = directory / "worker-test"
+        # Compile the actual upstream cleanup/lease functions with stock-service
+        # mocks. Extraction avoids copying a second implementation into tests.
+        functions = []
+        for filename, names in (("patches/zlib_glue.c", ("cfw_cleanup_session",)),
+                                ("patches/settings_ext.c", ("cfw_fb_lease_active", "faceclaw_apply_control"))):
+            source = (ROOT / filename).read_text(encoding="utf-8")
+            for name in names:
+                import re
+                match = re.search(r"^[^\n]*\b" + name + r"\([^;\n]*\)\s*\{", source, re.M)
+                if match is None:
+                    raise AssertionError("missing production function: " + name)
+                opening = source.index("{", match.start())
+                depth, end = 1, opening + 1
+                while depth:
+                    depth += (source[end] == "{") - (source[end] == "}")
+                    end += 1
+                functions.append(source[match.start():end])
+        (directory / "upstream_cleanup.h").write_text("\n\n".join(functions) + "\n", encoding="utf-8")
         common = ["-O2", "-g", "-Wall", "-Wextra", "-Werror", "-pthread",
-                  "-fsanitize=address,undefined", "-fno-sanitize-recover=all"]
+                  "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-I" + str(directory)]
         objects = []
         for name, source, compiler, flags in (
             ("controller", "tests/h264/worker_test.c", "clang", ["-std=c11"]),
@@ -82,3 +100,9 @@ class WorkerTests(unittest.TestCase):
 
     def test_activity_and_gap_deadlines_park_without_polling_or_replay_renewal(self):
         self.check_case("inactivity")
+
+    def test_upstream_cleanup_keeps_effects_and_defers_video_reclaim(self):
+        self.check_case("cleanup")
+
+    def test_service_notifications_never_wait_or_free_and_ignore_old_generations(self):
+        self.check_case("lease-notifications")

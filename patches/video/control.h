@@ -30,6 +30,7 @@ enum {
     VIDEO_CONTROLLER_START = 1,
     VIDEO_CONTROLLER_STOP = 2,
     VIDEO_CONTROLLER_REAP = 4,
+    VIDEO_CONTROLLER_LEASE = 8,
     VIDEO_CONTROL_ACCEPTED = 0,
     VIDEO_CONTROL_FORMAT,
     VIDEO_CONTROL_STALE,
@@ -62,6 +63,8 @@ typedef struct {
     volatile uint32_t controller_serial, controller_job, controller_reasons;
     volatile uint32_t controller_park_token;
     volatile uint32_t controller_failed;
+    volatile uint32_t notify_release_generation, notify_lease_generation;
+    volatile uint32_t notify_failed_generation;
     uint8_t replay_next[2];
     video_control_replay replay[2][VIDEO_CONTROL_REPLAYS];
 } video_control_state;
@@ -71,6 +74,12 @@ typedef struct {
 int video_control_received(const uint8_t *, uint16_t, const cfw_message_route *);
 /* Request task-context reclamation under image_mutex, without waiting/freeing. */
 int video_controller_request_locked(uint32_t reasons);
+/* Mode-11 cancellation under image_mutex: wake/request only, never join/free. */
+void video_control_cancel_locked(void);
+/* Existing lease callbacks may hold display locks or run on service threads.
+ * Post stable generation-tagged signals with zero-timeout dispatch only: no
+ * mutex/event/heap access. The task-context controller folds them later. */
+void video_control_notify_lease(int released);
 /* Last worker notification uses only stable context and its generation token. */
 void video_controller_parked(uint32_t token);
 /* Refuse conflicting shadow/cache mutation while video preparation owns RAM. */
