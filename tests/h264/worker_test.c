@@ -556,7 +556,7 @@ static void controls(void) {
     configure(); request_next = 0;
     control_command(p, VIDEO_CONTROL_CAPABILITIES, 0);
     assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED);
-    assert(snapshot[1] == 3 && snapshot[3] == VIDEO_IDLE && !snapshot[50] &&
+    assert(snapshot[1] == 4 && snapshot[3] == VIDEO_IDLE && !snapshot[50] &&
            !allocations_live && !creates && !pool_calls);
     control_command(p, VIDEO_CONTROL_START, 1);
     context.texture_cache = (void *)(uintptr_t)1;
@@ -779,6 +779,116 @@ static void queue_extension(void) {
     }
     puts("explicit picture/DPB signal, single extension attempt and fragmented/OOM four-slot fallback PASS");
 }
+static int receive_header(uint32_t stream, uint32_t sequence, uint8_t header) {
+    uint8_t record[VIDEO_NAL_HEADER_BYTES + 2] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_NAL};
+    video_write32(record + 2, stream); video_write32(record + 6, sequence);
+    record[10] = header; record[11] = 0x55;
+    return video_control_received(record, sizeof(record), &control_route);
+}
+static void await_reclaimed(void) {
+    uint32_t limit = tick() + 3000;
+    while (state() != VIDEO_IDLE || pool_pending() || context.video_control.controller_job) {
+        pool_drain(); assert((int32_t)(limit - tick()) > 0); delay(1);
+    }
+    assert(!allocations_live && !task_live);
+}
+static void recovery(void) {
+    uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+    for (uint32_t mode = 0; mode < 5; ++mode) {
+        configure(); request_next = 0;
+        control_command(p, VIDEO_CONTROL_START, 1);
+        assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); await_ready();
+        video_owner *owner = context.video_owner;
+        assert(!receive_header(1, 2, 0x65));
+        uint32_t deadline = owner->queue.gap_deadline;
+        assert(deadline && owner->queue.gap_sequence == 0);
+        assert(!receive_header(1, 2, 0x65) && owner->queue.accepted == 1);
+        assert(!receive_header(1, 3, 0x41) && owner->queue.gap_deadline == deadline);
+        control_command(p, VIDEO_CONTROL_STATUS, 0);
+        assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED && snapshot[68] == 1 &&
+               video_read32(snapshot + 72) == deadline && !video_read32(snapshot + 76));
+        uint32_t fault;
+        if (!mode) {
+            assert(!receive_header(1, 0, 0x67));
+            assert(!receive_header(1, 1, 0x68));
+            assert(owner->queue.header_progress == 7 && !owner->queue.gap_deadline);
+            assert(!owner->queue.pictures && !owner->queue.consumed);
+            control_command(p, VIDEO_CONTROL_STOP, 1);
+            assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+            pool_drain(); finish(); continue;
+        } else if (mode == 1) {
+            assert(receive_header(1, 2, 0x64)); fault = VIDEO_CONTROL_CONFLICT;
+        } else if (mode == 2) {
+            assert(!take(1, 0));
+            __atomic_store_n(&owner->queue.gap_deadline, tick() - 1, __ATOMIC_RELEASE);
+            assert(!video_worker_receive_nal_locked(1, 0, (uint8_t[]){0x67}, 1, 1));
+            give(1); fault = VIDEO_CONTROL_GAP;
+        } else if (mode == 3) {
+            assert(receive_header(1, 0, 0x41)); fault = VIDEO_CONTROL_INPUT;
+        } else {
+            assert(receive_header(1, UINT32_MAX, 0x67)); fault = VIDEO_CONTROL_SEQUENCE;
+        }
+        await_reclaimed();
+        control_command(p, VIDEO_CONTROL_STATUS, 0);
+        assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED && snapshot[68] == 2 &&
+               video_read32(snapshot + 24) == fault && !snapshot[50]);
+        assert(receive_header(1, 0, 0x67));
+        control_command(p, VIDEO_CONTROL_START, 1);
+        assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_FORMAT);
+        control_command(p, VIDEO_CONTROL_START, 2);
+        assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); await_ready();
+        assert(!receive_header(2, 0, 0x67) && !receive_header(2, 1, 0x68) &&
+               !receive_header(2, 2, 0x65) && !receive_header(2, 3, 0x41));
+        assert(!receive_header(2, 0, 0x67)); /* Exact retry after new stream. */
+        owner = context.video_owner;
+        assert(owner->queue.header_progress == 7 && !owner->queue.consumed && !owner->queue.pictures);
+        control_command(p, VIDEO_CONTROL_STOP, 2);
+        assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); finish();
+    }
+    puts("gap repair, conflicts, late input, header recovery, wrap and fresh stream PASS");
+}
+static void inactivity(void) {
+    uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+    for (uint32_t kind = 0; kind < 3; ++kind) {
+        configure(); request_next = 0;
+        control_command(p, VIDEO_CONTROL_START, 1);
+        assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        if (!kind) {
+            __atomic_store_n(&context.video_control.active_deadline, tick() - 1, __ATOMIC_RELEASE);
+            pool_drain(); assert(!creates && !allocations_live);
+        } else {
+            pool_drain(); await_ready();
+            control_command(p, VIDEO_CONTROL_STATUS, 0);
+            assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED);
+            uint32_t deadline = tick() + 40;
+            assert(!take(1, 0));
+            __atomic_store_n(&context.video_control.active_deadline, deadline, __ATOMIC_RELEASE);
+            video_worker_wake_locked(context.video.token, VIDEO_WAKE_INPUT); give(1);
+            if (kind == 1) {
+                assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED);
+                assert(context.video_control.active_deadline == deadline); /* Cached status replay. */
+            } else {
+                control_command(p, VIDEO_CONTROL_STATUS, 0);
+                assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED &&
+                       (int32_t)(context.video_control.active_deadline - deadline) > 20000);
+                assert(!take(1, 0));
+                video_owner *owner = context.video_owner;
+                __atomic_store_n(&owner->queue.gap_deadline, tick() + 20, __ATOMIC_RELEASE);
+                video_worker_wake_locked(context.video.token, VIDEO_WAKE_INPUT); give(1);
+            }
+            await_reclaimed();
+        }
+        control_command(p, VIDEO_CONTROL_STATUS, 0);
+        assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED && snapshot[68] == 2 &&
+               video_read32(snapshot + 24) == (kind == 2 ? VIDEO_CONTROL_GAP : VIDEO_CONTROL_INACTIVITY));
+        finish();
+    }
+    puts("delayed START, nonrenewing replay, fresh activity and event-only deadlines PASS");
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (!strcmp(argv[1], "normal")) normal();
@@ -794,6 +904,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "control-failures")) control_failures();
     else if (!strcmp(argv[1], "nal-input")) nal_input();
     else if (!strcmp(argv[1], "queue-extension")) queue_extension();
+    else if (!strcmp(argv[1], "recovery")) recovery();
+    else if (!strcmp(argv[1], "inactivity")) inactivity();
     else assert(0);
     assert(!allocations_live && !task_live && !image_depth);
     printf("worker %s PASS\n", argv[1]);

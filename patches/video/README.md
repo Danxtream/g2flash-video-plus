@@ -150,3 +150,27 @@ outside image/display locks, with fresh live heap/reserve checks. The two slots
 publish together; failure restores the prior cap and keeps four slots. This
 receive-only firmware never emits that notification. Native fake consumers
 exercise the extension and separate NAL/picture counters.
+
+### Gap recovery
+
+Future NALs start a five-second missing-input deadline. Later inputs, retries
+and status queries cannot extend it; input is checked before copying so a late
+missing NAL cannot repair an expired stream. Thirty seconds without accepted
+NAL input or a fresh owner-origin status/capability request retires a session;
+cached control replay does not renew it. Event waits use the nearest activity,
+gap or existing framebuffer-lease deadline, including millisecond tick wrap.
+No timer, polling loop or display wait is added.
+
+Conflicting duplicates, sequence exhaustion, invalid header progression and
+expired gaps stop acceptance and require fresh START with a larger stream ID.
+The controller reclaims only after cancellation, pin drainage and worker park;
+allocation, joins and frees stay outside image/display locks. A failed reaper
+keeps quarantine. Header receipt requires SPS, PPS and IDR before non-IDR
+slices; it does not validate their contents or claim decoded pictures.
+
+Status stage four remains receive-only. Byte 68 is recovery state (0 clear,
+1 waiting, 2 needs a fresh stream), byte 69 records SPS/PPS/IDR header receipt
+bits, offset 72 is the gap deadline and offset 76 the first missing receipt
+sequence. Expected consumption at offset 52 and completed pictures at 64 remain
+separate. All pending queue bytes belong to the retired owner, never the next
+stream, and the worker still does not consume or decode them.

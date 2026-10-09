@@ -64,14 +64,18 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
         }
         uint32_t reasons = __atomic_exchange_n(&s->controller_reasons, 0, __ATOMIC_ACQ_REL);
         uint32_t guard = s->start_guard;
+        if (guard && !video_control_generation_valid(ctx, guard)) {
+            s->start_guard = guard = 0;
+            s->error = VIDEO_CONTROL_INACTIVITY;
+            reasons &= ~VIDEO_CONTROLLER_START;
+        }
         uint32_t parked = __atomic_exchange_n(&s->controller_park_token, 0, __ATOMIC_ACQ_REL);
         video_fold_signals(ctx);
         int current = parked && parked == ctx->video.token;
         if (current) {
             s->start_guard = 0;
             uint32_t fault = __atomic_load_n(&ctx->video.fault, __ATOMIC_ACQUIRE);
-            if (fault) s->error = fault >= G2_H264_FAIL_ALLOC && fault <= G2_H264_FAIL_LENGTH ?
-                VIDEO_CONTROL_MEMORY : VIDEO_CONTROL_DECODER;
+            if (fault) s->error = video_fault_reason(fault);
         }
         video_control_give(ctx);
         int stopped = 1;
@@ -90,7 +94,8 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
         if (!stopped || ctx->video.state == VIDEO_QUARANTINED)
             s->error = VIDEO_CONTROL_QUARANTINE;
         else if (guard == s->start_guard && reasons & VIDEO_CONTROLLER_START && !started) {
-            s->error = VIDEO_CONTROL_MEMORY;
+            s->error = video_control_generation_valid(ctx, guard) ?
+                VIDEO_CONTROL_MEMORY : VIDEO_CONTROL_INACTIVITY;
             s->start_guard = 0;
         }
         if (!__atomic_load_n(&s->controller_reasons, __ATOMIC_ACQUIRE)) {

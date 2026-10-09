@@ -47,6 +47,35 @@ static int video_lease_valid(customCfwContext *ctx) {
     return deadline && (int32_t)(deadline - VIDEO_TICK) > 0;
 }
 
+static uint32_t video_fault_reason(uint32_t fault) {
+    switch (fault) {
+    case VIDEO_FAULT_GAP: return VIDEO_CONTROL_GAP;
+    case VIDEO_FAULT_INACTIVITY: return VIDEO_CONTROL_INACTIVITY;
+    case VIDEO_FAULT_FORMAT: return VIDEO_CONTROL_INPUT;
+    case VIDEO_FAULT_CONFLICT: return VIDEO_CONTROL_CONFLICT;
+    case VIDEO_FAULT_SEQUENCE: return VIDEO_CONTROL_SEQUENCE;
+    default: return fault >= G2_H264_FAIL_ALLOC && fault <= G2_H264_FAIL_LENGTH ?
+        VIDEO_CONTROL_MEMORY : VIDEO_CONTROL_DECODER;
+    }
+}
+static int video_control_generation_valid(customCfwContext *ctx, uint32_t generation) {
+    uint32_t deadline = __atomic_load_n(&ctx->video_control.active_deadline, __ATOMIC_ACQUIRE);
+    return !generation || (ctx->video_control.start_guard == generation && deadline &&
+                           (int32_t)(deadline - VIDEO_TICK) > 0);
+}
+static void video_fault_locked(customCfwContext *ctx, uint32_t fault) {
+    ctx->video_control.start_guard = 0;
+    ctx->video_control.error = video_fault_reason(fault);
+    __atomic_fetch_and(&ctx->video_control.controller_reasons, ~VIDEO_CONTROLLER_START,
+                       __ATOMIC_ACQ_REL);
+    if (ctx->video.state != VIDEO_IDLE) {
+        __atomic_store_n(&ctx->video.fault, fault, __ATOMIC_RELEASE);
+        video_worker_request_stop_locked();
+    }
+    if (!video_controller_request_locked(VIDEO_CONTROLLER_STOP) && ctx->video.token)
+        __atomic_store_n(&ctx->video_quarantine_token, ctx->video.token, __ATOMIC_RELEASE);
+}
+
 static void video_park_owner(video_owner *owner, uint32_t fault) __attribute__((noreturn));
 static void video_park_owner(video_owner *owner, uint32_t fault) {
     uint32_t wake = owner->wake, complete = owner->complete;
@@ -102,9 +131,23 @@ static void video_worker_entry(void *argument) {
             __atomic_store_n(&ctx->video.cancel, 1, __ATOMIC_RELEASE);
             break;
         }
-        /* Sticky event bits close the predicate-to-wait race. Renewals wake
-         * this wait; the lease deadline, rather than a heartbeat, bounds it. */
-        uint32_t result = VIDEO_OS_EVENT_WAIT(owner->wake, VIDEO_WAKE_ALL, 0, deadline - now);
+        uint32_t timeout = deadline - now;
+        if (owner->control_generation) {
+            uint32_t activity = __atomic_load_n(&ctx->video_control.active_deadline, __ATOMIC_ACQUIRE);
+            uint32_t gap = __atomic_load_n(&owner->queue.gap_deadline, __ATOMIC_ACQUIRE);
+            uint32_t fault = !activity || (int32_t)(activity - now) <= 0 ?
+                VIDEO_FAULT_INACTIVITY : gap && (int32_t)(gap - now) <= 0 ? VIDEO_FAULT_GAP : 0;
+            if (fault) {
+                __atomic_store_n(&ctx->video.fault, fault, __ATOMIC_RELEASE);
+                __atomic_store_n(&ctx->video.cancel, 1, __ATOMIC_RELEASE);
+                break;
+            }
+            if (activity - now < timeout) timeout = activity - now;
+            if (gap && gap - now < timeout) timeout = gap - now;
+        }
+        /* Sticky wake bits close the predicate-to-wait race. Only the nearest
+         * actual lease, gap or activity deadline bounds this event wait. */
+        uint32_t result = VIDEO_OS_EVENT_WAIT(owner->wake, VIDEO_WAKE_ALL, 0, timeout);
         if ((result & VIDEO_EVENT_ERROR) && result != VIDEO_EVENT_TIMEOUT)
             video_runtime_fail(VIDEO_FAULT_EVENT);
     }
@@ -243,7 +286,7 @@ int video_worker_start_guarded(uint32_t ingress_allowance, uint32_t generation) 
     video_fold_signals(ctx);
     int eligible = !ctx->texture_cache && video_lease_valid(ctx) &&
                    ctx->video.state == VIDEO_IDLE &&
-                   (!generation || ctx->video_control.start_guard == generation);
+                   video_control_generation_valid(ctx, generation);
     uint32_t missing = ctx->framebuffer_shadow == 0;
     video_control_give(ctx);
     if (!eligible) return 0;
@@ -278,7 +321,7 @@ int video_worker_start_guarded(uint32_t ingress_allowance, uint32_t generation) 
     if (!video_control_take(ctx)) { video_free_owner(owner); return 0; }
     video_fold_signals(ctx);
     uint32_t token = !ctx->texture_cache && video_lease_valid(ctx) &&
-        (!generation || ctx->video_control.start_guard == generation) &&
+        video_control_generation_valid(ctx, generation) &&
         (ctx->framebuffer_shadow == 0) == missing ? video_lifecycle_claim(&ctx->video) : 0;
     if (token) {
         owner->token = token;
@@ -329,7 +372,7 @@ int video_worker_start_guarded(uint32_t ingress_allowance, uint32_t generation) 
     int admitted = video_storage_admit(&owner->storage);
     if (!video_control_take(ctx)) { video_abort_start(ctx, token); return 0; }
     if (!admitted || ctx->texture_cache || !video_lease_valid(ctx) ||
-        (generation && ctx->video_control.start_guard != generation) ||
+        !video_control_generation_valid(ctx, generation) ||
         (ctx->framebuffer_shadow == 0) != missing ||
         !video_lifecycle_publish(&ctx->video, token)) {
         video_control_give(ctx); video_abort_start(ctx, token); return 0;
@@ -347,15 +390,28 @@ int video_worker_receive_nal_locked(uint32_t stream, uint32_t sequence,
                                       const uint8_t *p, uint16_t n, uint8_t origin) {
     customCfwContext *ctx = peekCustomCfwContext();
     video_owner *owner = ctx ? ctx->video_owner : 0;
-    if (!owner || !p || !n || n > VIDEO_RAW_NAL_BYTES || (p[0] & 0x80) ||
-        !(p[0] & 31) || (p[0] & 31) > 23 || !video_lease_valid(ctx) ||
+    if (!owner || !p || !n || n > VIDEO_RAW_NAL_BYTES || !video_lease_valid(ctx) ||
         !owner->control_generation || origin != ctx->video_control.owner_origin ||
         stream != ctx->video_control.stream ||
         ctx->video_control.start_guard != owner->control_generation ||
         video_lifecycle_state(&ctx->video) != VIDEO_READY ||
         video_lifecycle_cancelled(&ctx->video, owner->token)) return 0;
-    int copied = video_queue_push(&owner->queue, sequence, p, n);
-    if (copied > 0) video_worker_wake_locked(owner->token, VIDEO_WAKE_INPUT);
+    uint32_t now = VIDEO_TICK;
+    uint32_t activity = __atomic_load_n(&ctx->video_control.active_deadline, __ATOMIC_ACQUIRE);
+    uint32_t fault = !activity || (int32_t)(activity - now) <= 0 ? VIDEO_FAULT_INACTIVITY :
+        !video_queue_watch(&owner->queue, now) ? VIDEO_FAULT_GAP :
+        (p[0] & 0x80) || !(p[0] & 31) || (p[0] & 31) > 23 ? VIDEO_FAULT_FORMAT : 0;
+    int copied = fault ? 0 : video_queue_push(&owner->queue, sequence, p, n);
+    if (copied == VIDEO_QUEUE_CONFLICT) fault = VIDEO_FAULT_CONFLICT;
+    if (copied == VIDEO_QUEUE_WRAP) fault = VIDEO_FAULT_SEQUENCE;
+    if (copied > 0 && !video_queue_headers(&owner->queue)) fault = VIDEO_FAULT_FORMAT;
+    if (copied > 0 && !video_queue_watch(&owner->queue, VIDEO_TICK)) fault = VIDEO_FAULT_GAP;
+    if (fault) { video_fault_locked(ctx, fault); return 0; }
+    if (copied > 0) {
+        uint32_t deadline = now + VIDEO_INACTIVITY_LIMIT_MS;
+        __atomic_store_n(&ctx->video_control.active_deadline, deadline ? deadline : 1, __ATOMIC_RELEASE);
+        video_worker_wake_locked(owner->token, VIDEO_WAKE_INPUT);
+    }
     return copied;
 }
 
@@ -403,7 +459,9 @@ int video_worker_queue_report_locked(video_queue_report *report) {
     if (!owner || ctx->video.preparing || !ctx->video.published) return 0;
     video_nal_queue *q = &owner->queue;
     *report = (video_queue_report){q->capacity, video_queue_credits(q),
-                                  q->accepted, q->consumed, q->expected, q->pictures};
+                                  q->accepted, q->consumed, q->expected, q->pictures,
+                                  __atomic_load_n(&q->gap_deadline, __ATOMIC_ACQUIRE),
+                                  q->gap_sequence, q->header_progress};
     return 1;
 }
 

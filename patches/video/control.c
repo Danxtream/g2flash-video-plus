@@ -24,7 +24,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     uint8_t *p = entry->snapshot;
     bzero(p, VIDEO_STATUS_BYTES);
     p[0] = VIDEO_PROTOCOL_VERSION;
-    p[1] = 3; /* Ordered NAL ingress; no live consumer or presentation. */
+    p[1] = 4; /* Gap-bounded receipt; no live consumer or presentation. */
     p[2] = entry->result;
     p[3] = video_lifecycle_state(&ctx->video);
     if (p[3] == VIDEO_IDLE && s->start_guard) p[3] = VIDEO_STARTING;
@@ -50,14 +50,29 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     video_write32(p + 56, queue.accepted);
     video_write32(p + 60, queue.consumed);
     video_write32(p + 64, queue.pictures);
+    p[68] = s->error >= VIDEO_CONTROL_GAP ? 2 : queue.gap_deadline ? 1 : 0;
+    p[69] = queue.header_progress;
+    video_write32(p + 72, queue.gap_deadline);
+    video_write32(p + 76, queue.gap_sequence);
 }
 
 static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
                                uint32_t n, uint8_t origin) {
     video_control_state *s = &ctx->video_control;
     uint8_t op = p[1];
-    if (op == VIDEO_CONTROL_CAPABILITIES || op == VIDEO_CONTROL_STATUS)
-        return n == VIDEO_CONTROL_HEADER_BYTES ? VIDEO_CONTROL_ACCEPTED : VIDEO_CONTROL_FORMAT;
+    if (op == VIDEO_CONTROL_CAPABILITIES || op == VIDEO_CONTROL_STATUS) {
+        if (n != VIDEO_CONTROL_HEADER_BYTES) return VIDEO_CONTROL_FORMAT;
+        if (s->start_guard && origin == s->owner_origin) {
+            if (!video_control_generation_valid(ctx, s->start_guard))
+                video_fault_locked(ctx, VIDEO_FAULT_INACTIVITY);
+            else {
+                uint32_t deadline = VIDEO_TICK + VIDEO_INACTIVITY_LIMIT_MS;
+                __atomic_store_n(&s->active_deadline, deadline ? deadline : 1, __ATOMIC_RELEASE);
+                video_worker_wake_locked(ctx->video.token, VIDEO_WAKE_INPUT);
+            }
+        }
+        return VIDEO_CONTROL_ACCEPTED;
+    }
     if (op == VIDEO_CONTROL_START) {
         if (n != VIDEO_START_BYTES || p[12] != (VIDEO_FRAME_WIDTH & 255) ||
             p[13] != VIDEO_FRAME_WIDTH >> 8 || p[14] != VIDEO_FRAME_HEIGHT || p[15] ||
@@ -74,6 +89,8 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         s->interval = interval;
         s->owner_origin = origin;
         s->start_guard = ++s->control_generation;
+        uint32_t deadline = VIDEO_TICK + VIDEO_INACTIVITY_LIMIT_MS;
+        __atomic_store_n(&s->active_deadline, deadline ? deadline : 1, __ATOMIC_RELEASE);
         s->error = 0;
         if (!video_controller_request_locked(VIDEO_CONTROLLER_START)) {
             s->start_guard = 0; s->error = VIDEO_CONTROL_DISPATCH;

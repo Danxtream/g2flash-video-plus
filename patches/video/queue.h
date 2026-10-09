@@ -6,6 +6,10 @@ enum {
     VIDEO_QUEUE_CONFLICT = -1,
     VIDEO_QUEUE_STALE = -2,
     VIDEO_QUEUE_WRAP = -3,
+    VIDEO_GAP_LIMIT_MS = 5000,
+    VIDEO_HEADERS_SPS = 1,
+    VIDEO_HEADERS_PPS = 2,
+    VIDEO_HEADERS_IDR = 4,
     VIDEO_QUEUE_INITIAL = 4,
     VIDEO_QUEUE_MAX = 6,
     VIDEO_SLOT_BYTES = 4096,
@@ -21,6 +25,8 @@ typedef struct {
 } video_nal_slot;
 typedef struct {
     uint32_t token, accepted, consumed, expected, pictures;
+    volatile uint32_t gap_deadline;
+    uint32_t gap_sequence, header_sequence, header_progress;
     uint8_t capacity, count;
     video_nal_slot slots[VIDEO_QUEUE_MAX];
 } video_nal_queue;
@@ -45,6 +51,12 @@ uint32_t video_queue_credits(const video_nal_queue *);
  * sequence. Positive means accepted or byte-identical replay, zero is full or
  * outside the window; negative distinguishes conflict/stale/wrap. */
 int video_queue_push(video_nal_queue *, uint32_t sequence, const uint8_t *, uint16_t);
+/* Check before input publication and after consumer release. A retry cannot
+ * repair an expired gap. Future/duplicate input never extends its deadline. */
+int video_queue_watch(video_nal_queue *, uint32_t now);
+/* Walk contiguous NAL headers only. Receipt is not semantic decoder validation;
+ * require parameter sets and IDR before non-IDR slices in a fresh stream. */
+int video_queue_headers(video_nal_queue *);
 /* A later decoder consumer borrows only the expected owned slot, until release.
  * Receive-only firmware deliberately never calls these two consumer functions. */
 int video_queue_claim(video_nal_queue *, uint32_t token, video_nal_view *);

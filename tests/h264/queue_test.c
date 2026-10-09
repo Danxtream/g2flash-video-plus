@@ -49,8 +49,56 @@ static void ordering(void) {
     puts("all future permutations, reserved expected slot, exact retry history and wrap refusal PASS");
 }
 
+static void recovery(void) {
+    video_nal_queue q;
+    uint8_t slots[4][VIDEO_SLOT_BYTES];
+    const uint8_t headers[] = {0x67, 0x68, 0x65, 0x41};
+    for (uint32_t wrap = 0; wrap < 2; ++wrap) {
+        uint32_t now = wrap ? UINT32_MAX - 2499 : 100;
+        video_queue_init(&q, 29);
+        for (uint32_t i = 0; i < 4; ++i) assert(video_queue_attach(&q, slots[i]));
+        assert(video_queue_push(&q, 2, headers + 2, 1) == 1);
+        assert(video_queue_watch(&q, now) && video_queue_headers(&q));
+        uint32_t deadline = q.gap_deadline;
+        assert(deadline && q.gap_sequence == 0 && !q.header_progress);
+        assert(video_queue_push(&q, 3, headers + 3, 1) == 1);
+        assert(video_queue_push(&q, 2, headers + 2, 1) == 2);
+        assert(video_queue_watch(&q, now + 100) && q.gap_deadline == deadline);
+        assert(video_queue_push(&q, 0, headers, 1) == 1);
+        assert(video_queue_headers(&q) && q.header_progress == VIDEO_HEADERS_SPS);
+        assert(video_queue_watch(&q, now + 200) && q.gap_sequence == 1 && q.gap_deadline == deadline);
+        assert(video_queue_watch(&q, deadline - 1));
+        assert(!video_queue_watch(&q, deadline));
+        /* Even a late complete queue cannot erase the expired retry deadline. */
+        assert(video_queue_push(&q, 1, headers + 1, 1) == 1);
+        assert(!video_queue_watch(&q, deadline));
+        video_queue_init(&q, 30);
+        for (uint32_t i = 0; i < 4; ++i) assert(video_queue_attach(&q, slots[i]));
+        assert(video_queue_push(&q, 2, headers + 2, 1) == 1);
+        assert(video_queue_watch(&q, now));
+        assert(video_queue_push(&q, 0, headers, 1) == 1);
+        assert(video_queue_push(&q, 1, headers + 1, 1) == 1);
+        assert(video_queue_headers(&q) && q.header_progress == 7 && q.header_sequence == 3);
+        assert(video_queue_watch(&q, now + 1) && !q.gap_deadline);
+    }
+    for (uint32_t type = 0; type < 3; ++type) {
+        video_queue_init(&q, 31);
+        for (uint32_t i = 0; i < 4; ++i) assert(video_queue_attach(&q, slots[i]));
+        assert(video_queue_push(&q, 0, headers + type + 1, 1) == 1);
+        assert(!video_queue_headers(&q)); /* PPS, IDR and P need predecessors. */
+    }
+    video_queue_init(&q, 32);
+    for (uint32_t i = 0; i < 4; ++i) assert(video_queue_attach(&q, slots[i]));
+    const uint8_t aud = 9, sei = 6;
+    assert(video_queue_push(&q, 0, &aud, 1) == 1 && video_queue_headers(&q));
+    assert(video_queue_push(&q, 1, &sei, 1) == 1 && video_queue_headers(&q));
+    assert(q.header_sequence == 2 && !q.header_progress && !q.pictures);
+    puts("gap retry deadline, tick wrap, fresh parameter order and nonpicture headers PASS");
+}
+
 int main(void) {
     ordering();
+    recovery();
     video_nal_queue q, other;
     uint8_t slots[VIDEO_QUEUE_INITIAL][VIDEO_SLOT_BYTES];
     uint8_t peer[VIDEO_QUEUE_INITIAL][VIDEO_SLOT_BYTES];

@@ -26,6 +26,7 @@ enum {
     VIDEO_FRAME_DPB = 2,
     VIDEO_INTERVAL_MIN = 10,
     VIDEO_INTERVAL_MAX = 1000,
+    VIDEO_INACTIVITY_LIMIT_MS = 30000,
     VIDEO_CONTROLLER_START = 1,
     VIDEO_CONTROLLER_STOP = 2,
     VIDEO_CONTROLLER_REAP = 4,
@@ -37,7 +38,12 @@ enum {
     VIDEO_CONTROL_MEMORY,
     VIDEO_CONTROL_DISPATCH,
     VIDEO_CONTROL_QUARANTINE,
-    VIDEO_CONTROL_DECODER
+    VIDEO_CONTROL_DECODER,
+    VIDEO_CONTROL_GAP,
+    VIDEO_CONTROL_INACTIVITY,
+    VIDEO_CONTROL_INPUT,
+    VIDEO_CONTROL_CONFLICT,
+    VIDEO_CONTROL_SEQUENCE
 };
 
 /* Cached exact requests and frozen snapshots make retries idempotent, including
@@ -52,6 +58,7 @@ typedef struct {
 typedef struct {
     uint32_t request_high[2], stream_high, stream, interval;
     uint32_t start_guard, control_generation, error, owner_origin;
+    volatile uint32_t active_deadline;
     volatile uint32_t controller_serial, controller_job, controller_reasons;
     volatile uint32_t controller_park_token;
     volatile uint32_t controller_failed;

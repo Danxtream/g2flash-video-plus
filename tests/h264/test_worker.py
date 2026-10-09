@@ -76,3 +76,9 @@ class WorkerTests(unittest.TestCase):
 
     def test_completed_picture_and_full_dpb_admit_optional_slots_or_retain_four(self):
         self.check_case("queue-extension")
+
+    def test_unrecoverable_input_requires_fresh_stream_and_parameter_headers(self):
+        self.check_case("recovery")
+
+    def test_activity_and_gap_deadlines_park_without_polling_or_replay_renewal(self):
+        self.check_case("inactivity")

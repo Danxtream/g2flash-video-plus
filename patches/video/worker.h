@@ -29,7 +29,12 @@ enum {
     VIDEO_FAULT_OWNERSHIP,
     VIDEO_FAULT_STACK,
     VIDEO_FAULT_ABI,
-    VIDEO_FAULT_EVENT
+    VIDEO_FAULT_EVENT,
+    VIDEO_FAULT_GAP,
+    VIDEO_FAULT_INACTIVITY,
+    VIDEO_FAULT_FORMAT,
+    VIDEO_FAULT_CONFLICT,
+    VIDEO_FAULT_SEQUENCE
 };
 
 /* Completed-owner diagnostics persist after teardown. valid is false while an
@@ -40,7 +45,10 @@ typedef struct {
     uint32_t free_bytes[3], max_alloc[3]; /* cached, display, other heap */
 } video_worker_report;
 
-typedef struct { uint32_t capacity, credits, accepted, consumed, expected, pictures; } video_queue_report;
+typedef struct {
+    uint32_t capacity, credits, accepted, consumed, expected, pictures;
+    uint32_t gap_deadline, gap_sequence, header_progress;
+} video_queue_report;
 /* Worker-only, outside image/display locks, after a completed decoder call.
  * dpb_full comes from decoder state, never packet count. One failed extension
  * preserves the four slots and all reserves; receive-only firmware never calls. */
