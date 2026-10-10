@@ -6,9 +6,9 @@
  *  1. Printf trace (SUB0H264_TRACE=1): compile-time enabled, zero cost otherwise.
  *     Logs to stdout with runtime MB/block filtering.
  *
- *  2. Callback trace: always available. Set a callback to capture trace events
- *     programmatically (e.g., in unit tests). The callback is checked per-MB
- *     so the cost is one pointer test per MB when no callback is set.
+ *  2. Callback trace (SUB0H264_ENABLE_CALLBACK_TRACE=1, the default): set a
+ *     callback to capture structured events, for example in unit tests.
+ *     Set the switch to zero to omit event calls and callback storage.
  *
  *  Usage in decoder:
  *    trace_.onMbStart(mbX, mbY, mbType, bitOffset);
@@ -29,6 +29,20 @@
 #include <cstdio>
 #include <cstdarg>
 #include <functional>
+
+// Preserve upstream tracing unless a caller explicitly selects a smaller build.
+#ifndef SUB0H264_ENABLE_CALLBACK_TRACE
+#define SUB0H264_ENABLE_CALLBACK_TRACE 1
+#endif
+
+// Remove argument construction too; split modules cannot inline empty helpers.
+#if SUB0H264_ENABLE_CALLBACK_TRACE || SUB0H264_TRACE
+#define SUB0H264_TRACE_EVENTS_ENABLED 1
+#define SUB0H264_TRACE_EVENT(...) do { __VA_ARGS__; } while (false)
+#else
+#define SUB0H264_TRACE_EVENTS_ENABLED 0
+#define SUB0H264_TRACE_EVENT(...) ((void)0)
+#endif
 
 namespace sub0h264 {
 
@@ -95,9 +109,8 @@ using TraceCallback = std::function<void(const TraceEvent&)>;
 
 /** Runtime trace filter + structured event logger.
  *
- *  Always compiled in (not gated by SUB0H264_TRACE).
  *  Printf output is only available with SUB0H264_TRACE=1.
- *  Callback is always available.
+ *  Callback storage and events follow SUB0H264_ENABLE_CALLBACK_TRACE.
  */
 struct DecodeTrace
 {
@@ -111,7 +124,11 @@ struct DecodeTrace
     {
         if (filterMbX != cTraceAll && filterMbX != mbX) return false;
         if (filterMbY != cTraceAll && filterMbY != mbY) return false;
+#if SUB0H264_ENABLE_CALLBACK_TRACE
         return enabled || callback_;
+#else
+        return enabled;
+#endif
     }
 
     /** Should we trace this specific block? */
@@ -123,13 +140,30 @@ struct DecodeTrace
     }
 
     /** Set a callback to receive structured trace events. */
-    void setCallback(TraceCallback cb) noexcept { callback_ = std::move(cb); }
+    void setCallback([[maybe_unused]] TraceCallback cb) noexcept
+    {
+#if SUB0H264_ENABLE_CALLBACK_TRACE
+        callback_ = std::move(cb);
+#endif
+    }
 
     /** Clear the trace callback. */
-    void clearCallback() noexcept { callback_ = nullptr; }
+    void clearCallback() noexcept
+    {
+#if SUB0H264_ENABLE_CALLBACK_TRACE
+        callback_ = nullptr;
+#endif
+    }
 
     /** Has a callback been set? */
-    bool hasCallback() const noexcept { return callback_ != nullptr; }
+    bool hasCallback() const noexcept
+    {
+#if SUB0H264_ENABLE_CALLBACK_TRACE
+        return callback_ != nullptr;
+#else
+        return false;
+#endif
+    }
 
     // ── Structured trace events ─────────────────────────────────────
 
@@ -292,11 +326,15 @@ struct DecodeTrace
     }
 
 // private: // Made public for direct trace emission from decoder code
+#if SUB0H264_ENABLE_CALLBACK_TRACE
     TraceCallback callback_;
+#endif
 
-    void emit(const TraceEvent& e) const noexcept
+    void emit([[maybe_unused]] const TraceEvent& e) const noexcept
     {
+#if SUB0H264_ENABLE_CALLBACK_TRACE
         if (callback_) callback_(e);
+#endif
     }
 };
 

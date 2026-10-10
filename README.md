@@ -375,6 +375,10 @@ The decoder modifications include the build-time
 disabling it omits U/V reconstruction and storage while retaining chroma syntax
 parsing and entropy contexts needed to decode Y correctly.
 
+`SUB0H264_ENABLE_CALLBACK_TRACE` also defaults to enabled. Disabling it
+omits structured event calls and callback storage; `SUB0H264_TRACE` still
+controls printf tracing independently.
+
 > **Patent Notice:** H.264/AVC may be covered by patents in some jurisdictions.
 > The patent portfolio is administered by [Via Licensing Alliance](https://via-la.com/licensing-programs/avc-h-264/)
 > (formerly MPEG LA). Most patents have expired; the last known US patents expire

@@ -774,11 +774,11 @@ private:
         // Compute effective QP
         int32_t sliceQp = pps->picInitQp_ + sh.sliceQpDelta_;
 
-        // Emit SliceStart trace event (always — cheap callback check).
+        // Emit SliceStart when structured tracing is included.
         // The callback decides whether to enable entropy tracing for this slice.
-        trace_.onSliceStart(cabacSliceCount_,
+        SUB0H264_TRACE_EVENT(trace_.onSliceStart(cabacSliceCount_,
             static_cast<uint32_t>(sh.sliceType_),
-            pps->isCabac(), sliceQp);
+            pps->isCabac(), sliceQp));
 
         // Reference frame is obtained AFTER buildRefListL0() for P-slices
         // (moved below to avoid using stale L0 list from previous frame)
@@ -802,8 +802,8 @@ private:
             // Emit CabacInit trace event and bind trace to the engine.
             // The callback decides whether to act on this slice's bins.
 #if SUB0H264_TRACE
-            trace_.onCabacInit(cabacSliceCount_, cabacEngine_.range(),
-                               cabacEngine_.offset());
+            SUB0H264_TRACE_EVENT(trace_.onCabacInit(cabacSliceCount_, cabacEngine_.range(),
+                               cabacEngine_.offset()));
             cabacEngine_.setTrace(&trace_, cabacCtx_.data());
 #endif
             ++cabacSliceCount_;
@@ -850,8 +850,8 @@ private:
                         mbX, mbY, cabacEngine_.range(), cabacEngine_.offset(),
                         static_cast<uint32_t>(cabacEngine_.bitPosition()), mbQp);
 #endif
-                    trace_.onMbStart(mbX, mbY, 200U,
-                                     static_cast<uint32_t>(cabacEngine_.bitPosition()));
+                    SUB0H264_TRACE_EVENT(trace_.onMbStart(mbX, mbY, 200U,
+                                     static_cast<uint32_t>(cabacEngine_.bitPosition())));
                     int64_t cT0 = profile_ ? sub0h264TimerUs() : 0;
                     if (!decodeCabacIntraMb(br, *sps, *pps, sh, mbQp, mbX, mbY))
                         break;
@@ -882,7 +882,7 @@ private:
                     if (profile_) profile_->intraPredUs += sub0h264TimerUs() - intraT0;
                 }
                 // Trace per-MB bit offset for alignment debugging (type 201)
-                trace_.onMbStart(mbX, mbY, 201U, static_cast<uint32_t>(br.bitOffset()));
+                SUB0H264_TRACE_EVENT(trace_.onMbStart(mbX, mbY, 201U, static_cast<uint32_t>(br.bitOffset())));
                 // Store accumulated QP for deblocking pass — ITU-T H.264 §8.7.2.2.
                 mbQps_[mbAddr] = mbQp;
             }
@@ -924,8 +924,8 @@ private:
 
                     // Emit CABAC MB-start trace (a=200, b=bitPosition).
                     // Allows tests to verify the CABAC bit-position at the start of each MB.
-                    trace_.onMbStart(mbX, mbY, 200U,
-                                     static_cast<uint32_t>(cabacEngine_.bitPosition()));
+                    SUB0H264_TRACE_EVENT(trace_.onMbStart(mbX, mbY, 200U,
+                                     static_cast<uint32_t>(cabacEngine_.bitPosition())));
 
                     // Decode mb_skip_flag — §9.3.3.1.1.1
                     bool leftSkip, topSkip;
@@ -1028,13 +1028,13 @@ private:
                     if (needSkipRun)
                     {
                         mbSkipRun = br.readUev();
-                        trace_.onMbStart(mbX, mbY, 98U, mbSkipRun); // 98 = skip_run value
+                        SUB0H264_TRACE_EVENT(trace_.onMbStart(mbX, mbY, 98U, mbSkipRun)); // 98 = skip_run value
                         needSkipRun = false;
                     }
 
                     if (mbSkipRun > 0U)
                     {
-                        trace_.onMbStart(mbX, mbY, 99U, static_cast<uint32_t>(br.bitOffset()));
+                        SUB0H264_TRACE_EVENT(trace_.onMbStart(mbX, mbY, 99U, static_cast<uint32_t>(br.bitOffset())));
                         int64_t mcT0 = profile_ ? sub0h264TimerUs() : 0;
                         decodePSkipMb(*decodeTarget, *refFrame, mbX, mbY, sh);
                         if (profile_) profile_->interPredUs += sub0h264TimerUs() - mcT0;
@@ -1044,11 +1044,11 @@ private:
                     }
                     else
                     {
-                        trace_.onMbStart(mbX, mbY, 100U, static_cast<uint32_t>(br.bitOffset()));
+                        SUB0H264_TRACE_EVENT(trace_.onMbStart(mbX, mbY, 100U, static_cast<uint32_t>(br.bitOffset())));
                         uint32_t mbTypeRaw = br.readUev();
                         needSkipRun = true; // After coded MB, read next skip_run
 
-                        trace_.onMbStart(mbX, mbY, mbTypeRaw, static_cast<uint32_t>(br.bitOffset()));
+                        SUB0H264_TRACE_EVENT(trace_.onMbStart(mbX, mbY, mbTypeRaw, static_cast<uint32_t>(br.bitOffset())));
 
                         //TODO: We should reason about how to unify the intra-in-P handling between CAVLC and CABAC. Currently we have separate code paths for each, which leads to some duplication and potential for divergence. We could consider refactoring to have a common function for decoding intra MBs in P-slices that is called from both CAVLC and CABAC paths, with the only difference being how we read the mb_type (raw value from CAVLC vs decoded value from CABAC). This would help ensure consistency in intra MB handling across both entropy coding methods and reduce code duplication.
                         if (mbTypeRaw >= 5U)
@@ -1571,9 +1571,9 @@ private:
         uint8_t cbpLuma = cbp & 0x0FU;
         uint8_t cbpChroma = (cbp >> 4U) & 0x03U;
 
-        trace_.onBlockResidual(mbX, mbY, 99U, static_cast<int32_t>(cbpCode),
+        SUB0H264_TRACE_EVENT(trace_.onBlockResidual(mbX, mbY, 99U, static_cast<int32_t>(cbpCode),
                                cbpLuma | (cbpChroma << 4U),
-                               static_cast<uint32_t>(br.bitOffset()));
+                               static_cast<uint32_t>(br.bitOffset())));
 
         // §7.3.5: mb_qp_delta se(v) — only if cbp > 0 for I_4x4. [CHECKED §7.3.5]
         // (FM-3: for I_16x16 this would always be present; for I_4x4 it is conditional.)
@@ -1634,10 +1634,10 @@ private:
                          top, topRight, left, topLeft, pred4x4);
 
             // Trace: prediction mode with actual MPM
-            trace_.emit({TraceEventType::BlockPredMode,
+            SUB0H264_TRACE_EVENT(trace_.emit({TraceEventType::BlockPredMode,
                          static_cast<uint16_t>(mbX), static_cast<uint16_t>(mbY),
                          blkIdx, rasterIdx, predModes[rasterIdx],
-                         mpmPerBlock[rasterIdx], nullptr, 0U});
+                         mpmPerBlock[rasterIdx], nullptr, 0U}));
 
             // Decode residual if CBP indicates this 8x8 group has coefficients
             uint32_t group8x8 = blkIdx >> 2U; // scan order: 0-3=8x8_0, 4-7=8x8_1, ...
@@ -1647,7 +1647,7 @@ private:
             if (hasResidual)
             {
                 int32_t nc = getLumaNc(mbX, mbY, rasterIdx);
-                uint32_t blkBitBefore = br.bitOffset();
+                [[maybe_unused]] uint32_t blkBitBefore = br.bitOffset();
                 ResidualBlock4x4 resBlock;
                 decodeResidualBlock4x4(br, nc, cMaxCoeff4x4, 0U, resBlock);
 
@@ -1672,11 +1672,11 @@ private:
                     coeffs[i] = resBlock.coeffs[i];
 
                 // Trace: RAW coefficients (before dequant) — use BlockResidual data field
-                trace_.emit({TraceEventType::BlockResidual,
+                SUB0H264_TRACE_EVENT(trace_.emit({TraceEventType::BlockResidual,
                              static_cast<uint16_t>(mbX), static_cast<uint16_t>(mbY),
                              blkIdx, static_cast<uint32_t>(nc),
                              resBlock.totalCoeff,
-                             br.bitOffset() - blkBitBefore, coeffs, 16U});
+                             br.bitOffset() - blkBitBefore, coeffs, 16U}));
 
                 uint32_t mbIdx = mbY * widthInMbs_ + mbX;
                 nnzLuma_[mbIdx * 16U + rasterIdx] = resBlock.totalCoeff;
@@ -1684,9 +1684,9 @@ private:
                 dequantize4x4(coeffs, qp, Block4x4Plane::LumaIntra);
 
                 // Trace: dequantized coefficients
-                trace_.emit({TraceEventType::BlockCoeffs,
+                SUB0H264_TRACE_EVENT(trace_.emit({TraceEventType::BlockCoeffs,
                              static_cast<uint16_t>(mbX), static_cast<uint16_t>(mbY),
-                             blkIdx, 0U, 0U, 0U, coeffs, 16U});
+                             blkIdx, 0U, 0U, 0U, coeffs, 16U}));
             }
 
 #if SUB0H264_TRACE
@@ -1762,7 +1762,7 @@ private:
 #endif
 
             // Trace: prediction + output pixels
-            if (trace_.hasCallback() && trace_.shouldTrace(mbX, mbY))
+            if (SUB0H264_ENABLE_CALLBACK_TRACE && trace_.hasCallback() && trace_.shouldTrace(mbX, mbY))
             {
                 int16_t pixBuf[32]; // pred[16] then output[16]
                 for (uint32_t k = 0; k < 16; ++k)
@@ -1770,9 +1770,9 @@ private:
                 for (uint32_t r = 0; r < 4; ++r)
                     for (uint32_t c = 0; c < 4; ++c)
                         pixBuf[16 + r * 4 + c] = outPtr[r * yStride + c];
-                trace_.emit({TraceEventType::BlockPixels,
+                SUB0H264_TRACE_EVENT(trace_.emit({TraceEventType::BlockPixels,
                              static_cast<uint16_t>(mbX), static_cast<uint16_t>(mbY),
-                             blkIdx, 0U, 0U, 0U, pixBuf, 32U});
+                             blkIdx, 0U, 0U, 0U, pixBuf, 32U}));
             }
 
 #if SUB0H264_TRACE
@@ -1822,8 +1822,8 @@ private:
                 dcCb[i] = dcBlockCb.coeffs[i];
                 dcCr[i] = dcBlockCr.coeffs[i];
             }
-            if (trace_.shouldTrace(mbX, mbY))
-                trace_.onChromaDcRaw(mbX, mbY, dcCb, dcCr);
+            if (SUB0H264_TRACE_EVENTS_ENABLED && trace_.shouldTrace(mbX, mbY))
+                SUB0H264_TRACE_EVENT(trace_.onChromaDcRaw(mbX, mbY, dcCb, dcCr));
         }
 
         // Chroma syntax is required even when the display only consumes luma.
@@ -1859,8 +1859,8 @@ private:
             inverseHadamard2x2(dcCr);
             dequantChromaDcValues(dcCb, chromaQp, scalingLists_.list4x4[1][0]);
             dequantChromaDcValues(dcCr, chromaQp, scalingLists_.list4x4[2][0]);
-            if (trace_.shouldTrace(mbX, mbY))
-                trace_.onChromaDcDequant(mbX, mbY, dcCb, dcCr);
+            if (SUB0H264_TRACE_EVENTS_ENABLED && trace_.shouldTrace(mbX, mbY))
+                SUB0H264_TRACE_EVENT(trace_.onChromaDcDequant(mbX, mbY, dcCb, dcCr));
         }
 
         Frame& chromaFrame = *activeFrame_;
@@ -2107,7 +2107,7 @@ private:
         (void)sps;
         // Trace numRefIdxL0Active for first MB of each frame
         if (mbX == 0U && mbY == 0U)
-            trace_.onBlockResidual(mbX, mbY, 95U, numRefIdxL0Active, mbTypeRaw, 0U);
+            SUB0H264_TRACE_EVENT(trace_.onBlockResidual(mbX, mbY, 95U, numRefIdxL0Active, mbTypeRaw, 0U));
         // mbTypeRaw: 0=P_L0_16x16, 1=P_L0_L0_16x8, 2=P_L0_L0_8x16, 3=P_8x8, 4=P_8x8ref0
 
         // §7.3.5 macroblock_layer() sequencing for P-inter: [CHECKED §7.3.5]
@@ -2225,7 +2225,7 @@ private:
             MotionVector mvp = computeMvPredictor(a, b, c, static_cast<int8_t>(refIdxL0[0]));
             mvPart[0] = { static_cast<int16_t>(mvp.x + mvdX[0]),
                           static_cast<int16_t>(mvp.y + mvdY[0]) };
-            trace_.onMvPrediction(mbX, mbY, 0, mvp, {mvdX[0], mvdY[0]}, mvPart[0], a, b, c);
+            SUB0H264_TRACE_EVENT(trace_.onMvPrediction(mbX, mbY, 0, mvp, {mvdX[0], mvdY[0]}, mvPart[0], a, b, c));
         }
         else if (mbTypeRaw == 1U)
         {
@@ -2244,7 +2244,7 @@ private:
                     mvp0 = computeMvPredictor(a0, b0, c0, ri0);
                 mvPart[0] = { static_cast<int16_t>(mvp0.x + mvdX[0]),
                               static_cast<int16_t>(mvp0.y + mvdY[0]) };
-                trace_.onMvPrediction(mbX, mbY, 0, mvp0, {mvdX[0], mvdY[0]}, mvPart[0], a0, b0, c0);
+                SUB0H264_TRACE_EVENT(trace_.onMvPrediction(mbX, mbY, 0, mvp0, {mvdX[0], mvdY[0]}, mvPart[0], a0, b0, c0));
             }
 
             // Partition 1 (bottom 16x8): §8.4.1.3.1 directional shortcut: use LEFT.
@@ -2266,7 +2266,7 @@ private:
                     mvp1 = computeMvPredictor(a1, b1, c1, ri1);
                 mvPart[1] = { static_cast<int16_t>(mvp1.x + mvdX[1]),
                               static_cast<int16_t>(mvp1.y + mvdY[1]) };
-                trace_.onMvPrediction(mbX, mbY, 1, mvp1, {mvdX[1], mvdY[1]}, mvPart[1], a1, b1, c1);
+                SUB0H264_TRACE_EVENT(trace_.onMvPrediction(mbX, mbY, 1, mvp1, {mvdX[1], mvdY[1]}, mvPart[1], a1, b1, c1));
             }
         }
         else if (mbTypeRaw == 2U)
@@ -2286,7 +2286,7 @@ private:
                     mvp0 = computeMvPredictor(a0, b0, c0, ri0);
                 mvPart[0] = { static_cast<int16_t>(mvp0.x + mvdX[0]),
                               static_cast<int16_t>(mvp0.y + mvdY[0]) };
-                trace_.onMvPrediction(mbX, mbY, 0, mvp0, {mvdX[0], mvdY[0]}, mvPart[0], a0, b0, c0);
+                SUB0H264_TRACE_EVENT(trace_.onMvPrediction(mbX, mbY, 0, mvp0, {mvdX[0], mvdY[0]}, mvPart[0], a0, b0, c0));
             }
 
             // Partition 1 (right 8x16): C=topRight directly if same refIdx
@@ -2304,7 +2304,7 @@ private:
                     mvp1 = computeMvPredictor(a1, b1, c1, ri1);
                 mvPart[1] = { static_cast<int16_t>(mvp1.x + mvdX[1]),
                               static_cast<int16_t>(mvp1.y + mvdY[1]) };
-                trace_.onMvPrediction(mbX, mbY, 1, mvp1, {mvdX[1], mvdY[1]}, mvPart[1], a1, b1, c1);
+                SUB0H264_TRACE_EVENT(trace_.onMvPrediction(mbX, mbY, 1, mvp1, {mvdX[1], mvdY[1]}, mvPart[1], a1, b1, c1));
             }
         }
         else
@@ -2335,7 +2335,7 @@ private:
                 MotionVector mvp = computeMvPredictor(a, b, c, static_cast<int8_t>(refIdxL0[s]));
                 MotionVector mv = { static_cast<int16_t>(mvp.x + subMvdX[s]),
                                     static_cast<int16_t>(mvp.y + subMvdY[s]) };
-                trace_.onMvPrediction(mbX, mbY, s, mvp, {subMvdX[s], subMvdY[s]}, mv, a, b, c);
+                SUB0H264_TRACE_EVENT(trace_.onMvPrediction(mbX, mbY, s, mvp, {subMvdX[s], subMvdY[s]}, mv, a, b, c));
 
                 // Store this sub-partition's MV in its 4 blocks (2x2 in 4x4 grid)
                 MbMotionInfo info = { mv, {subMvdX[s], subMvdY[s]}, static_cast<int8_t>(refIdxL0[s]), true };
@@ -2589,7 +2589,7 @@ private:
         }
 
         // §7.3.5: coded_block_pattern me(v) — present for P-inter (not I_16x16). [CHECKED §7.3.5]
-        trace_.onMbEnd(mbX, mbY, static_cast<uint32_t>(br.bitOffset())); // pre-CBP bit
+        SUB0H264_TRACE_EVENT(trace_.onMbEnd(mbX, mbY, static_cast<uint32_t>(br.bitOffset()))); // pre-CBP bit
         uint32_t cbpCode = br.readUev();
         uint8_t cbp = 0U;
         if (cbpCode < 48U)
@@ -2612,8 +2612,8 @@ private:
             return;  // Graceful release degradation: skip MB decode
         }
         // Trace CBP: use BlockResidual with blkIdx=99 as CBP marker
-        trace_.onBlockResidual(mbX, mbY, 99U, cbpCode, cbpLuma | (cbpChroma << 4U),
-                               static_cast<uint32_t>(br.bitOffset()));
+        SUB0H264_TRACE_EVENT(trace_.onBlockResidual(mbX, mbY, 99U, cbpCode, cbpLuma | (cbpChroma << 4U),
+                               static_cast<uint32_t>(br.bitOffset())));
         int32_t qp = mbQp;
         // §7.3.5: mb_qp_delta se(v) — only if cbp > 0 for P-inter. [CHECKED §7.3.5]
         if (cbp > 0U)
@@ -2644,8 +2644,8 @@ private:
                 uint32_t bitBefore = static_cast<uint32_t>(br.bitOffset());
                 ResidualBlock4x4 resBlock;
                 decodeResidualBlock4x4(br, nc, cMaxCoeff4x4, 0U, resBlock);
-                uint32_t bitsUsed = static_cast<uint32_t>(br.bitOffset()) - bitBefore;
-                trace_.onBlockResidual(mbX, mbY, blkIdx, nc, resBlock.totalCoeff, bitsUsed);
+                [[maybe_unused]] uint32_t bitsUsed = static_cast<uint32_t>(br.bitOffset()) - bitBefore;
+                SUB0H264_TRACE_EVENT(trace_.onBlockResidual(mbX, mbY, blkIdx, nc, resBlock.totalCoeff, bitsUsed));
                 for (uint32_t i = 0U; i < 16U; ++i)
                     coeffs[i] = resBlock.coeffs[i];
                 nnzLuma_[mbIdx * 16U + rasterIdx] = resBlock.totalCoeff;
@@ -2663,14 +2663,14 @@ private:
         if (cbpChroma >= 1U)
         {
             ResidualBlock4x4 dcBlockCb, dcBlockCr;
-            uint32_t bitStart = static_cast<uint32_t>(br.bitOffset());
+            [[maybe_unused]] uint32_t bitStart = static_cast<uint32_t>(br.bitOffset());
             decodeResidualBlock4x4(br, -1, 4U, 0U, dcBlockCb);
-            trace_.onBlockResidual(mbX, mbY, 16U, -1,
-                dcBlockCb.totalCoeff, static_cast<uint32_t>(br.bitOffset()) - bitStart);
+            SUB0H264_TRACE_EVENT(trace_.onBlockResidual(mbX, mbY, 16U, -1,
+                dcBlockCb.totalCoeff, static_cast<uint32_t>(br.bitOffset()) - bitStart));
             bitStart = static_cast<uint32_t>(br.bitOffset());
             decodeResidualBlock4x4(br, -1, 4U, 0U, dcBlockCr);
-            trace_.onBlockResidual(mbX, mbY, 17U, -1,
-                dcBlockCr.totalCoeff, static_cast<uint32_t>(br.bitOffset()) - bitStart);
+            SUB0H264_TRACE_EVENT(trace_.onBlockResidual(mbX, mbY, 17U, -1,
+                dcBlockCr.totalCoeff, static_cast<uint32_t>(br.bitOffset()) - bitStart));
             for (uint32_t i = 0U; i < 4U; ++i)
             {
                 dcCb[i] = dcBlockCb.coeffs[i];
@@ -2685,20 +2685,20 @@ private:
             for (uint32_t bi = 0U; bi < 4U; ++bi)
             {
                 int32_t nc = getChromaNc(mbX, mbY, bi, true);
-                uint32_t bitStart = static_cast<uint32_t>(br.bitOffset());
+                [[maybe_unused]] uint32_t bitStart = static_cast<uint32_t>(br.bitOffset());
                 decodeResidualBlock4x4(br, nc, 15U, 1U, cbAc[bi]);
                 nnzCb_[mbIdx * 4U + bi] = cbAc[bi].totalCoeff;
-                trace_.onBlockResidual(mbX, mbY, 18U + bi, nc,
-                    cbAc[bi].totalCoeff, static_cast<uint32_t>(br.bitOffset()) - bitStart);
+                SUB0H264_TRACE_EVENT(trace_.onBlockResidual(mbX, mbY, 18U + bi, nc,
+                    cbAc[bi].totalCoeff, static_cast<uint32_t>(br.bitOffset()) - bitStart));
             }
             for (uint32_t bi = 0U; bi < 4U; ++bi)
             {
                 int32_t nc = getChromaNc(mbX, mbY, bi, false);
-                uint32_t bitStart = static_cast<uint32_t>(br.bitOffset());
+                [[maybe_unused]] uint32_t bitStart = static_cast<uint32_t>(br.bitOffset());
                 decodeResidualBlock4x4(br, nc, 15U, 1U, crAc[bi]);
                 nnzCr_[mbIdx * 4U + bi] = crAc[bi].totalCoeff;
-                trace_.onBlockResidual(mbX, mbY, 22U + bi, nc,
-                    crAc[bi].totalCoeff, static_cast<uint32_t>(br.bitOffset()) - bitStart);
+                SUB0H264_TRACE_EVENT(trace_.onBlockResidual(mbX, mbY, 22U + bi, nc,
+                    crAc[bi].totalCoeff, static_cast<uint32_t>(br.bitOffset()) - bitStart));
             }
         }
 
@@ -2737,7 +2737,7 @@ private:
         }
 #endif
         mbQp = qp; // Propagate accumulated QP to next MB
-        trace_.onMbEnd(mbX, mbY, static_cast<uint32_t>(br.bitOffset()));
+        SUB0H264_TRACE_EVENT(trace_.onMbEnd(mbX, mbY, static_cast<uint32_t>(br.bitOffset())));
     }
 
     /** Decode an intra MB within a P-slice (mb_type offset already applied).
@@ -3109,14 +3109,14 @@ private:
 #endif
 
                     // Trace: raw scan coefficients before dequant (CABAC path)
-                    trace_.onBlockResidual(mbX, mbY, blkIdx,
+                    SUB0H264_TRACE_EVENT(trace_.onBlockResidual(mbX, mbY, blkIdx,
                                            static_cast<int32_t>(cbfCtxInc),
                                            numNonZero,
-                                           static_cast<uint32_t>(cabacEngine_.bitPosition()));
+                                           static_cast<uint32_t>(cabacEngine_.bitPosition())));
                     // Trace: dequantized coefficients (CABAC path)
-                    trace_.emit({TraceEventType::BlockCoeffs,
+                    SUB0H264_TRACE_EVENT(trace_.emit({TraceEventType::BlockCoeffs,
                                  static_cast<uint16_t>(mbX), static_cast<uint16_t>(mbY),
-                                 blkIdx, 0U, 0U, 0U, scanCoeffs, 16U});
+                                 blkIdx, 0U, 0U, 0U, scanCoeffs, 16U}));
 
 #ifdef SUB0H264_TRACE_I4X4_BLOCKS
                     if (blkIdx <= 2U)
@@ -3149,9 +3149,9 @@ private:
                 }
 
                 // Trace: prediction + output pixels (CABAC path)
-                trace_.emit({TraceEventType::BlockPixels,
+                SUB0H264_TRACE_EVENT(trace_.emit({TraceEventType::BlockPixels,
                              static_cast<uint16_t>(mbX), static_cast<uint16_t>(mbY),
-                             blkIdx, 0U, 0U, 0U, nullptr, 0U});
+                             blkIdx, 0U, 0U, 0U, nullptr, 0U}));
 
                 uint8_t* outPtr = mbLuma + blkY * yStride + blkX;
 
