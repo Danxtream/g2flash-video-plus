@@ -72,7 +72,10 @@ APP_LOAD_ADDR = 0x00438000   # bootloader XIP-programs the main app here
 APP_PREAMBLE  = 0x20         # it programs payload[0x20:], so payload[k] -> 0x438000 + k - 0x20
 OTA_FLAG_ADDR = 0x007FE000   # OTA magic word (last 8 KB of MRAM)
 MRAM_END      = 0x00800000
-APP_MAX_END   = 0x007F0000   # conservative ceiling: leave the top ~56 KB for NV + flag
+# Even's stock 2.3.2.14 main app ends at 0x7F5AAC, so MRAM below
+# that end holds Even's own code. The bond store (0x7FF000) and
+# OTA flag (0x7FE000) remain above this ceiling.
+APP_MAX_END   = 0x007F5000
 BLOB_ALIGN    = 4            # 4-byte-align each appended blob (Thumb literal pools)
 
 # BLE policy validated with sustained 2,000-byte/window-3 transfers (~41 KiB/s)

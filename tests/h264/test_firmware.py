@@ -26,6 +26,45 @@ builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
 
 
+class FirmwareCeilingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("ceiling_flasher", ROOT / "g2flash.py")
+        cls.flasher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.flasher)
+
+    def check_end(self, end, load_address=None, length_delta=0):
+        flasher = self.flasher
+        payload_size = end - flasher.APP_LOAD_ADDR + flasher.APP_PREAMBLE
+        preamble = bytearray(flasher.APP_PREAMBLE)
+        struct.pack_into("<I", preamble, 0, payload_size + length_delta)
+        struct.pack_into("<I", preamble, 0x14,
+                         flasher.APP_LOAD_ADDR if load_address is None else load_address)
+        segments = [{"fn": flasher.REQUIRED_SEGMENT, "off": 0, "ps": payload_size}]
+        flasher.check_mainapp_fits_mram(bytes(128) + preamble, segments)
+
+    def test_builder_and_flasher_share_the_stock_code_ceiling(self):
+        self.assertEqual(firmware.APP_MAX_END, 0x007F5000)
+        self.assertEqual(self.flasher.APP_MAX_END, firmware.APP_MAX_END)
+        self.assertLess(firmware.APP_MAX_END, self.flasher.OTA_FLAG_ADDR)
+        self.assertLess(self.flasher.OTA_FLAG_ADDR, 0x007FF000)
+
+    def test_flasher_accepts_the_exact_ceiling_and_refuses_overruns(self):
+        for end in (0x007F0000, self.flasher.APP_MAX_END):
+            with self.subTest(end=end):
+                self.check_end(end)
+        for end in (self.flasher.APP_MAX_END + 1,
+                    self.flasher.OTA_FLAG_ADDR, self.flasher.MRAM_END):
+            with self.subTest(end=end), self.assertRaisesRegex(ValueError, "past the safe ceiling"):
+                self.check_end(end)
+
+    def test_ceiling_change_keeps_destination_and_length_guards(self):
+        with self.assertRaisesRegex(ValueError, "preamble load address"):
+            self.check_end(self.flasher.APP_MAX_END, load_address=self.flasher.APP_LOAD_ADDR + 4)
+        with self.assertRaisesRegex(ValueError, "preamble length"):
+            self.check_end(self.flasher.APP_MAX_END, length_delta=-1)
+
+
 class DecoderBlobTests(unittest.TestCase):
     def test_decoder_build_and_manifest_validation(self):
         blob = bytes.fromhex("7047")

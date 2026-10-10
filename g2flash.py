@@ -72,8 +72,10 @@ APP_LOAD_ADDR = 0x00438000    # where the bootloader programs the main app (XIP)
 MRAM_END      = 0x00800000    # end of Apollo510b 4 MB internal MRAM
 OTA_FLAG_ADDR = 0x007FE000    # OTA magic word (last 8 KB) -- app must stay below
 APP_PREAMBLE  = 0x20          # 32-byte preamble; bootloader programs payload[0x20:]
-# Conservative ceiling: leave the top ~56 KB below the flag for BLE-bond/KV NV.
-APP_MAX_END   = 0x007F0000
+# Even's stock 2.3.2.14 main app ends at 0x7F5AAC, so MRAM below
+# that end holds Even's own code. The bond store (0x7FF000) and
+# OTA flag (0x7FE000) remain above this ceiling.
+APP_MAX_END   = 0x007F5000
 
 # how far to go: 'discover' | 'heartbeat' | 'file_check' | 'flash' | 'done'
 STAGES = ["discover", "heartbeat", "file_check", "flash", "done"]
@@ -224,7 +226,7 @@ def check_mainapp_fits_mram(img, segs):
 
     The bootloader programs the main app with NO size/destination bound (dst and
     length come straight from the 32-byte preamble). If the programmed region
-    reaches the OTA flag (0x7FE000) it clobbers it + the BLE-bond/KV NV band; if
+    reaches the OTA flag (0x7FE000) it clobbers the update flag; if
     it reaches the end of MRAM (0x800000) the write faults mid-erase and the lens
     is left in a permanent, BLE-unrecoverable bootloop (SWD-only recovery). This
     is the only place that can catch it, so fail loudly here.
