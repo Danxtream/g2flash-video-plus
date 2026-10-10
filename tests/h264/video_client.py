@@ -7,11 +7,12 @@ import statistics
 import struct
 import time
 
-from receive_client import (ReceiveClient, control, diagnostics, diagnostic_alerts,
+from video_link import VideoLink, ACK_WINDOW, sources
+from receive_client import (control, diagnostics, diagnostic_alerts,
                             MESSAGE, VERSION, START, STOP, STATUS, CAPABILITIES,
                             DIAGNOSTICS, PAGE, nal)
 
-FRAME_READ, FRAME_ACK, VERIFY_FRAMES, NATIVE = 8, 9, 128, 1
+FRAME_READ, FRAME_ACK, CREDITS, VERIFY_FRAMES, NATIVE = 8, 9, 10, 128, 1
 STATUS_BYTES, FRAME_BYTES, ACK_BYTES = 128, 80, 16
 RESULT_FIELDS = ('ordinal', 'first_nal', 'last_nal', 'geometry', 'crc', 'cycles', 'ticks',
                  'clock_before', 'clock_after', 'flags', 'decode_tick', 'copy_tick', 'calls',
@@ -93,46 +94,85 @@ def summarize(rows):
     return result
 
 
-class VideoClient(ReceiveClient):
-    """Reuse stock framing and exact retries, with bounded frozen result pages."""
-    def raw_command(self, payload, length):
-        request = struct.unpack_from('<I', payload, 4)[0]
-        accepted = None
-        for attempt in range(3):
-            try:
-                accepted = self.send(payload, (request, 0))
-                break
-            except TimeoutError:
-                if attempt == 2:
-                    raise
-        count, first = self.pages[(self.lens, request, 0)]
-        if not first or count != (length + len(first) - 1) // len(first):
-            raise ValueError('inconsistent result page count')
-        raw = bytearray(first)
-        for page in range(1, count):
-            message = struct.pack('<BBBBIB', MESSAGE, PAGE, VERSION, 0, request, page)
-            for attempt in range(3):
-                try:
-                    if not self.send(message, (request, page)):
-                        raise ValueError('frozen result page refused')
-                    break
-                except TimeoutError:
-                    if attempt == 2:
-                        raise
-            pages, content = self.pages[(self.lens, request, page)]
-            if pages != count or len(content) != min(len(first), length - len(raw)):
-                raise ValueError('inconsistent result page length/count')
-            raw.extend(content)
-        self.pages.clear()
-        if len(raw) != length or bool(accepted) != (raw[2] == 0):
-            raise ValueError('transport and control result disagree')
-        return bytes(raw)
+def credit_snapshot(raw):
+    """Decode only the advertised six-byte owner-bound credit format."""
+    if len(raw) != 6:
+        raise ValueError('invalid compact credit length')
+    packed, error = raw[4:6]
+    state = packed >> 4 & 7
+    capacity = (6 if packed & 8 else 4) if state == 2 else 0
+    credits = packed & 7
+    if state > 4 or credits > capacity or error and credits:
+        raise ValueError('invalid compact credit state/count')
+    return dict(expected=struct.unpack_from('<I', raw)[0], credits=credits,
+                capacity=capacity, state=state, result=error, error=error, gap=bool(packed & 128))
 
-    def command(self, op, stream=0, *, native=False, verify=False, token=0, ordinal=0):
+
+def paired_report(reports):
+    """Retain each recipient's state while exposing conservative paired bounds."""
+    if len(reports) == 1:
+        return next(iter(reports.values()))
+    values = tuple(reports.values())
+    result = dict(values[0], by_lens=reports)
+    for name in ('credits', 'capacity', 'expected', 'consumed', 'pictures', 'presented',
+                 'result_high', 'acked', 'accepted'):
+        if all(name in value for value in values):
+            result[name] = min(value[name] for value in values)
+    for name in ('result', 'error', 'stream_high', 'incomplete'):
+        if all(name in value for value in values):
+            result[name] = max(value[name] for value in values)
+    states = {value['state'] for value in values}
+    result['state'] = states.pop() if len(states) == 1 else 4 if 4 in states else 1
+    if all('token' in value for value in values):
+        result['tokens'] = {lens: value['token'] for lens, value in reports.items()}
+    return result
+
+
+class VideoClient(VideoLink):
+    """Forwarded paired delivery and bounded frozen replies on a supplied link."""
+    def raw_replies(self, payload, length, *, targets=None, result_offset=2):
+        started = time.monotonic()
+        targets = self.targets if targets is None else targets
+        request = struct.unpack_from('<I', payload, 4)[0]
+        self.send(payload, (request, 0), targets=targets)
+        accepted = self.last_results.copy()
+        replies = {}
+        for lens in sources(targets):
+            count, first = self.pages[(lens, request, 0)]
+            if not first or count != (length + len(first) - 1) // len(first):
+                raise ValueError('inconsistent frozen result page count')
+            raw = bytearray(first)
+            for page in range(1, count):
+                message = struct.pack('<BBBBIB', MESSAGE, PAGE, VERSION, 0, request, page)
+                if not self.send(message, (request, page), targets=lens):
+                    raise ValueError('frozen result page refused')
+                pages, content = self.pages[(lens, request, page)]
+                if pages != count or len(content) != min(len(first), length - len(raw)):
+                    raise ValueError('inconsistent result page length/count')
+                raw.extend(content)
+            if len(raw) != length or accepted[lens] != (raw[result_offset] == 0):
+                raise ValueError('transport and control result disagree')
+            replies[lens] = bytes(raw)
+        self.pages.clear()
+        self.metrics.setdefault('commands', []).append(dict(op=payload[1], targets=targets,
+            bytes=length, seconds=time.monotonic()-started))
+        return replies
+
+    def raw_command(self, payload, length):
+        """Compatibility for single-lens callers requiring one raw reply."""
+        if self.targets == 3:
+            raise ValueError('use source-tagged replies for paired commands')
+        return next(iter(self.raw_replies(payload, length).values()))
+
+    def command(self, op, stream=0, *, native=False, verify=False, token=0, ordinal=0, lens=None):
         request = self.counter.reserve()
         if op in (FRAME_READ, FRAME_ACK):
+            target = self.targets if lens is None else lens
+            if target not in (1, 2) or not self.targets & target:
+                raise ValueError('select the result owner lens')
             payload = struct.pack('<BBBBIIII', MESSAGE, op, VERSION, 0, request, stream, token, ordinal)
-            raw = self.raw_command(payload, FRAME_BYTES if op == FRAME_READ else ACK_BYTES)
+            raw = self.raw_replies(payload, FRAME_BYTES if op == FRAME_READ else ACK_BYTES,
+                                   targets=target)[target]
             if op == FRAME_READ:
                 return frame_result(raw)
             if raw[:2] != bytes((VERSION, FRAME_ACK)) or raw[3]:
@@ -142,12 +182,61 @@ class VideoClient(ReceiveClient):
         payload = bytearray(control(op, request, stream))
         if op == START:
             payload[18] = (NATIVE if native else 0) | (VERIFY_FRAMES if verify else 0)
-        raw = self.raw_command(payload, STATUS_BYTES)
-        return status(raw)
+        return paired_report({source: status(raw) for source, raw in
+                              self.raw_replies(payload, STATUS_BYTES).items()})
+
+    def credits(self, stream, tokens):
+        """Query both owners once; neither reply alone grants paired input slots."""
+        request = self.counter.reserve()
+        payload = struct.pack('<BBBBIIII', MESSAGE, CREDITS, VERSION, 0, request, stream,
+                              tokens.get(1, 0), tokens.get(2, 0))
+        reports = {lens: credit_snapshot(raw) for lens, raw in
+                   self.raw_replies(payload, 6, result_offset=5).items()}
+        return paired_report(reports)
 
     def diagnostic(self):
         request = self.counter.reserve()
-        return diagnostics(self.raw_command(control(DIAGNOSTICS, request), 128))
+        replies = {lens: diagnostics(raw) for lens, raw in
+                   self.raw_replies(control(DIAGNOSTICS, request), 128).items()}
+        return next(iter(replies.values())) if len(replies) == 1 else dict(by_lens=replies)
+
+
+class DirectPairClient:
+    """Explicit fallback using two independent links and the same paired bounds."""
+    targets = 3
+    lens = 1
+
+    def __init__(self, left, right):
+        if (left.targets, right.targets) != (1, 2):
+            raise ValueError('fallback requires independent left and right clients')
+        self.clients = {1: left, 2: right}
+
+    def command(self, op, stream=0, *, lens=None, **kwargs):
+        if lens is not None:
+            return self.clients[lens].command(op, stream, **kwargs)
+        return paired_report({side: client.command(op, stream, **kwargs)
+                              for side, client in self.clients.items()})
+
+    def credits(self, stream, tokens):
+        return paired_report({side: client.credits(stream, tokens)
+                              for side, client in self.clients.items()})
+
+    def send_window(self, payloads):
+        results = {side: client.send_window(payloads) for side, client in self.clients.items()}
+        return [{side: results[side][index][side] for side in self.clients}
+                for index in range(len(payloads))]
+
+    def diagnostic(self):
+        return dict(by_lens={side: client.diagnostic() for side, client in self.clients.items()})
+
+    def send(self, payload):
+        """Apply explicit ordinary cleanup to each independent connection."""
+        return all(row[side] for row in self.send_window([payload]) for side in row)
+
+    @property
+    def metrics(self):
+        """Retain transport measurements per link rather than merging clocks."""
+        return {side: client.metrics for side, client in self.clients.items()}
 
 
 def verify_row(row, expected, stream, token):
@@ -169,97 +258,143 @@ def verify_row(row, expected, stream, token):
 def stream_clip(client, nals, reference, *, verify=True, native=False, progress=lambda text: None,
                 renew=lambda: None, on_ready=lambda state: None, pace_fps=0, timeout=600,
                 clock=time.monotonic, sleep=time.sleep):
-    """Bound credits and EOF drainage; a reconnect/error ends this entire run.
+    """Use owner-bound credit windows; a reconnect or refusal voids the run.
 
-    The caller performs ordinary session/lease cleanup and diagnostics around
-    each run. This helper never creates a connection or retries a P continuation
-    after connection loss. Timing flags exclude samples, not correctness checks.
+    Full status is read at startup, infrequently during input, and at EOF. Frame
+    verification is optional and independent of receive credit acknowledgements.
     """
     if (len(nals) != reference['nal_count'] or list(map(len, nals)) != reference['nal_sizes'] or
             reference['frame_count'] != len(reference['frames']) or not reference['frame_count'] or
             any(not data or len(data) > 4086 for data in nals)):
         raise ValueError('reference/NAL/count/bound mismatch')
+    def per_lens(report):
+        return report.get('by_lens', {client.lens: report})
     capabilities = client.command(CAPABILITIES)
-    if capabilities['state'] != 0 or capabilities['result']:
-        raise ValueError('playback requires a clean idle owner')
+    if any(r['state'] != 0 or r['result'] or not r.get('compact_credits')
+           for r in per_lens(capabilities).values()):
+        raise ValueError('playback requires idle owners with compact credits')
     stream = capabilities['stream_high'] + 1
-    state = client.command(START, stream, native=native, verify=verify)
-    if state['result']:
-        raise ValueError(f'START refused: {state["result"]}')
     deadline = clock() + timeout
-    while state['state'] != 2:
-        if state['error'] or state['state'] == 4 or clock() > deadline:
-            raise RuntimeError('decoder did not become READY')
-        renew(); sleep(.02); state = client.command(STATUS)
-    token = state['token']
-    on_ready(state)
-    progress(f'READY stream={stream} token={token}; verification={verify}; native={native}')
-    index, rows, last_progress, started = 0, [], clock(), clock()
-    finishing = {r['last_nal']: r['ordinal'] for r in reference['frames']}
-    refusal_count, credit_waits = 0, 0
-    while True:
-        if clock() > deadline:
-            raise TimeoutError('bounded upload/result drain deadline expired')
-        renew()
-        state = client.command(STATUS)
-        if (state['result'] or state['error'] or state['state'] != 2 or
-                (state['stream'], state['token']) != (stream, token) or
-                state['consumed'] > index or state['pictures'] > reference['frame_count'] or
-                state['presented'] > reference['frame_count']):
-            raise RuntimeError('decoder/session/count failed during playback')
-        if verify:
-            while len(rows) < state['result_high']:
-                if len(rows) >= reference['frame_count']:
-                    raise ValueError('extra completed frame result')
-                ordinal = len(rows) + 1
-                row = client.command(FRAME_READ, stream, token=token, ordinal=ordinal)
-                checked = verify_row(row, reference['frames'][len(rows)], stream, token)
-                rows.append(checked)
-                progress(f'frame {ordinal}/{reference["frame_count"]}: Y CRC matched; '
-                         f'cycles={checked["timing"]["cycle_ms"]} ms ticks={row["ticks"]} ms '
-                         f'excluded={checked["timing"]["excluded"]}')
-            if len(rows) > state['acked']:
-                ack = client.command(FRAME_ACK, stream, token=token, ordinal=len(rows))
-                if ack['result'] or (ack['stream'], ack['token'], ack['acked']) != (stream, token, len(rows)):
-                    raise ValueError('result acknowledgement mismatch')
-        if index == len(nals) and state['consumed'] == index and state['presented'] == reference['frame_count']:
-            if not verify or len(rows) == reference['frame_count']:
-                break
-        credits = state['credits']
-        if not credits:
-            credit_waits += 1
-        sent = 0
-        while credits and index < len(nals):
-            if pace_fps and index in finishing:
-                target = started + (finishing[index] - 1) / pace_fps
-                if clock() < target:
+    try:
+        state = client.command(START, stream, native=native, verify=verify)
+        if state['result']:
+            raise ValueError(f'START refused: {state["result"]}')
+        while state['state'] != 2:
+            if state['error'] or any(r['state'] not in (1, 2) for r in per_lens(state).values()) or clock() > deadline:
+                raise RuntimeError('all targeted decoders did not become READY')
+            renew(); sleep(.02); state = client.command(STATUS)
+        tokens = {lens: report['token'] for lens, report in per_lens(state).items()}
+        if set(tokens) != set(sources(client.targets)) or any(not token for token in tokens.values()):
+            raise ValueError('READY did not identify every targeted owner')
+        on_ready(state)
+        progress(f'READY stream={stream} tokens={tokens}; verification={verify}; native={native}')
+        rows = {lens: [] for lens in tokens}
+        acknowledged = {lens: 0 for lens in tokens}
+        index, started = 0, clock()
+        last_status = last_progress = started
+        credit_waits = 0
+        input_finished = None
+        finishing = {r['last_nal']: r['ordinal'] for r in reference['frames']}
+        while True:
+            if clock() > deadline:
+                raise TimeoutError('bounded upload/result drain deadline expired')
+            renew()
+            credit = client.credits(stream, tokens)
+            reports = per_lens(credit)
+            if set(reports) != set(tokens) or any(r['result'] or r['error'] or r['state'] != 2 or
+                    r['expected'] > index for r in reports.values()):
+                raise RuntimeError('owner or credit progress failed during playback')
+            if clock() - last_status >= 5 or index == len(nals) and credit['expected'] == index:
+                state = client.command(STATUS)
+                for lens, r in per_lens(state).items():
+                    if (r['result'] or r['error'] or r['state'] != 2 or
+                            (r['stream'], r['token']) != (stream, tokens[lens]) or
+                            r['consumed'] > index or r['pictures'] > reference['frame_count'] or
+                            r['presented'] > reference['frame_count']):
+                        raise RuntimeError('decoder/session/count failed during playback')
+                last_status = clock()
+            if verify:
+                # Consumption and copying are separate. A future row may refuse;
+                # retry with a fresh request after more work, never fabricate it.
+                for lens, token in tokens.items():
+                    while len(rows[lens]) < reference['frame_count']:
+                        expected = reference['frames'][len(rows[lens])]
+                        if expected['last_nal'] >= reports[lens]['expected']:
+                            break
+                        row = client.command(FRAME_READ, stream, token=token,
+                                             ordinal=len(rows[lens]) + 1, lens=lens)
+                        if row['result']:
+                            break
+                        checked = verify_row(row, expected, stream, token)
+                        rows[lens].append(checked)
+                        progress(f'lens {lens} frame {checked["ordinal"]}: Y CRC matched; '
+                                 f'ticks={checked["ticks"]} ms excluded={checked["timing"]["excluded"]}')
+                    if len(rows[lens]) > acknowledged[lens]:
+                        count = len(rows[lens])
+                        ack = client.command(FRAME_ACK, stream, token=token, ordinal=count, lens=lens)
+                        if ack['result'] or (ack['stream'], ack['token'], ack['acked']) != (stream, token, count):
+                            raise ValueError('result acknowledgement mismatch')
+                        acknowledged[lens] = count
+            if index == len(nals) and credit['expected'] == index:
+                finished = all(r['consumed'] == index and r['presented'] == reference['frame_count']
+                               for r in per_lens(state).values())
+                if finished and (not verify or all(len(row) == reference['frame_count'] for row in rows.values())):
                     break
-            if not client.send_nal(stream, index, nals[index]):
-                refusal_count += 1
-                if refusal_count > 16:
-                    raise RuntimeError('repeated input refusal; stop instead of resetting video references')
-                break
-            index += 1; credits -= 1; sent += 1
-        if clock() - last_progress >= 2:
-            progress(f'upload {index}/{len(nals)} NALs; consumed={state["consumed"]}; '
-                     f'copied={state["presented"]}; verified={len(rows)}')
-            last_progress = clock()
-        if not sent:
-            sleep(.005)
-    final = dict(state)
-    if verify:
+            # This is a slot count AND sequence-distance limit on each recipient.
+            count = min(ACK_WINDOW, credit['credits'], len(nals) - index,
+                        *(r['expected'] + r['capacity'] - index for r in reports.values()))
+            if count < 0:
+                raise RuntimeError('sender exceeded a recipient sequence window')
+            if pace_fps:
+                for offset in range(count):
+                    ordinal = finishing.get(index + offset)
+                    if ordinal and clock() < started + (ordinal - 1) / pace_fps:
+                        count = offset
+                        break
+            if count:
+                result = client.send_window([nal(stream, index + offset, nals[index + offset])
+                                             for offset in range(count)])
+                if (len(result) != count or any(set(row) != set(tokens) or
+                        not all(row.values()) for row in result)):
+                    raise RuntimeError('a targeted lens refused the input window; retire both owners')
+                index += count
+                if index == len(nals):
+                    input_finished = clock()
+            else:
+                credit_waits += not credit['credits']
+                sleep(.01)
+            if clock() - last_progress >= 2:
+                progress(f'upload {index}/{len(nals)} NALs; '
+                         f'next-to-consume={ {lens: r["expected"] for lens, r in reports.items()} }')
+                last_progress = clock()
         final = client.command(STATUS)
-        if final['acked'] != reference['frame_count'] or final['result_high'] != reference['frame_count']:
-            raise ValueError('EOF did not drain every result acknowledgement')
-    stopped = client.command(STOP, stream)
-    if stopped['result']:
-        raise RuntimeError('STOP refused')
-    while stopped['state'] != 0:
-        if clock() > deadline or stopped['error'] or stopped['state'] == 4:
-            raise RuntimeError('STOP did not safely reclaim ownership')
-        sleep(.02); stopped = client.command(STATUS)
-    if stopped['error'] or stopped['incomplete']:
-        raise RuntimeError('verification or cleanup remained incomplete')
-    return dict(valid=True, stream=stream, token=token, rows=rows, summary=summarize(rows) if verify else None,
-                status=final, elapsed_seconds=clock() - started, credit_waits=credit_waits,
-                input_refusals=refusal_count, verified=verify)
+        playback_seconds = clock()-started
+        if verify and any(r['acked'] != reference['frame_count'] or r['result_high'] != reference['frame_count']
+                          for r in per_lens(final).values()):
+            raise ValueError('EOF did not drain every recipient result')
+        stopped = client.command(STOP, stream)
+        if stopped['result']:
+            raise RuntimeError('STOP refused')
+        while stopped['state'] != 0:
+            if clock() > deadline or stopped['error'] or stopped['state'] == 4:
+                raise RuntimeError('STOP did not safely reclaim every owner')
+            sleep(.02); stopped = client.command(STATUS)
+        if stopped['error'] or stopped['incomplete']:
+            raise RuntimeError('verification or cleanup remained incomplete')
+        primary = rows[client.lens]
+        return dict(valid=True, stream=stream, token=tokens[client.lens], tokens=tokens, rows=primary,
+                    rows_by_lens=rows, summary=summarize(primary) if verify else None,
+                    summaries={lens: summarize(value) for lens, value in rows.items()} if verify else {},
+                    status=final, elapsed_seconds=clock() - started, credit_waits=credit_waits,
+                    input_refusals=0, verified=verify, playback_seconds=playback_seconds,
+                    delivered_fps=reference['frame_count']/playback_seconds,
+                    input_seconds=input_finished-started,
+                    nal_bytes_per_second=sum(map(len, nals))/(input_finished-started))
+    except Exception:
+        # A failed paired START may still own the other lens. Retire all selected
+        # recipients when reachable; connection loss also has firmware deadlines.
+        try:
+            client.command(STOP, stream)
+        except Exception:
+            pass
+        raise

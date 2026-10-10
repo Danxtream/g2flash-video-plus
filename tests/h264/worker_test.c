@@ -732,6 +732,9 @@ static void credits(void) {
         const uint8_t header[] = {0x67};
         video_owner *owner = context.video_owner;
         assert(video_queue_push(&owner->queue, 0, header, sizeof(header)) == 1);
+        video_nal_view view;
+        /* Claim before a fresh credit query wakes the actual worker. */
+        assert(video_queue_claim(&owner->queue, token, &view));
         assert(!give(1));
         assert(!credit_response(saved, route, current) && !memcmp(current, frozen, 6));
         assert(context.video_control.active_deadline == deadline);
@@ -739,8 +742,6 @@ static void credits(void) {
         video_write32(p + (here == 1 ? 12 : 16), token);
         assert(!credit_response(p, route, current) && (current[4] & 7) == 3);
         assert(!take(1, 1000));
-        video_nal_view view;
-        assert(video_queue_claim(&owner->queue, token, &view));
         assert(video_queue_release(&owner->queue, &view));
         assert(!give(1));
         control_command(p, VIDEO_CONTROL_CREDITS, 1);

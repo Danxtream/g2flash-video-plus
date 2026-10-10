@@ -24,7 +24,7 @@ def status_bytes(state=0, stream=0, token=1, consumed=0, pictures=0, options=0, 
     struct.pack_into('<I', raw, 20, stream)
     struct.pack_into('<IIHHBB', raw, 32, 4096, 4086, 320, 192, 1, 2)
     raw[46:52] = bytes((1, 1, 4, 6, 4 if state else 0, 4 if state else 0))
-    raw[70:72] = bytes((7, 129))
+    raw[70:72] = bytes((15, 129))
     struct.pack_into('<IIII', raw, 52, consumed, consumed, consumed, pictures)
     struct.pack_into('<IIII', raw, 80, pictures, 0, 100, options)
     struct.pack_into('<IIII', raw, 96, 16 if options & VERIFY_FRAMES and state else 0, high, acked, 0)
@@ -89,6 +89,8 @@ class FakePlayback:
         self.state = self.options = self.index = self.consumed = self.high = self.acked = 0
         self.pending = []; self.sent = []; self.reads = self.acks = self.stops = 0
         self.refused = False
+        self.lens = self.targets = 1
+        self.status_reads = self.credit_reads = 0
     def report(self):
         pictures = sum(r['last_nal'] < self.consumed for r in self.reference['frames'])
         report = status(status_bytes(self.state, 1, consumed=self.consumed, pictures=pictures,
@@ -102,13 +104,8 @@ class FakePlayback:
             result = self.report(); result['stream_high'] = 0; return result
         if op == START:
             self.state = 2; self.options = (VERIFY_FRAMES if kwargs['verify'] else 0) | (NATIVE if kwargs['native'] else 0)
-        if op == STATUS and self.pending:
-            if self.fail == 'disconnect':
-                raise ConnectionError('link lost')
-            if self.fail != 'deadline' and self.high - self.acked < 16:
-                self.consumed = self.pending.pop(0) + 1
-                if self.options & VERIFY_FRAMES:
-                    self.high = sum(r['last_nal'] < self.consumed for r in self.reference['frames'])
+        if op == STATUS:
+            self.status_reads += 1
         if op == FRAME_READ:
             self.reads += 1
             expected = self.reference['frames'][kwargs['ordinal'] - 1]
@@ -126,12 +123,27 @@ class FakePlayback:
             if self.fail == 'cleanup':
                 result = self.report(); result['error'] = 15; return result
         return self.report()
+    def credits(self, stream, tokens):
+        assert stream == 1 and tokens == {1: 1}
+        self.credit_reads += 1
+        if self.pending:
+            if self.fail == 'disconnect':
+                raise ConnectionError('link lost')
+            if self.fail != 'deadline' and self.high - self.acked < 16:
+                self.consumed = self.pending.pop(0) + 1
+                if self.options & VERIFY_FRAMES:
+                    self.high = sum(r['last_nal'] < self.consumed for r in self.reference['frames'])
+        return dict(expected=self.consumed, credits=4-len(self.pending), capacity=4,
+                    state=self.state, result=0, error=0)
+    def send_window(self, payloads):
+        return [{1: self.send_nal(*struct.unpack_from('<II', p, 2), p[10:])} for p in payloads]
     def send_nal(self, stream, sequence, data):
         if self.fail == 'refusal' and not self.refused:
             self.refused = True; return False
         if self.fail == 'always-refuse':
             return False
-        assert sequence == self.index and len(self.pending) < 4
+        if sequence != self.index or len(self.pending) == 4:
+            return False
         self.sent.append(sequence); self.pending.append(sequence); self.index += 1; return True
 
 
@@ -185,8 +197,8 @@ class VideoClientTests(unittest.TestCase):
             raw = bytearray(status_bytes()); raw[offset] = value
             with self.assertRaises(ValueError): status(raw)
 
-    def test_credit_stream_separates_nals_frames_eof_drain_and_exact_refusal_retry(self):
-        for failure in (None, 'refusal', 'clock'):
+    def test_credit_stream_separates_nals_frames_eof_drain_without_status_per_nal(self):
+        for failure in (None, 'clock'):
             nals, reference = synthetic_reference(64)
             client = FakePlayback(reference, failure); clock = FakeClock()
             result = stream_clip(client, nals, reference, clock=clock.now, sleep=clock.sleep)
@@ -194,6 +206,8 @@ class VideoClientTests(unittest.TestCase):
             self.assertEqual(client.sent, list(range(66))); self.assertEqual(client.acked, 64)
             self.assertEqual(client.stops, 1)
             self.assertEqual(result['summary']['excluded'], 64 if failure == 'clock' else 0)
+            self.assertLess(client.status_reads, 5)
+            self.assertGreater(client.credit_reads, 16)
 
     def test_off_playback_never_reads_or_acknowledges_results(self):
         nals, reference = synthetic_reference(64)
@@ -205,7 +219,7 @@ class VideoClientTests(unittest.TestCase):
     def test_every_correctness_mismatch_or_connection_loss_voids_run(self):
         nals, reference = synthetic_reference()
         for failure in ('crc', 'token', 'stream', 'ordinal', 'first_nal', 'last_nal', 'calls',
-                        'geometry', 'ack', 'disconnect', 'always-refuse', 'cleanup', 'deadline'):
+                        'geometry', 'ack', 'disconnect', 'refusal', 'always-refuse', 'cleanup', 'deadline'):
             client = FakePlayback(reference, failure); clock = FakeClock()
             with self.subTest(failure=failure), self.assertRaises((ValueError, RuntimeError, TimeoutError, ConnectionError)):
                 stream_clip(client, nals, reference, timeout=.3 if failure == 'deadline' else 600,

@@ -139,6 +139,49 @@ int main(void) {
                ble[3].bytes[0] == CFW_MESSAGE_ACK && ble[3].bytes[4] == 3 - ingress);
         cleanup();
     }
+    /* Four uncompressed records share one reset/end-fenced stream. Packet
+     * boundaries and bridge return order do not identify completed records. */
+    for (uint32_t chunk = 9; chunk <= 233; chunk += 224) {
+        for (uint8_t ingress = 1; ingress <= 2; ++ingress) {
+            uint8_t wire[64];
+            for (uint32_t record = 0; record < 4; ++record) {
+                uint8_t *p = wire + record * 16;
+                p[0] = CFW_MESSAGE_BOTH | (record ? 0 : CFW_MESSAGE_RESET_CONTEXT);
+                p[1] = 11; p[2] = 0;
+                memset(p + 5, record, 11); p[5] = 7;
+                uint16_t crc = cfw_message_crc(p + 5, 11);
+                p[3] = crc; p[4] = crc >> 8;
+            }
+            side = ingress == 1 ? 2 : 1;
+            uint32_t packet_index = 0;
+            for (uint32_t offset = 0; offset < sizeof(wire); offset += chunk) {
+                uint32_t count = sizeof(wire) - offset;
+                if (count > chunk) count = chunk;
+                uint8_t packet[255] = {0xaa, 0x21, (250 + packet_index++) & 255,
+                                      count + 3, 1, 1, CFW_MESSAGE_SID, 0};
+                packet[8] = CFW_MESSAGE_BOTH | (!offset ? CFW_MESSAGE_RESET : 0) |
+                            (offset + count == sizeof(wire) ? CFW_MESSAGE_END : 0);
+                memcpy(packet + 9, wire + offset, count);
+                uint16_t crc = cfw_message_crc(packet + 8, count + 1);
+                packet[9 + count] = crc; packet[10 + count] = crc >> 8;
+                assert(!cfw_receive_packet(0, packet, count + 11));
+            }
+            assert(received == 4 && ble_count == 4 && bridge_count == packet_index);
+            assert(ble[3].size == (chunk == 9 ? 9 : 30) &&
+                   ble[3].bytes[1] == 250 && ble[3].bytes[2] == 3);
+            uint32_t requests = bridge_count;
+            side = ingress == 1 ? 1 : 2;
+            for (uint32_t i = 0; i < requests; ++i)
+                assert(!cfw_message_bridge_received(CFW_MESSAGE_SID, bridge[i].bytes, bridge[i].size, 0));
+            assert(received == 8 && bridge_count == requests + 4);
+            side = ingress == 1 ? 2 : 1;
+            for (uint32_t i = requests; i < bridge_count; ++i)
+                assert(!cfw_message_bridge_received(CFW_MESSAGE_SID, bridge[i].bytes, bridge[i].size, 0));
+            assert(ble_count == 8 && ble[7].size == (chunk == 9 ? 9 : 30) &&
+                   ble[7].bytes[4] == 3 - ingress);
+            cleanup();
+        }
+    }
     body[1] = 0;
     /* RESET_CONTEXT on each record makes capacity depend on that request,
      * even when the negotiated MTU has room for much larger packets. */

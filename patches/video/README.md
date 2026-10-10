@@ -372,9 +372,22 @@ the same environment as the integration suite:
 `tests/h264/video_client.py` works over a supplied authenticated transport. It
 creates no connection and has no firmware-install operation. It reuses stock
 framing, durable control request IDs, frozen pagination and exact retries.
-Only observed free credits admit NALs; a transport NACK retries that same NAL
-sequence after reading fresh status, without resetting video references.
+Only observed free credits admit NALs. Up to four records share a transport
+window, bounded by each recipient's free slots and next-to-consume distance.
+The sender writes that window without per-record status polling and fences
+the exact source-tagged ACKs before its next credit query. Explicit ACK history
+can recover lost notifications. Missing replies get two exact retries; a NACK
+or unrecoverable peer loss retires both owners instead of granting new credit.
 Connection loss invalidates the run and requires a new cleaned-up START.
+
+Select both targets with an explicit ingress lens to send once through the
+existing bridge. Independent replies retain each generation token, sequence,
+capacity and verification cursor. Full STATUS is read at startup, at most once
+per five seconds during input, and at EOF/cleanup. Compact CREDITS drives input.
+The explicit direct-to-both fallback uses two supplied links, the same slower
+recipient bounds and separate ACKs; never switch routes inside a live session.
+Neither mode synchronizes optical presentation. Later pacing must identify
+completed pictures separately from transport records and NAL sequences.
 
 Verification drains every published picture, checks owner/count/format/NAL
 range/Y CRC, then acknowledges its cumulative cursor. EOF waits for all input
