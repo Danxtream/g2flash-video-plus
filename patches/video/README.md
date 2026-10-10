@@ -328,3 +328,36 @@ eight static pool TCBs, stack bases, word counts and static flags, then reads
 at most the allocated 4096 bytes. It never waits, allocates, resets a shared
 stack or guesses a CMSIS stack-space entry. Sampling occurs at controller
 entry/exit outside image/display locks. An unavailable sample stays invalid.
+
+### Offline references and credit sender
+
+`tests/h264/reference_clip.py` compiles the current configured C interface and
+runtime with fatal ASan/UBSan, then decodes every Annex-B NAL in order. It saves
+source and decoder identity, NAL sizes, actual picture counts, contributing NAL
+ranges and active-plane CRC32. The stream-format guard rejects unsupported
+geometry or syntax before this reference can be used for playback. Run it in
+the same environment as the integration suite:
+
+    python3 tests/h264/reference_clip.py <clip.h264> --output <reference.json>
+
+`tests/h264/video_client.py` works over a supplied authenticated transport. It
+creates no connection and has no firmware-install operation. It reuses stock
+framing, durable control request IDs, frozen pagination and exact retries.
+Only observed free credits admit NALs; a transport NACK retries that same NAL
+sequence after reading fresh status, without resetting video references.
+Connection loss invalidates the run and requires a new cleaned-up START.
+
+Verification drains every published picture, checks owner/count/format/NAL
+range/Y CRC, then acknowledges its cumulative cursor. EOF waits for all input
+consumed, all expected pictures copied and all requested evidence acknowledged
+before STOP. Timing anomalies exclude samples while hashes remain mandatory.
+Summaries report cycle and tick milliseconds, exclusions, median/min/max/P90
+and the slowest P frame, with IDR pictures separate. Optional PC pacing uses
+actual reference picture boundaries, never one NAL per picture.
+
+The caller wraps each session in ordinary lease cleanup and diagnostic reads
+before START, after READY and after fully reclaimed STOP. Compare repeated
+quiet heap samples and completed stack/guard reports before continuing a batch.
+Ordinary playback uses no frame reads or result ACKs. Diagnostic and transport
+waits do not belong in decode-only timing. Native mocks do not qualify optical
+orientation, hardware stack use or real Bluetooth throughput.
