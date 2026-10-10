@@ -44,6 +44,7 @@ static pthread_mutex_t pool_mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t pool_count, fail_pool, pool_calls;
 static uint8_t control_reply[30];
 static uint32_t control_reply_size;
+static void (*heap_sample_hook)(void);
 static const uint32_t shadow_present = 1;
 
 static void test_zero(uint8_t *p, uint32_t n) { memset(p, 0, n); }
@@ -77,6 +78,13 @@ static int give(uint32_t m) {
 static uint32_t mutex_new(void *p) { assert(!p && !image_depth); ++mutex_calls; return 1; }
 static int mutex_delete(uint32_t m) { assert(m == 1 && !image_depth); return 0; }
 static uint32_t thread_id(void) { return worker_thread ? 2 : 3; }
+static uint32_t controller_used = 512, controller_samples;
+static int stack_sample(uint32_t *task, uint32_t *used, uint32_t *bytes) {
+    assert(!service_context && !image_depth && !worker_thread);
+    ++controller_samples;
+    *task = 3; *used = controller_used; *bytes = 4096; return 1;
+}
+#define VIDEO_PLATFORM_STACK_SAMPLE stack_sample
 static int pool_dispatch(const video_pool_item *item) {
     assert(!pthread_mutex_lock(&pool_mutex));
     ++pool_calls;
@@ -137,6 +145,7 @@ static void release(void *p) {
 }
 static int video_platform_heap_view(void *p, uint32_t heap, video_heap_view *out) {
     assert(!service_context && !p && !image_depth);
+    if (heap_sample_hook) { void (*hook)(void) = heap_sample_hook; heap_sample_hook = 0; hook(); }
     uint32_t i = heap == 20 ? 0 : heap == 13 ? 1 : 2;
     if (fail_view) return 0;
     *out = views[i];
@@ -169,6 +178,7 @@ static void video_platform_release(void *p, void *v) { assert(!p); release(v); }
 #include "../../patches/video/queue.c"
 #include "../../patches/video/worker.c"
 #include "../../patches/video/controller.c"
+#include "../../patches/video/diagnostics.c"
 #include "../../patches/video/control.c"
 
 int worker_test_stream(void *);
@@ -306,6 +316,7 @@ static void configure(void) {
     pause_at = preparing_paused = resume_preparation = start_result = stop_result = 0;
     assert(!pool_count);
     fail_pool = pool_calls = control_reply_size = 0;
+    controller_used = 512; controller_samples = 0; heap_sample_hook = 0;
     for (uint32_t i = 0; i < 4; ++i) assert(!events[i].control);
     views[0] = (video_heap_view){382756, 376832};
     views[1] = (video_heap_view){285680, 278528};
@@ -622,6 +633,71 @@ static void controls(void) {
     control_command(p, VIDEO_CONTROL_START, 6);
     assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_DISPATCH && !pool_count);
     puts("MTU23 paging, idempotent controls, guarded startup, pool refusal and expiry reaping PASS");
+}
+
+static void evict_diagnostics(void) {
+    uint8_t request[VIDEO_START_BYTES];
+    for (uint32_t i = 0; i < VIDEO_CONTROL_REPLAYS; ++i) {
+        control_command(request, VIDEO_CONTROL_STATUS, 0);
+        assert(!video_control_received(request, 8, &control_route));
+    }
+}
+static void diagnostics(void) {
+    configure(); request_next = 0;
+    for (uint32_t i = 0; i < VIDEO_POOL_TASKS; ++i) {
+        uint32_t id = VIDEO_POOL_TCBS + i * VIDEO_POOL_TCB_BYTES;
+        uint32_t base = VIDEO_POOL_STACKS + i * VIDEO_POOL_STACK_BYTES;
+        assert(video_stack_pool_index(id) == (int)i);
+        assert(video_stack_pool_valid(id, id, base, 1024, 2));
+        assert(!video_stack_pool_valid(id, id + 1, base, 1024, 2));
+        assert(!video_stack_pool_valid(id, id, base + 4, 1024, 2));
+        assert(!video_stack_pool_valid(id, id, base, 1025, 2));
+        assert(!video_stack_pool_valid(id, id, base, 1024, 1));
+    }
+    assert(video_stack_pool_index(VIDEO_POOL_TCBS - 1) < 0);
+    assert(video_stack_pool_index(VIDEO_POOL_TCBS + 1) < 0);
+    assert(video_stack_pool_index(VIDEO_POOL_TCBS + 8 * VIDEO_POOL_TCB_BYTES) < 0);
+    uint8_t stack[16]; memset(stack, VIDEO_STACK_FILL, sizeof(stack));
+    assert(video_stack_unused(stack, sizeof(stack)) == sizeof(stack));
+    stack[7] = 0; assert(video_stack_unused(stack, sizeof(stack)) == 4);
+    stack[0] = 0; assert(!video_stack_unused(stack, sizeof(stack)));
+    assert(!video_stack_unused(0, 0));
+    uint8_t request[VIDEO_START_BYTES], frozen[VIDEO_DIAGNOSTICS_BYTES];
+    control_command(request, VIDEO_CONTROL_DIAGNOSTICS, 0);
+    assert(!video_control_received(request, 8, &control_route));
+    assert(!allocation_calls && !creates && control_reply[7] == VIDEO_DIAGNOSTICS_BYTES);
+    uint8_t page[9] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_PAGE, VIDEO_PROTOCOL_VERSION};
+    memcpy(page + 4, request + 4, 4);
+    for (uint32_t i = 0; i < sizeof(frozen); ++i) {
+        page[8] = i; assert(!video_control_received(page, sizeof(page), &control_route));
+        frozen[i] = control_reply[8];
+    }
+    assert(frozen[0] == 1 && frozen[1] == VIDEO_CONTROL_DIAGNOSTICS && !frozen[2] &&
+           frozen[3] == 7 && video_read32(frozen + 16) == views[0].free_bytes &&
+           !video_read32(frozen + 124));
+    views[0].free_bytes = views[0].max_alloc = 99999;
+    assert(!video_control_received(request, 8, &control_route));
+    page[8] = 16; assert(!video_control_received(page, sizeof(page), &control_route));
+    assert(control_reply[8] == frozen[16]); /* Frozen replay does not resample. */
+    fail_view = 1;
+    control_command(request, VIDEO_CONTROL_DIAGNOSTICS, 0);
+    assert(!video_control_received(request, 8, &control_route));
+    video_control_replay *last = &context.video_control.replay[0][1];
+    assert(!(last->snapshot[3] & 7) && video_read32(last->snapshot + 16) == UINT32_MAX);
+    fail_view = 0;
+    controller_used = 1200; video_controller_stack_sample();
+    controller_used = 800; video_controller_stack_sample();
+    assert(context.video_control.stack_used == 1200 && context.video_control.stack_task == 3);
+    control_command(request, VIDEO_CONTROL_DIAGNOSTICS, 0);
+    assert(!video_control_received(request, 8, &control_route));
+    last = &context.video_control.replay[0][2];
+    assert(last->snapshot[3] & 16 && video_read32(last->snapshot + 120) == 1200 &&
+           video_read32(last->snapshot + 124) == 4096);
+    control_command(request, VIDEO_CONTROL_DIAGNOSTICS, 0);
+    heap_sample_hook = evict_diagnostics;
+    assert(video_control_received(request, 8, &control_route) == -1);
+    assert(!allocation_calls && !creates && !image_depth);
+    puts("bounded stack scan, live invalid heaps, frozen MTU23 and concurrent replay eviction PASS");
 }
 static void *pool_run(void *argument) { (void)argument; pool_drain(); return 0; }
 static void control_preparation(void) {
@@ -1058,6 +1134,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "wakeups")) wakeups();
     else if (!strcmp(argv[1], "preparation")) preparation_cancel();
     else if (!strcmp(argv[1], "controls")) controls();
+    else if (!strcmp(argv[1], "diagnostics")) diagnostics();
     else if (!strcmp(argv[1], "control-preparation")) control_preparation();
     else if (!strcmp(argv[1], "control-failures")) control_failures();
     else if (!strcmp(argv[1], "nal-input")) nal_input();

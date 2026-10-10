@@ -196,3 +196,33 @@ The native controller tests and mocked PC receive client cover cleanup, partial
 startup, generation tags, repeated sessions and paged MTU-23 replies. The client
 sequences NALs independently and asserts no consumption/presentation. Live
 device validation is separate from these mocks and boot/update-start checks.
+
+### Bounded diagnostics
+
+Status byte 70 bit 0 advertises diagnostics (opcode 7, eight-byte request).
+The 128-byte response is frozen in the same bounded replay cache, including
+MTU-23 pagination. Duplicate reads do not resample or renew a video session.
+Diagnostics do not require a decoder owner or verification/playback mode.
+
+Bytes 0..3 are protocol version, opcode, control result and validity flags:
+bits 0..2 validate live cached/display/other heaps, bit 3 marks quarantine,
+bit 4 validates the pool-task stack, and bit 5 marks a lifecycle change during
+capture. LE32 tick/generation occupy 4/8. Three 12-byte heap records at 12 hold
+tick, free bytes and largest allocation; an invalid heap uses UINT32_MAX.
+These bounded, lock-free TLSF views are approximate, not one atomic snapshot.
+Repeat quiet post-cleanup reads before interpreting a free-byte loss as a leak.
+
+The completed-worker report at 48 contains seventeen LE32 fields: validity,
+token, current state, fault, storage peak/remaining, decoder object bytes and
+alignment, worker stack used/size, guards, three captured free-byte values and
+three largest allocations. No active/quarantined worker stack is scanned.
+Captured heaps precede owner reclamation; compare post-IDLE live heaps too.
+At 116 are LE32 pool task ID, lifetime stack bytes used and allocation size.
+Stock work shares those tasks, so this is not controller-only usage.
+
+The authenticated donor fills task stacks with 0xa5; its own high-water scan
+has no bound. The sampler instead authenticates the current task against the
+eight static pool TCBs, stack bases, word counts and static flags, then reads
+at most the allocated 4096 bytes. It never waits, allocates, resets a shared
+stack or guesses a CMSIS stack-space entry. Sampling occurs at controller
+entry/exit outside image/display locks. An unavailable sample stays invalid.

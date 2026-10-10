@@ -86,6 +86,7 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
     if (!ctx || app != VIDEO_MESSAGE_ID || data || event || !serial ||
         serial != __atomic_load_n(&ctx->video_control.controller_job, __ATOMIC_ACQUIRE)) return;
     video_control_state *s = &ctx->video_control;
+    video_controller_stack_sample();
     /* Only this claimed pool callback owns controller waits. Receive handlers
      * coalesce requests without borrowing owner storage or joining a task. */
     for (uint32_t step = 0; step < VIDEO_CONTROL_REPLAYS; ++step) {
@@ -141,6 +142,12 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
             __atomic_store_n(&s->start_guard, 0, __ATOMIC_RELEASE);
         }
         if (!__atomic_load_n(&s->controller_reasons, __ATOMIC_ACQUIRE)) {
+            video_control_give(ctx);
+            video_controller_stack_sample();
+            if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) {
+                __atomic_store_n(&s->controller_failed, 1, __ATOMIC_RELEASE);
+                break;
+            }
             __atomic_store_n(&s->controller_job, 0, __ATOMIC_RELEASE);
             video_control_give(ctx);
             /* Worker notifications are atomic and need not take this lock.
@@ -151,6 +158,7 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
         }
         video_control_give(ctx);
     }
+    video_controller_stack_sample();
     __atomic_store_n(&s->controller_job, 0, __ATOMIC_RELEASE);
     if (__atomic_load_n(&s->controller_reasons, __ATOMIC_ACQUIRE) &&
         !video_controller_schedule(ctx))

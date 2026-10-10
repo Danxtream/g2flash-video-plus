@@ -83,6 +83,9 @@ class WorkerTests(unittest.TestCase):
     def test_control_replies_replays_guarded_start_and_deferred_expiry_reaping(self):
         self.check_case("controls")
 
+    def test_bounded_diagnostics_freeze_heaps_and_pool_stack_outside_locks(self):
+        self.check_case("diagnostics")
+
     def test_stop_invalidates_controls_before_claim_and_during_preparation(self):
         self.check_case("control-preparation")
 

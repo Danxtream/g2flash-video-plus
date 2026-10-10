@@ -12,7 +12,8 @@ import unittest
 from g2flash import CTRL, crc16
 from receive_client import (CAPABILITIES, START, STOP, RESET, STATUS, PAGE,
                             ReceiveClient, RequestCounter, control, nal,
-                            packets, parse_page, snapshot)
+                            packets, parse_page, snapshot, DIAGNOSTICS,
+                            diagnostics, diagnostic_alerts)
 
 
 def frame(body):
@@ -27,6 +28,17 @@ def status_bytes(stream=0, state=0, capacity=0, accepted=0, error=0):
     struct.pack_into('<IIHHBB', raw, 32, 4096, 4086, 320, 192, 1, 2)
     raw[46:52] = bytes([1, 1, 4, 6, capacity, capacity - accepted])
     struct.pack_into('<I', raw, 56, accepted)
+    return bytes(raw)
+
+
+def diagnostic_bytes():
+    raw = bytearray(128)
+    raw[:4] = bytes([1, DIAGNOSTICS, 0, 23])
+    for index in range(3):
+        struct.pack_into('<III', raw, 12 + index * 12, 500, 200000, 180000)
+    struct.pack_into('<17I', raw, 48, 1, 4, 0, 0, 198000, 0, 144, 8, 7000, 16384, 1,
+                     100000, 200000, 150000, 80000, 180000, 120000)
+    struct.pack_into('<III', raw, 116, 3, 2800, 4096)
     return bytes(raw)
 
 
@@ -76,8 +88,8 @@ class MockTransport:
                 elif op in (STOP, RESET):
                     self.state = 0
                     self.slots.clear()
-                self.replays[request] = status_bytes(self.stream, self.state,
-                    4 if self.state else 0, len(self.slots))
+                self.replays[request] = diagnostic_bytes() if op == DIAGNOSTICS else status_bytes(
+                    self.stream, self.state, 4 if self.state else 0, len(self.slots))
             raw = self.replays[request]
             pages = (len(raw) + self.page_bytes - 1) // self.page_bytes
             content = raw[page * self.page_bytes:(page + 1) * self.page_bytes]
@@ -165,11 +177,40 @@ class ReceiveClientTests(unittest.TestCase):
 
     def test_snapshot_refuses_playback_claims_and_changed_contract(self):
         self.assertEqual(snapshot(status_bytes())['pictures'], 0)
-        for offset, value in ((1, 5), (46, 0), (50, 5), (60, 1), (64, 1), (68, 3), (70, 1)):
+        for offset, value in ((1, 5), (46, 0), (50, 5), (60, 1), (64, 1), (68, 3), (70, 2)):
             raw = bytearray(status_bytes())
             raw[offset] = value
             with self.assertRaises(ValueError):
                 snapshot(raw)
+
+    def test_diagnostics_pagination_at_minimum_mtu_and_live_report_validation(self):
+        for page_bytes in (1, 22):
+            client = ReceiveClient(MockTransport(page_bytes=page_bytes), 1, Counter())
+            report = client.command(DIAGNOSTICS)
+            self.assertEqual(report['heaps'][20]['max'], 180000)
+            self.assertEqual(report['worker']['storage_peak'], 198000)
+            self.assertEqual(report['controller']['used'], 2800)
+            self.assertFalse(diagnostic_alerts(report, report))
+        for offset, value in ((1, 6), (3, 128)):
+            raw = bytearray(diagnostic_bytes()); raw[offset] = value
+            with self.assertRaises(ValueError):
+                diagnostics(raw)
+        raw = bytearray(diagnostic_bytes())
+        struct.pack_into('<I', raw, 20, 200001)
+        with self.assertRaises(ValueError):
+            diagnostics(raw)
+
+    def test_diagnostics_flag_heap_loss_and_stack_or_guard_failures(self):
+        before = diagnostics(diagnostic_bytes())
+        raw = bytearray(diagnostic_bytes())
+        struct.pack_into('<I', raw, 16, 190000)
+        struct.pack_into('<I', raw, 80, 16000)
+        struct.pack_into('<I', raw, 88, 0)
+        struct.pack_into('<I', raw, 120, 3900)
+        alerts = diagnostic_alerts(before, diagnostics(raw))
+        self.assertTrue(any('10000 bytes lost' in row for row in alerts))
+        self.assertIn('worker stack guard/accounting failure', alerts)
+        self.assertIn('pool-task stack spare below 512 bytes', alerts)
 
     def test_request_reservation_survives_restart_and_refuses_wrap(self):
         with tempfile.TemporaryDirectory() as directory:

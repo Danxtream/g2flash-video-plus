@@ -1,6 +1,7 @@
 /* Audited Even 2.2.9.22 services. SPDX-License-Identifier: GPL-3.0-only */
 #pragma once
 #include <stdint.h>
+#include "stack.h"
 
 /* CMSIS osThreadAttr_t on this donor uses a caller-owned 112-byte static TCB.
  * priority 8 yields to normal services; no timer or interrupt suppression. */
@@ -65,6 +66,26 @@ _Static_assert(sizeof(video_pool_item) == 20, "copied pool item ABI");
 #define VIDEO_TICK FW_MS_TICK
 #define VIDEO_OWNER_ALLOC cfw_malloc
 #define VIDEO_OWNER_FREE FW_FREE
+
+#ifndef VIDEO_PLATFORM_STACK_SAMPLE
+/* This donor has no CMSIS stack-space wrapper. Authenticate the current task
+ * against its eight static pool TCBs before reading the 4 KiB sentinel area.
+ * TCB offsets 48/84/109 hold stack base/word count/static-storage flag. */
+static int video_platform_stack_sample(uint32_t *task, uint32_t *used, uint32_t *bytes) {
+    uint32_t id = VIDEO_OS_THREAD_ID();
+    int index = video_stack_pool_index(id);
+    if (index < 0) return 0;
+    const volatile uint32_t *tcb = (const void *)(uintptr_t)id;
+    uint32_t base = VIDEO_POOL_STACKS + (uint32_t)index * VIDEO_POOL_STACK_BYTES;
+    if (!video_stack_pool_valid(id, ((const volatile uint32_t *)VIDEO_POOL_IDS)[index],
+        tcb[12], tcb[21], ((const volatile uint8_t *)tcb)[109])) return 0;
+    *task = id; *bytes = VIDEO_POOL_STACK_BYTES;
+    *used = VIDEO_POOL_STACK_BYTES - video_stack_unused((const void *)(uintptr_t)base,
+                                                      VIDEO_POOL_STACK_BYTES);
+    return 1;
+}
+#define VIDEO_PLATFORM_STACK_SAMPLE video_platform_stack_sample
+#endif
 
 /* Descriptor/arena identities authenticated by the exact donor-image guard.
  * The other heap excludes the existing 1 KiB context-anchor tail. */

@@ -23,6 +23,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     video_control_state *s = &ctx->video_control;
     uint8_t *p = entry->snapshot;
     bzero(p, VIDEO_STATUS_BYTES);
+    entry->snapshot_bytes = VIDEO_STATUS_BYTES;
     p[0] = VIDEO_PROTOCOL_VERSION;
     p[1] = 4; /* Gap-bounded receipt; no live consumer or presentation. */
     p[2] = entry->result;
@@ -52,6 +53,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     video_write32(p + 64, queue.pictures);
     p[68] = s->error >= VIDEO_CONTROL_GAP ? 2 : queue.gap_deadline ? 1 : 0;
     p[69] = queue.header_progress;
+    p[70] = 1; /* Bounded diagnostics are available without a live owner. */
     video_write32(p + 72, queue.gap_deadline);
     video_write32(p + 76, queue.gap_sequence);
 }
@@ -176,9 +178,32 @@ int video_control_received(const uint8_t *data, uint16_t size,
         memcpy(entry->command, data, size);
         entry->result = video_control_apply(ctx, data, size, route->origin);
         video_snapshot(ctx, entry);
+        if (data[1] == VIDEO_CONTROL_DIAGNOSTICS && size == VIDEO_CONTROL_HEADER_BYTES) {
+            entry->pending = 1;
+            /* Heap walking and completed-worker sampling belong outside the
+             * receive publication lock. Revalidate the reserved replay after
+             * sampling: another request may have evicted it meanwhile. */
+            video_control_give(ctx);
+            uint8_t snapshot[VIDEO_DIAGNOSTICS_BYTES];
+            int sampled = video_diagnostics_snapshot(snapshot);
+            if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) return -1;
+            if (entry->request != request || !entry->pending) {
+                video_control_give(ctx); return -1;
+            }
+            entry->pending = 0;
+            entry->result = sampled ? VIDEO_CONTROL_ACCEPTED : VIDEO_CONTROL_BUSY;
+            if (!sampled) bzero(snapshot, sizeof(snapshot));
+            snapshot[0] = VIDEO_PROTOCOL_VERSION;
+            snapshot[1] = VIDEO_CONTROL_DIAGNOSTICS;
+            snapshot[2] = entry->result;
+            if (video_read32(snapshot + 8) != ctx->video.generation) snapshot[3] |= 32;
+            memcpy(entry->snapshot, snapshot, sizeof(snapshot));
+            entry->snapshot_bytes = VIDEO_DIAGNOSTICS_BYTES;
+        }
     }
+    if (entry->pending) { video_control_give(ctx); return -1; }
     uint32_t count = entry->capacity - VIDEO_REPLY_HEADER_BYTES;
-    uint32_t pages = (VIDEO_STATUS_BYTES + count - 1) / count;
+    uint32_t pages = (entry->snapshot_bytes + count - 1) / count;
     if (page >= pages || route->reply_capacity < entry->capacity) {
         video_control_give(ctx); return -1;
     }
@@ -186,7 +211,7 @@ int video_control_received(const uint8_t *data, uint16_t size,
     video_write32(reply + 2, request);
     reply[6] = page; reply[7] = pages;
     uint32_t offset = page * count;
-    if (count > VIDEO_STATUS_BYTES - offset) count = VIDEO_STATUS_BYTES - offset;
+    if (count > entry->snapshot_bytes - offset) count = entry->snapshot_bytes - offset;
     memcpy(reply + VIDEO_REPLY_HEADER_BYTES, entry->snapshot + offset, count);
     int accepted = data[1] == VIDEO_CONTROL_PAGE || entry->result == VIDEO_CONTROL_ACCEPTED;
     video_control_give(ctx);

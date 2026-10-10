@@ -13,10 +13,12 @@ enum {
     VIDEO_CONTROL_STATUS = 4,
     VIDEO_CONTROL_PAGE = 5,
     VIDEO_CONTROL_NAL = 6,
+    VIDEO_CONTROL_DIAGNOSTICS = 7,
     VIDEO_CONTROL_HEADER_BYTES = 8,
     VIDEO_START_BYTES = 24,
     VIDEO_CONTROL_REPLAYS = 4,
     VIDEO_STATUS_BYTES = 80,
+    VIDEO_DIAGNOSTICS_BYTES = 128,
     VIDEO_REPLY_HEADER_BYTES = 8,
     VIDEO_RECORD_LIMIT = 4096,
     VIDEO_NAL_LIMIT = VIDEO_RECORD_LIMIT - 10,
@@ -51,9 +53,10 @@ enum {
  * after a reply enqueue fails. Pagination never re-executes a control. */
 typedef struct {
     uint32_t request;
-    uint8_t length, result, capacity, reserved;
+    uint8_t length, result, capacity, pending;
+    uint8_t snapshot_bytes;
     uint8_t command[VIDEO_START_BYTES];
-    uint8_t snapshot[VIDEO_STATUS_BYTES];
+    uint8_t snapshot[VIDEO_DIAGNOSTICS_BYTES];
 } video_control_replay;
 
 typedef struct {
@@ -65,6 +68,7 @@ typedef struct {
     volatile uint32_t controller_failed;
     volatile uint32_t notify_release_generation, notify_lease_generation;
     volatile uint32_t notify_failed_generation;
+    volatile uint32_t stack_sequence, stack_task, stack_used, stack_bytes;
     uint8_t replay_next[2];
     video_control_replay replay[2][VIDEO_CONTROL_REPLAYS];
 } video_control_state;
@@ -87,3 +91,9 @@ int video_control_blocks_custom(const uint8_t *, uint32_t);
 /* Task-context transport admission preserves the display reserve and shadow
  * allowance while video owns cached memory. Recheck after allocating too. */
 int video_transport_room(uint32_t bytes);
+/* Sample the current cleanup task outside shared locks; retain the greatest
+ * lifetime usage observed on an authenticated donor pool stack. */
+void video_controller_stack_sample(void);
+/* Capture approximate live heaps and safely completed worker/stack reports
+ * outside display/image locks into one bounded, versioned response. */
+int video_diagnostics_snapshot(uint8_t out[VIDEO_DIAGNOSTICS_BYTES]);

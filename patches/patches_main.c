@@ -46,4 +46,5 @@
 #include "video/queue.c"
 #include "video/worker.c"
 #include "video/controller.c"
+#include "video/diagnostics.c"
 #include "video/control.c"
