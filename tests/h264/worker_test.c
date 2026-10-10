@@ -24,6 +24,7 @@ static uint32_t task_live, creates, terminates, allocation_calls, allocations_li
 static uint32_t fail_at, fail_task, bad_tcb, fail_terminate, fail_view;
 static uint32_t cancel_new, expire_new, fail_publication, defer_reclaimed;
 static uint32_t feed, fed, stream_ok, corrupt_guard, suppress_park;
+static uint32_t consume_enabled, decoded_calls, consumed_frames, decode_paused, refuse_extension;
 static uint32_t mutex_calls, release_calls, runtime_at_release;
 static uint32_t event_calls, fail_event, inject_cancel, inject_renew;
 static uint32_t worker_waits, longest_wait, renewed;
@@ -172,11 +173,15 @@ static void video_platform_release(void *p, void *v) { assert(!p); release(v); }
 #define VIDEO_OWNER_ALLOC allocate
 #define VIDEO_OWNER_FREE release
 #define bzero test_zero
+#include "../../patches/h264/g2_h264.h"
+static g2_h264_result worker_decode(void *, const uint8_t *, uint32_t);
 #include "../../patches/video/runtime_provider.c"
 #include "../../patches/video/storage.c"
 #include "../../patches/video/lifecycle.c"
 #include "../../patches/video/queue.c"
+#define g2_h264_decode worker_decode
 #include "../../patches/video/worker.c"
+#undef g2_h264_decode
 #include "../../patches/video/controller.c"
 #include "../../patches/video/diagnostics.c"
 #include "../../patches/video/control.c"
@@ -212,6 +217,32 @@ static int delay(uint32_t ms) {
     assert(!image_depth);
     struct timespec t = {0, ms >= 1000 ? 1000000 : ms * 1000000u};
     nanosleep(&t, 0); return 0;
+}
+
+/* Pause the real ABI call, not the queue/owner logic, so ingress regression
+ * cases can inspect immutable slots while the consumer holds one borrowed
+ * input. New consumer cases release this seam and exercise the real decoder. */
+static g2_h264_result worker_decode(void *handle, const uint8_t *nal, uint32_t bytes) {
+    assert(worker_thread && !image_depth);
+    while (!__atomic_load_n(&consume_enabled, __ATOMIC_ACQUIRE) &&
+           !video_lifecycle_cancelled(&context.video, context.video.token)) {
+        __atomic_store_n(&decode_paused, 1, __ATOMIC_RELEASE);
+        delay(1);
+    }
+    if (video_lifecycle_cancelled(&context.video, context.video.token)) return G2_H264_CONSUMED;
+    ++decoded_calls;
+    g2_h264_result result = g2_h264_decode(handle, nal, bytes);
+    if (result == G2_H264_FRAME_READY) {
+        g2_h264_frame_info frame;
+        assert(g2_h264_frame(handle, &frame) == G2_H264_FRAME_READY);
+        assert(frame.width == 320 && frame.height == 192 && frame.count == consumed_frames + 1);
+        for (uint32_t y = 0; y < frame.height; ++y)
+            for (uint32_t x = 0; x < frame.width; ++x)
+                assert(frame.y[y * frame.stride + x] == 128);
+        ++consumed_frames;
+        if (refuse_extension && consumed_frames == 2) views[0].max_alloc = 8000;
+    }
+    return result;
 }
 static uint32_t event_new(const video_event_attr *attr) {
     assert(!image_depth && attr && attr->cb_mem && attr->cb_size == 32);
@@ -317,6 +348,7 @@ static void configure(void) {
     assert(!pool_count);
     fail_pool = pool_calls = control_reply_size = 0;
     controller_used = 512; controller_samples = 0; heap_sample_hook = 0;
+    consume_enabled = decoded_calls = consumed_frames = decode_paused = refuse_extension = 0;
     for (uint32_t i = 0; i < 4; ++i) assert(!events[i].control);
     views[0] = (video_heap_view){382756, 376832};
     views[1] = (video_heap_view){285680, 278528};
@@ -567,7 +599,7 @@ static void controls(void) {
     configure(); request_next = 0;
     control_command(p, VIDEO_CONTROL_CAPABILITIES, 0);
     assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED);
-    assert(snapshot[1] == 4 && snapshot[3] == VIDEO_IDLE && !snapshot[50] &&
+    assert(snapshot[1] == 5 && snapshot[3] == VIDEO_IDLE && !snapshot[50] &&
            !allocations_live && !creates && !pool_calls);
     control_command(p, VIDEO_CONTROL_START, 1);
     context.texture_cache = (void *)(uintptr_t)1;
@@ -786,6 +818,10 @@ static void nal_input(void) {
         assert(!video_control_received(record, VIDEO_SLOT_BYTES, &control_route));
     }
     memset(record + VIDEO_NAL_HEADER_BYTES, 0xee, VIDEO_RAW_NAL_BYTES);
+    uint32_t pause_limit = tick() + 3000;
+    while (!__atomic_load_n(&decode_paused, __ATOMIC_ACQUIRE)) {
+        assert((int32_t)(pause_limit - tick()) > 0); delay(1);
+    }
     assert(owner->queue.count == 4 && owner->queue.accepted == 4 &&
            !owner->queue.consumed && allocation_calls == allocations);
     for (uint32_t i = 0; i < 4; ++i)
@@ -860,6 +896,59 @@ static int receive_header(uint32_t stream, uint32_t sequence, uint8_t header) {
     video_write32(record + 2, stream); video_write32(record + 6, sequence);
     record[10] = header; record[11] = 0x55;
     return video_control_received(record, sizeof(record), &control_route);
+}
+
+int worker_enqueue_stream(void);
+int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
+    assert(bytes <= VIDEO_RAW_NAL_BYTES && !worker_thread);
+    uint8_t record[VIDEO_SLOT_BYTES] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_NAL};
+    video_write32(record + 2, 1); video_write32(record + 6, sequence);
+    memcpy(record + VIDEO_NAL_HEADER_BYTES, nal, bytes);
+    uint32_t limit = tick() + 3000;
+    for (;;) {
+        if (!video_control_received(record, VIDEO_NAL_HEADER_BYTES + bytes, &control_route)) break;
+        assert((int32_t)(limit - tick()) > 0 && state() == VIDEO_READY); delay(1);
+    }
+    /* Uploaded input is no longer borrowed. The same sequence can be retried
+     * exactly even if consumption happened before the transport reply. */
+    assert(!video_control_received(record, VIDEO_NAL_HEADER_BYTES + bytes, &control_route));
+    memset(record + VIDEO_NAL_HEADER_BYTES, 0xee, bytes);
+    return 1;
+}
+
+static void consumer(void) {
+    for (uint32_t refused = 0; refused < 2; ++refused) {
+        configure(); request_next = 0; consume_enabled = 1;
+        uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+        control_command(p, VIDEO_CONTROL_START, 1);
+        assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); await_ready();
+        refuse_extension = refused; // Refuse only after both real DPB planes were allocated.
+        assert(worker_enqueue_stream());
+        uint32_t limit = tick() + 5000;
+        for (;;) {
+            control_command(p, VIDEO_CONTROL_STATUS, 0);
+            assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED);
+            if (video_read32(snapshot + 60) == 34 && video_read32(snapshot + 64) == 32) break;
+            assert((int32_t)(limit - tick()) > 0 && snapshot[3] == VIDEO_READY); delay(1);
+        }
+        assert(decoded_calls == 34 && consumed_frames == 32 && snapshot[50] == (refused ? 4 : 6));
+        control_command(p, VIDEO_CONTROL_STOP, 1);
+        assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); finish();
+    }
+    configure(); request_next = 0; consume_enabled = 1;
+    uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+    control_command(p, VIDEO_CONTROL_START, 1);
+    assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); await_ready();
+    assert(!receive_header(1, 0, 0x67)); // Semantically invalid SPS, unlike receipt-only header admission.
+    uint32_t limit = tick() + 3000;
+    while (!context.video.parked) { assert((int32_t)(limit - tick()) > 0); delay(1); }
+    assert(context.video_owner && ((video_owner *)context.video_owner)->queue.consumed == 0);
+    pool_drain(); finish();
+    assert(context.video_control.error == VIDEO_CONTROL_INPUT);
+    puts("64 queued Y planes match; NAL/picture counts differ; semantic error retires without credit PASS");
 }
 static void await_reclaimed(void) {
     uint32_t limit = tick() + 3000;
@@ -1140,6 +1229,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "nal-input")) nal_input();
     else if (!strcmp(argv[1], "queue-extension")) queue_extension();
     else if (!strcmp(argv[1], "recovery")) recovery();
+    else if (!strcmp(argv[1], "consumer")) consumer();
     else if (!strcmp(argv[1], "inactivity")) inactivity();
     else if (!strcmp(argv[1], "cleanup")) cleanup();
     else if (!strcmp(argv[1], "lease-notifications")) lease_notifications();

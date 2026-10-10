@@ -27,7 +27,7 @@ toolchain = load_module("h264_toolchain", HERE / "toolchain.py")
 build = load_module("h264_firmware_build", ROOT / "patches/build.py")
 EXPORTS = [
     "g2_h264_size", "g2_h264_alignment", "g2_h264_init", "g2_h264_destroy",
-    "g2_h264_decode", "g2_h264_frame",
+    "g2_h264_decode", "g2_h264_frame", "g2_h264_limit_format", "g2_h264_dpb",
 ]
 
 

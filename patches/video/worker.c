@@ -16,7 +16,7 @@ typedef struct {
     customCfwContext *context;
     uint32_t token, thread, ingress_allowance, shadow_missing;
     uint32_t wake, complete;
-    uint32_t control_generation, extension_attempted;
+    uint32_t control_generation, extension_attempted, decode_pin;
     volatile uint32_t armed;
     void *raw, *object_allocation, *object, *decoder, *stack_allocation;
     uint8_t *stack;
@@ -79,6 +79,17 @@ static void video_fault_locked(customCfwContext *ctx, uint32_t fault) {
 
 static void video_park_owner(video_owner *owner, uint32_t fault) __attribute__((noreturn));
 static void video_park_owner(video_owner *owner, uint32_t fault) {
+    if (owner->decode_pin) {
+        /* A fatal C++ callback may abandon its current call. Retire only this
+         * worker's pin before park, never an external display user's pin. A
+         * failed bounded publication wait retains storage in quarantine. */
+        if (video_control_wait(owner->context, VIDEO_STOP_LIMIT_MS)) {
+            video_lifecycle_unpin(&owner->context->video, owner->token, 0);
+            owner->decode_pin = 0;
+            video_control_give(owner->context);
+        } else __atomic_store_n(&owner->context->video_quarantine_token,
+                               owner->token, __ATOMIC_RELEASE);
+    }
     uint32_t wake = owner->wake, complete = owner->complete;
     uint32_t token = owner->token, controlled = owner->control_generation;
     video_lifecycle_park(&owner->context->video, owner->token, fault);
@@ -109,6 +120,47 @@ static int video_runtime_preflight(const g2_h264_request *requests, uint32_t cou
     return owner && video_storage_preflight(&owner->storage, requests, count, failure);
 }
 
+/* Borrow exactly one expected owned slot under publication protection. C++
+ * and allocation run only on this task, outside image/display locks. */
+static int video_worker_consume(video_owner *owner) {
+    customCfwContext *ctx = owner->context;
+    if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
+    video_nal_view view;
+    int claimed = !video_lifecycle_cancelled(&ctx->video, owner->token) &&
+        video_queue_claim(&owner->queue, owner->token, &view);
+    if (claimed) {
+        if (!video_lifecycle_pin(&ctx->video, owner->token, 0)) {
+            video_control_give(ctx); video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
+        }
+        owner->decode_pin = 1;
+    }
+    video_control_give(ctx);
+    if (!claimed) return 0;
+    g2_h264_result decoded = g2_h264_decode(owner->decoder, view.bytes, view.length);
+    video_storage_finish_call(&owner->storage);
+    g2_h264_frame_info frame = {0};
+    g2_h264_dpb_info dpb = {0};
+    if (decoded == G2_H264_FRAME_READY &&
+        (g2_h264_frame(owner->decoder, &frame) != G2_H264_FRAME_READY ||
+         !frame.y || frame.width != VIDEO_FRAME_WIDTH || frame.height != VIDEO_FRAME_HEIGHT ||
+         frame.stride < frame.width || !g2_h264_dpb(owner->decoder, &dpb) ||
+         dpb.capacity != VIDEO_FRAME_DPB || dpb.allocated_frames > dpb.capacity))
+        decoded = G2_H264_ERROR;
+    if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
+    int released = decoded != G2_H264_ERROR && video_queue_release(&owner->queue, &view);
+    int unpinned = video_lifecycle_unpin(&ctx->video, owner->token, 0);
+    owner->decode_pin = 0;
+    uint32_t fault = decoded == G2_H264_ERROR ? VIDEO_FAULT_FORMAT :
+        !released || !unpinned ? VIDEO_FAULT_OWNERSHIP :
+        !video_queue_watch(&owner->queue, VIDEO_TICK) ? VIDEO_FAULT_GAP : 0;
+    if (fault) video_fault_locked(ctx, fault);
+    video_control_give(ctx);
+    if (fault) video_runtime_fail(fault);
+    if (decoded == G2_H264_FRAME_READY)
+        video_worker_picture_complete(owner->token, dpb.allocated_frames == dpb.capacity);
+    return 1;
+}
+
 static void video_worker_entry(void *argument) {
     video_owner *owner = argument;
     customCfwContext *ctx = owner->context;
@@ -120,11 +172,12 @@ static void video_worker_entry(void *argument) {
     if (!video_lifecycle_cancelled(&ctx->video, token)) {
         owner->decoder = g2_h264_init(owner->object, g2_h264_size());
         if (!owner->decoder) video_runtime_fail(VIDEO_FAULT_INIT);
+        if (!g2_h264_limit_format(owner->decoder, VIDEO_FRAME_WIDTH, VIDEO_FRAME_HEIGHT,
+                                  VIDEO_FRAME_REFERENCES, VIDEO_FRAME_DPB))
+            video_runtime_fail(VIDEO_FAULT_FORMAT);
         video_storage_finish_call(&owner->storage);
         video_lifecycle_ready(&ctx->video, token);
     }
-    /* No NAL consumer or presenter yet. A future worker command loop must
-     * finish each decoder call and drain output pins before its next call. */
     while (!video_lifecycle_cancelled(&ctx->video, token)) {
         uint32_t now = VIDEO_TICK;
         if (owner->control_generation && __atomic_load_n(
@@ -150,6 +203,7 @@ static void video_worker_entry(void *argument) {
             }
             if (activity - now < timeout) timeout = activity - now;
             if (gap && gap - now < timeout) timeout = gap - now;
+            if (video_worker_consume(owner)) continue;
         }
         /* Sticky wake bits close the predicate-to-wait race. Only the nearest
          * actual lease, gap or activity deadline bounds this event wait. */
@@ -440,7 +494,7 @@ int video_worker_picture_complete(uint32_t token, int dpb_full) {
     if (!owner || token != owner->token || !owner->control_generation || !owner->thread ||
         owner->thread != VIDEO_OS_THREAD_ID()) return 0;
     customCfwContext *ctx = owner->context;
-    if (!video_control_take(ctx)) return 0;
+    if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) return 0;
     if (video_lifecycle_state(&ctx->video) != VIDEO_READY ||
         video_lifecycle_cancelled(&ctx->video, token) || owner->queue.pictures == UINT32_MAX) {
         video_control_give(ctx); return 0;

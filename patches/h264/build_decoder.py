@@ -16,7 +16,8 @@ import subprocess
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 EXPORTS = ("g2_h264_size", "g2_h264_alignment", "g2_h264_init",
-           "g2_h264_destroy", "g2_h264_decode", "g2_h264_frame")
+           "g2_h264_destroy", "g2_h264_decode", "g2_h264_frame",
+           "g2_h264_limit_format", "g2_h264_dpb")
 WORKER_EXPORTS = ("video_worker_start", "video_worker_stop", "video_worker_reset",
                   "video_worker_request_stop_locked", "video_worker_get_report")
 

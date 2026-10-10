@@ -95,6 +95,9 @@ class WorkerTests(unittest.TestCase):
     def test_owned_nal_slots_bound_borrowed_input_and_rollback_partial_start(self):
         self.check_case("nal-input")
 
+    def test_ordered_real_decoder_consumes_owned_nals_and_counts_actual_pictures(self):
+        self.check_case("consumer")
+
     def test_completed_picture_and_full_dpb_admit_optional_slots_or_retain_four(self):
         self.check_case("queue-extension")
 

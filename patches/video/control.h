@@ -1,4 +1,4 @@
-/* Versioned, receive-only video controls. SPDX-License-Identifier: GPL-3.0-only */
+/* Versioned video controls. SPDX-License-Identifier: GPL-3.0-only */
 #pragma once
 #include <stdint.h>
 #include "../message_transport.h"

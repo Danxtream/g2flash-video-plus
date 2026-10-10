@@ -25,7 +25,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     bzero(p, VIDEO_STATUS_BYTES);
     entry->snapshot_bytes = VIDEO_STATUS_BYTES;
     p[0] = VIDEO_PROTOCOL_VERSION;
-    p[1] = 4; /* Gap-bounded receipt; no live consumer or presentation. */
+    p[1] = 5; /* Ordered decoder consumption, without presentation. */
     p[2] = entry->result;
     p[3] = video_lifecycle_state(&ctx->video);
     if (p[3] == VIDEO_IDLE && s->start_guard) p[3] = VIDEO_STARTING;
@@ -41,7 +41,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     p[40] = VIDEO_FRAME_WIDTH & 255; p[41] = VIDEO_FRAME_WIDTH >> 8;
     p[42] = VIDEO_FRAME_HEIGHT & 255; p[43] = VIDEO_FRAME_HEIGHT >> 8;
     p[44] = VIDEO_FRAME_REFERENCES; p[45] = VIDEO_FRAME_DPB;
-    p[46] = 1; /* Chroma skipped; completed pictures remain zero. */
+    p[46] = 1; /* Chroma skipped. */
     p[47] = 1; /* Multiple slices per picture are not implemented. */
     p[48] = VIDEO_QUEUE_INITIAL; p[49] = VIDEO_QUEUE_MAX;
     video_queue_report queue;

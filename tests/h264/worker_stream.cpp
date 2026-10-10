@@ -25,21 +25,27 @@ struct Bits {
 };
 
 extern "C" void worker_finish_call(void);
-extern "C" int worker_test_stream(void *handle) {
+extern "C" int worker_upload_nal(const uint8_t *, uint32_t, uint32_t);
+static int emit(void *handle, Bits b, uint32_t sequence, g2_h264_result expected, bool queued) {
+    uint32_t bytes = b.finish();
+    if (queued) return worker_upload_nal(b.bytes, bytes, sequence);
+    if (g2_h264_decode(handle, b.bytes, bytes) != expected) return 0;
+    worker_finish_call();
+    return 1;
+}
+static int synthetic_stream(void *handle, bool queued) {
     Bits sps(0x67);
     sps.bits(66, 8); sps.bits(0, 8); sps.bits(30, 8);
     sps.ue(0); sps.ue(0); sps.ue(2); sps.ue(1);
     sps.bits(0, 1); sps.ue(19); sps.ue(11);
     sps.bits(1, 1); sps.bits(1, 1); sps.bits(0, 1); sps.bits(0, 1);
-    if (g2_h264_decode(handle, sps.bytes, sps.finish()) != G2_H264_CONSUMED) return 0;
-    worker_finish_call();
+    if (!emit(handle, sps, 0, G2_H264_CONSUMED, queued)) return 0;
     Bits pps(0x68);
     pps.ue(0); pps.ue(0); pps.bits(0, 1); pps.bits(0, 1); pps.ue(0);
     pps.ue(0); pps.ue(0); pps.bits(0, 1); pps.bits(0, 2);
     pps.se(0); pps.se(0); pps.se(0);
     pps.bits(1, 1); pps.bits(0, 1); pps.bits(0, 1);
-    if (g2_h264_decode(handle, pps.bytes, pps.finish()) != G2_H264_CONSUMED) return 0;
-    worker_finish_call();
+    if (!emit(handle, pps, 1, G2_H264_CONSUMED, queued)) return 0;
     for (uint32_t n = 0; n < 32; ++n) {
         Bits b(n ? 0x41 : 0x65);
         b.ue(0); b.ue(n ? 0 : 2); b.ue(0); b.bits(n % 16, 4);
@@ -50,8 +56,8 @@ extern "C" int worker_test_stream(void *handle) {
         else for (uint32_t i = 0; i < 240; ++i) {
             b.ue(3); b.ue(0); b.se(0); b.bits(1, 1);
         }
-        if (g2_h264_decode(handle, b.bytes, b.finish()) != G2_H264_FRAME_READY) return 0;
-        worker_finish_call();
+        if (!emit(handle, b, n + 2, G2_H264_FRAME_READY, queued)) return 0;
+        if (queued) continue;
         g2_h264_frame_info frame = {};
         if (g2_h264_frame(handle, &frame) != G2_H264_FRAME_READY ||
             frame.width != 320 || frame.height != 192 || frame.count != n + 1) return 0;
@@ -61,3 +67,6 @@ extern "C" int worker_test_stream(void *handle) {
     }
     return 1;
 }
+
+extern "C" int worker_test_stream(void *handle) { return synthetic_stream(handle, false); }
+extern "C" int worker_enqueue_stream() { return synthetic_stream(nullptr, true); }

@@ -119,8 +119,9 @@ high-water, stream high-water, last error and interval. Record/NAL maxima are
 LE32 at 32/36; geometry at 40/42, references/DPB at 44/45, forced chroma skip and
 single-slice limit at 46/47, four/six-slot bounds at 48/49. Capacity/free slots are bytes 50/51; LE32
 accepted/consumed NAL counts are at 56/60. Expected sequence is LE32 at 52. Completed pictures are LE32 at 64;
-bytes 68..79 are reserved for recovery details. Stage 3 announces ordered ingress with
-no NAL consumer or completed-picture/presentation support. Transport ACK confirms only
+bytes 68..79 carry recovery and diagnostic details. Stage 5 announces ordered
+decoder consumption and completed-picture counts, without presentation.
+Transport ACK confirms only
 accepted command validation; refusals preserve upstream NACK/context-reset rules.
 
 Transport allocation checks preserve the heap-13 reserve and missing-shadow
@@ -133,9 +134,11 @@ The record limit is 4,096 bytes and raw NAL limit 4,086 bytes. START selects
 the version; data does not carry a second version byte. The owner rejects
 wrong streams/origins, invalid headers, oversize records and cancelled input.
 Its four cached snapshots include any consumer-active slot. Borrowed transport
-bytes never escape dispatch. A future consumer claims/releases a generation-
-checked owned view; this receive-only firmware retains every accepted slot and
-refuses at capacity. A NAL, transport record and completed picture are distinct.
+bytes never escape dispatch. The worker claims/releases a generation-checked
+owned view, returning one credit after successful CONSUMED or FRAME_READY.
+ERROR retires the stream without successful consumption. C++ runs outside
+publication locks; cancellation drains its pin before park and reclamation.
+A NAL, transport record and completed picture are distinct.
 
 Sequence zero starts a new stream. At capacity four, at most three future NALs
 fit ahead of the expected one; sequence distance is strictly below capacity.
@@ -147,9 +150,9 @@ The highest sequence is reserved to prevent wrap; start a new stream instead.
 A worker-only completed-picture notification may attempt one 8 KiB extension
 when the decoder reports its two-frame DPB fully allocated. Allocation happens
 outside image/display locks, with fresh live heap/reserve checks. The two slots
-publish together; failure restores the prior cap and keeps four slots. This
-receive-only firmware never emits that notification. Native fake consumers
-exercise the extension and separate NAL/picture counters.
+publish together; failure restores the prior cap and keeps four slots. The
+trigger is actual allocated DPB planes after FRAME_READY, never NAL count.
+Native tests exercise the real consumer, Y output, extension and refusal.
 
 ### Gap recovery
 
@@ -168,12 +171,17 @@ allocation, joins and frees stay outside image/display locks. A failed reaper
 keeps quarantine. Header receipt requires SPS, PPS and IDR before non-IDR
 slices; it does not validate their contents or claim decoded pictures.
 
-Status stage four remains receive-only. Byte 68 is recovery state (0 clear,
+Byte 68 is recovery state (0 clear,
 1 waiting, 2 needs a fresh stream), byte 69 records SPS/PPS/IDR header receipt
 bits, offset 72 is the gap deadline and offset 76 the first missing receipt
 sequence. Expected consumption at offset 52 and completed pictures at 64 remain
 separate. All pending queue bytes belong to the retired owner, never the next
-stream, and the worker still does not consume or decode them.
+stream. The C interface limits the parsed progressive I/P format before its
+first input: exact 320x192, one reference and two DPB frames, no crop, FMO,
+weighted prediction or multiple slices. Baseline CAVLC, Main CABAC and High
+CABAC with 8x8 transforms are supported; High CAVLC with 8x8 is rejected.
+I_PCM remains rejected by the decoder. Queries return actual lazy DPB storage,
+independent of which reconstruction features are compiled into the decoder.
 
 ### Upstream session cleanup
 
@@ -194,7 +202,8 @@ packet RESET/context reset and NACK rebuild transport, not the video owner.
 
 The native controller tests and mocked PC receive client cover cleanup, partial
 startup, generation tags, repeated sessions and paged MTU-23 replies. The client
-sequences NALs independently and asserts no consumption/presentation. Live
+sequences NALs independently and intentionally rejects the active decoder
+stage: its header-only receive probes are not valid H.264 content. Live
 device validation is separate from these mocks and boot/update-start checks.
 
 ### Bounded diagnostics

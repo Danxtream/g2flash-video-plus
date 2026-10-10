@@ -51,7 +51,7 @@ typedef struct {
 } video_queue_report;
 /* Worker-only, outside image/display locks, after a completed decoder call.
  * dpb_full comes from decoder state, never packet count. One failed extension
- * preserves the four slots and all reserves; receive-only firmware never calls. */
+ * preserves the four slots and all reserves. */
 int video_worker_picture_complete(uint32_t token, int dpb_full);
 /* Copy one validated raw NAL while holding image_mutex; never invoke C++. */
 int video_worker_receive_nal_locked(uint32_t stream, uint32_t sequence,

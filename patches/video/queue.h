@@ -57,7 +57,6 @@ int video_queue_watch(video_nal_queue *, uint32_t now);
 /* Walk contiguous NAL headers only. Receipt is not semantic decoder validation;
  * require parameter sets and IDR before non-IDR slices in a fresh stream. */
 int video_queue_headers(video_nal_queue *);
-/* A later decoder consumer borrows only the expected owned slot, until release.
- * Receive-only firmware deliberately never calls these two consumer functions. */
+/* The decoder consumer borrows only the expected owned slot, until release. */
 int video_queue_claim(video_nal_queue *, uint32_t token, video_nal_view *);
 int video_queue_release(video_nal_queue *, const video_nal_view *);

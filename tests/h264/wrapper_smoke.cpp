@@ -92,11 +92,11 @@ struct Bits {
     void se(int32_t value) { ue(value <= 0 ? uint32_t(-value * 2) : uint32_t(value * 2 - 1)); }
     uint32_t finish() { bits(1, 1); return (count + 7) / 8; }
 };
-static Bits sps() {
+static Bits sps(uint32_t widthMbs = 1, uint32_t heightMbs = 1) {
     Bits b(0x67);
     b.bits(66, 8); b.bits(0, 8); b.bits(10, 8);
     b.ue(0); b.ue(0); b.ue(2); b.ue(1);
-    b.bits(0, 1); b.ue(0); b.ue(0);
+    b.bits(0, 1); b.ue(widthMbs - 1); b.ue(heightMbs - 1);
     b.bits(1, 1); b.bits(1, 1); b.bits(0, 1); b.bits(0, 1);
     return b;
 }
@@ -202,6 +202,40 @@ static void refusal(uint32_t tag) {
     CHECK(live == before);
 }
 
+static void format_limits() {
+    CHECK(!g2_h264_limit_format(nullptr, 16, 16, 1, 2));
+    CHECK(!g2_h264_dpb(nullptr, nullptr));
+    g2_h264_dpb_info dpb = {1, 1, 1};
+    CHECK(!g2_h264_dpb(nullptr, &dpb) && !dpb.capacity && !dpb.allocated_bytes);
+    {
+        Handle h;
+        CHECK(!g2_h264_limit_format(h.value, 15, 16, 1, 2));
+        CHECK(!g2_h264_limit_format(h.value, 16, 16, 2, 3));
+        CHECK(!g2_h264_limit_format(h.value, 16, 16, 1, 1));
+        CHECK(g2_h264_limit_format(h.value, 16, 16, 1, 2));
+        CHECK(g2_h264_dpb(h.value, &dpb) && !dpb.capacity && !dpb.allocated_frames);
+        CHECK(feed(h.value, sps()) == G2_H264_CONSUMED);
+        CHECK(!g2_h264_limit_format(h.value, 32, 16, 1, 2));
+        CHECK(feed(h.value, pps()) == G2_H264_CONSUMED);
+        Bits unsupported(0x65); unsupported.ue(0); unsupported.ue(1); unsupported.ue(0);
+        CHECK(feed(h.value, unsupported) == G2_H264_ERROR); // B syntax is rejected before reconstruction.
+        CHECK(feed(h.value, idr()) == G2_H264_FRAME_READY);
+        CHECK(g2_h264_dpb(h.value, &dpb) && dpb.capacity == 2 &&
+              dpb.allocated_frames == 1 && dpb.allocated_bytes == 256);
+        CHECK(feed(h.value, predicted()) == G2_H264_FRAME_READY);
+        CHECK(g2_h264_dpb(h.value, &dpb) && dpb.allocated_frames == 2 && dpb.allocated_bytes == 512);
+    }
+    {
+        Handle h;
+        CHECK(g2_h264_limit_format(h.value, 320, 192, 1, 2));
+        uint32_t before = allocations;
+        CHECK(feed(h.value, sps()) == G2_H264_ERROR && allocations == before);
+        // A uint16_t pixel-width helper wraps 4116 macroblocks to 320 pixels.
+        CHECK(feed(h.value, sps(4116, 12)) == G2_H264_ERROR && allocations == before);
+        CHECK(g2_h264_dpb(h.value, &dpb) && !dpb.capacity && !dpb.allocated_frames);
+    }
+}
+
 /* Optional ignored clip path comes from argv. Compare every emitted byte with
  * the same unwrapped decoder, independently tracking NAL and picture counts. */
 static void clip(const char *path) {
@@ -261,6 +295,7 @@ int main(int argc, char **argv) {
         CHECK(false);
     }
     lifecycle();
+    format_limits();
     refusal(1);  // DPB metadata.
     refusal(2);  // Y plane.
     refusal(5);  // Macroblock context batch.
