@@ -25,7 +25,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     bzero(p, VIDEO_STATUS_BYTES);
     entry->snapshot_bytes = VIDEO_STATUS_BYTES;
     p[0] = VIDEO_PROTOCOL_VERSION;
-    p[1] = 6; /* Shared-shadow copy-completed presentation. */
+    p[1] = 7; /* Shared-shadow presentation with optional frame verification. */
     p[2] = entry->result;
     p[3] = video_lifecycle_state(&ctx->video);
     if (p[3] == VIDEO_IDLE && s->start_guard) p[3] = VIDEO_STARTING;
@@ -53,14 +53,15 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     video_write32(p + 64, queue.pictures);
     p[68] = s->error >= VIDEO_CONTROL_GAP ? 2 : queue.gap_deadline ? 1 : 0;
     p[69] = queue.header_progress;
-    p[70] = 3; /* Diagnostics and shared-shadow presentation. */
-    p[71] = VIDEO_PRESENT_NATIVE;
+    p[70] = 7; /* Diagnostics, presentation and optional verification. */
+    p[71] = VIDEO_PRESENT_NATIVE | VIDEO_VERIFY_FRAMES;
     video_write32(p + 72, queue.gap_deadline);
     video_write32(p + 76, queue.gap_sequence);
     video_write32(p + 80, ctx->video_presentation.presented);
     video_write32(p + 84, ctx->video_presentation.failures);
     video_write32(p + 88, ctx->video_presentation.copy_tick);
     video_write32(p + 92, s->options);
+    video_evidence_status_locked(ctx, p);
 }
 
 static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
@@ -84,7 +85,7 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         if (n != VIDEO_START_BYTES || p[12] != (VIDEO_FRAME_WIDTH & 255) ||
             p[13] != VIDEO_FRAME_WIDTH >> 8 || p[14] != VIDEO_FRAME_HEIGHT || p[15] ||
             p[16] != VIDEO_FRAME_REFERENCES || p[17] != VIDEO_FRAME_DPB ||
-            p[18] & ~VIDEO_PRESENT_NATIVE || p[19])
+            p[18] & ~(VIDEO_PRESENT_NATIVE | VIDEO_VERIFY_FRAMES) || p[19])
             return VIDEO_CONTROL_FORMAT;
         uint32_t stream = video_read32(p + 8), interval = video_read32(p + 20);
         if (!stream || stream <= s->stream_high || interval < VIDEO_INTERVAL_MIN ||
@@ -185,6 +186,16 @@ int video_control_received(const uint8_t *data, uint16_t size,
         memcpy(entry->command, data, size);
         entry->result = video_control_apply(ctx, data, size, route->origin);
         video_snapshot(ctx, entry);
+        if (data[1] == VIDEO_CONTROL_FRAME_READ || data[1] == VIDEO_CONTROL_FRAME_ACK) {
+            bzero(entry->snapshot, VIDEO_DIAGNOSTICS_BYTES);
+            entry->snapshot_bytes = data[1] == VIDEO_CONTROL_FRAME_READ ? VIDEO_FRAME_RESULT_BYTES : VIDEO_FRAME_ACK_BYTES;
+            entry->result = size != 20 ? VIDEO_CONTROL_FORMAT : data[1] == VIDEO_CONTROL_FRAME_READ ?
+                video_evidence_read_locked(ctx, data, route->origin, entry->snapshot) :
+                video_evidence_ack_locked(ctx, data, route->origin, entry->snapshot);
+            entry->snapshot[0] = VIDEO_PROTOCOL_VERSION;
+            entry->snapshot[1] = data[1];
+            entry->snapshot[2] = entry->result;
+        }
         if (data[1] == VIDEO_CONTROL_DIAGNOSTICS && size == VIDEO_CONTROL_HEADER_BYTES) {
             entry->pending = 1;
             /* Heap walking and completed-worker sampling belong outside the

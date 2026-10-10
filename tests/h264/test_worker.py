@@ -99,6 +99,12 @@ class WorkerTests(unittest.TestCase):
     def test_ordered_real_decoder_consumes_owned_nals_and_counts_actual_pictures(self):
         self.check_case("consumer")
 
+    def test_optional_evidence_bounds_ack_waits_and_never_aborts_timing_anomalies(self):
+        self.check_case("evidence")
+
+    def test_evidence_crc_padding_replays_owner_validation_and_unread_stop(self):
+        self.check_case("evidence-replays")
+
     def test_display_refusal_copy_completion_stop_races_and_unknown_job_quarantine(self):
         self.check_case("presentation-failures")
 

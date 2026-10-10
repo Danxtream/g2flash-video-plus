@@ -47,6 +47,7 @@
 #include "video/pack.c"
 #include "video/worker.c"
 #include "video/present.c"
+#include "video/evidence.c"
 #include "video/controller.c"
 #include "video/diagnostics.c"
 #include "video/control.c"

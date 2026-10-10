@@ -26,6 +26,9 @@ static uint32_t cancel_new, expire_new, fail_publication, defer_reclaimed;
 static uint32_t feed, fed, stream_ok, corrupt_guard, suppress_park;
 static uint32_t consume_enabled, decoded_calls, consumed_frames, decode_paused, refuse_extension;
 static uint32_t upload_limit;
+static uint32_t cycle_reads, clock_inits, calibrations, crc_calls, anomalous_clock;
+static uint32_t forced_cycles, force_cycles;
+static uint32_t evidence_drain, evidence_next, evidence_checked, evidence_was_full;
 static uint32_t mutex_calls, release_calls, runtime_at_release;
 static uint32_t event_calls, fail_event, inject_cancel, inject_renew;
 static uint32_t worker_waits, longest_wait, renewed;
@@ -209,6 +212,20 @@ static void video_platform_release(void *p, void *v) { assert(!p); release(v); }
 #define VIDEO_OWNER_FREE release
 #define bzero test_zero
 #include "../../patches/h264/g2_h264.h"
+static uint32_t test_cycles(void) {
+    __atomic_fetch_add(&cycle_reads, 1, __ATOMIC_RELAXED);
+    return force_cycles ? forced_cycles : tick() * 250000;
+}
+static void test_clock_init(void) { __atomic_fetch_add(&clock_inits, 1, __ATOMIC_RELAXED); }
+static uint32_t test_calibrate(void) {
+    uint32_t n = __atomic_fetch_add(&calibrations, 1, __ATOMIC_RELAXED);
+    return anomalous_clock ? (n % 2 ? 300000000 : 0) : 250000000;
+}
+static uint32_t test_crc(const g2_h264_frame_info *);
+#define VIDEO_CYCLES test_cycles()
+#define VIDEO_CLOCK_INIT test_clock_init
+#define VIDEO_CLOCK_CALIBRATE test_calibrate
+#define VIDEO_FRAME_CRC test_crc
 static g2_h264_result worker_decode(void *, const uint8_t *, uint32_t);
 #include "../../patches/video/runtime_provider.c"
 #include "../../patches/video/storage.c"
@@ -219,9 +236,13 @@ static g2_h264_result worker_decode(void *, const uint8_t *, uint32_t);
 #undef g2_h264_decode
 #include "../../patches/video/pack.c"
 #include "../../patches/video/present.c"
+#include "../../patches/video/evidence.c"
 #include "../../patches/video/controller.c"
 #include "../../patches/video/diagnostics.c"
 #include "../../patches/video/control.c"
+static uint32_t test_crc(const g2_h264_frame_info *frame) {
+    __atomic_fetch_add(&crc_calls, 1, __ATOMIC_RELAXED); return video_frame_crc(frame);
+}
 
 int worker_test_stream(void *);
 void worker_finish_call(void) {
@@ -389,6 +410,9 @@ static void configure(void) {
     controller_used = 512; controller_samples = 0; heap_sample_hook = 0;
     consume_enabled = decoded_calls = consumed_frames = decode_paused = refuse_extension = 0;
     upload_limit = 0;
+    cycle_reads = clock_inits = calibrations = crc_calls = anomalous_clock = 0;
+    forced_cycles = force_cycles = 0;
+    evidence_drain = evidence_checked = evidence_was_full = 0; evidence_next = 1;
     for (uint32_t i = 0; i < 4; ++i) assert(!events[i].control);
     views[0] = (video_heap_view){382756, 376832};
     views[1] = (video_heap_view){285680, 278528};
@@ -620,26 +644,29 @@ static void control_command(uint8_t *p, uint32_t op, uint32_t stream) {
     p[14] = VIDEO_FRAME_HEIGHT; p[16] = 1; p[17] = 2;
     video_write32(p + 20, 63);
 }
-static uint8_t control_snapshot(const uint8_t *p, uint32_t n, uint8_t *snapshot) {
+static uint8_t control_response(const uint8_t *p, uint32_t n, uint8_t *snapshot, uint32_t length) {
     int result = video_control_received(p, n, &control_route);
-    assert(control_reply_size == 9 && control_reply[7] == VIDEO_STATUS_BYTES);
+    assert(control_reply_size == 9 && control_reply[7] == length);
     uint8_t page[9] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_PAGE, VIDEO_PROTOCOL_VERSION};
     memcpy(page + 4, p + 4, 4);
-    for (uint32_t i = 0; i < VIDEO_STATUS_BYTES; ++i) {
+    for (uint32_t i = 0; i < length; ++i) {
         page[8] = i;
         assert(!video_control_received(page, sizeof(page), &control_route));
-        assert(control_reply[6] == i && control_reply[7] == VIDEO_STATUS_BYTES);
+        assert(control_reply[6] == i && control_reply[7] == length);
         snapshot[i] = control_reply[8];
     }
     assert((result == 0) == (snapshot[2] == VIDEO_CONTROL_ACCEPTED));
     return snapshot[2];
+}
+static uint8_t control_snapshot(const uint8_t *p, uint32_t n, uint8_t *snapshot) {
+    return control_response(p, n, snapshot, VIDEO_STATUS_BYTES);
 }
 static void controls(void) {
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
     configure(); request_next = 0;
     control_command(p, VIDEO_CONTROL_CAPABILITIES, 0);
     assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED);
-    assert(snapshot[1] == 6 && snapshot[3] == VIDEO_IDLE && !snapshot[50] &&
+    assert(snapshot[1] == 7 && snapshot[3] == VIDEO_IDLE && !snapshot[50] &&
            !allocations_live && !creates && !pool_calls);
     control_command(p, VIDEO_CONTROL_START, 1);
     context.texture_cache = (void *)(uintptr_t)1;
@@ -939,6 +966,47 @@ static int receive_header(uint32_t stream, uint32_t sequence, uint8_t header) {
 }
 
 int worker_enqueue_stream(void);
+static void drain_frame_results(void) {
+    if (!evidence_drain) return;
+    uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+    control_command(p, VIDEO_CONTROL_STATUS, 0);
+    assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED);
+    uint32_t high = video_read32(snapshot + 100), acked = video_read32(snapshot + 104);
+    if (!evidence_was_full) {
+        if (high < VIDEO_EVIDENCE_ROWS) return;
+        evidence_was_full = 1;
+        assert(high == VIDEO_EVIDENCE_ROWS && !acked && copied_frames == VIDEO_EVIDENCE_ROWS);
+        delay(5); display_pump(); pool_drain();
+        assert(copied_frames == VIDEO_EVIDENCE_ROWS);
+    }
+    while (evidence_next <= high) {
+        control_command(p, VIDEO_CONTROL_FRAME_READ, 1);
+        video_write32(p + 12, context.video.token); video_write32(p + 16, evidence_next);
+        assert(control_response(p, 20, snapshot, VIDEO_FRAME_RESULT_BYTES) == VIDEO_CONTROL_ACCEPTED);
+        assert(video_read32(snapshot + 4) == 1 && video_read32(snapshot + 8) == context.video.token &&
+               video_read32(snapshot + 12) == evidence_next && video_read32(snapshot + 16) == evidence_next);
+        uint8_t pixels[VIDEO_FRAME_WIDTH * VIDEO_FRAME_HEIGHT]; memset(pixels, 128, sizeof(pixels));
+        g2_h264_frame_info frame = {0};
+        frame.y = pixels; frame.width = VIDEO_FRAME_WIDTH; frame.height = VIDEO_FRAME_HEIGHT;
+        frame.stride = VIDEO_FRAME_WIDTH;
+        assert(video_read32(snapshot + 28) == (VIDEO_FRAME_WIDTH | VIDEO_FRAME_HEIGHT << 16) &&
+               video_read32(snapshot + 32) == video_frame_crc(&frame));
+        assert(video_read32(snapshot + 20) == (evidence_next == 1 ? 0 : evidence_next + 1) &&
+               video_read32(snapshot + 24) == evidence_next + 1 &&
+               video_read32(snapshot + 64) == (evidence_next == 1 ? 3 : 1));
+        assert(!!video_read32(snapshot + 52) == !!anomalous_clock);
+        ++evidence_next; ++evidence_checked;
+    }
+    if (high > acked) {
+        control_command(p, VIDEO_CONTROL_FRAME_ACK, 1);
+        video_write32(p + 12, context.video.token); video_write32(p + 16, high);
+        assert(control_response(p, 20, snapshot, VIDEO_FRAME_ACK_BYTES) == VIDEO_CONTROL_ACCEPTED &&
+               video_read32(snapshot + 12) == high);
+        uint32_t deadline = context.video_control.active_deadline;
+        assert(control_response(p, 20, snapshot, VIDEO_FRAME_ACK_BYTES) == VIDEO_CONTROL_ACCEPTED &&
+               context.video_control.active_deadline == deadline);
+    }
+}
 int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
     assert(bytes <= VIDEO_RAW_NAL_BYTES && !worker_thread);
     if (upload_limit && sequence >= upload_limit) return 0;
@@ -947,7 +1015,7 @@ int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
     memcpy(record + VIDEO_NAL_HEADER_BYTES, nal, bytes);
     uint32_t limit = tick() + 3000;
     for (;;) {
-        display_pump(); pool_drain();
+        display_pump(); pool_drain(); drain_frame_results();
         if (!video_control_received(record, VIDEO_NAL_HEADER_BYTES + bytes, &control_route)) break;
         assert((int32_t)(limit - tick()) > 0 && state() == VIDEO_READY); delay(1);
     }
@@ -979,6 +1047,8 @@ static void consumer(void) {
         }
         assert(decoded_calls == 34 && consumed_frames == 32 && snapshot[50] == (refused ? 4 : 6));
         assert(video_read32(snapshot + 80) == 32 && copied_frames == 32 && flush_calls == 32 && !overlay_calls);
+        assert(!((video_owner *)context.video_owner)->evidence && !video_read32(snapshot + 96) &&
+               !cycle_reads && !clock_inits && !calibrations && !crc_calls);
         control_command(p, VIDEO_CONTROL_STOP, 1);
         assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
         pool_drain(); finish();
@@ -1004,6 +1074,116 @@ static void await_reclaimed(void) {
         pool_drain(); assert((int32_t)(limit - tick()) > 0); delay(1);
     }
     assert(!allocations_live && !task_live);
+}
+
+static void evidence(void) {
+    uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+    uint8_t check[] = {'1','2','3','4','5','6','7','8','9',0xee,0xee};
+    g2_h264_frame_info frame = {0};
+    frame.y = check; frame.width = 9; frame.height = 1; frame.stride = sizeof(check);
+    assert(video_frame_crc(&frame) == 0xcbf43926U);
+    video_owner test_owner = {0}; video_evidence window = {0}; test_owner.evidence = &window;
+    force_cycles = 1; forced_cycles = 3;
+    window.start_cycles = UINT32_MAX - 4; window.start_tick = tick();
+    video_evidence_after(&test_owner, G2_H264_CONSUMED);
+    assert(window.building.cycles == 8 && window.building.no_output_cycles == 8 &&
+           !window.building.flags && window.building.calls == 1);
+    window.building.cycles = UINT32_MAX - 4;
+    video_evidence_after(&test_owner, G2_H264_FRAME_READY);
+    assert(window.building.flags & VIDEO_TIMING_INVALID);
+    force_cycles = 0;
+    for (uint32_t anomaly = 0; anomaly < 2; ++anomaly) {
+        configure(); request_next = 0; consume_enabled = evidence_drain = 1;
+        anomalous_clock = anomaly; context.framebuffer_shadow = 0;
+        control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_VERIFY_FRAMES;
+        assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); await_ready();
+        video_owner *owner = context.video_owner;
+        assert(owner->evidence && owner->storage.limit >= VIDEO_EVIDENCE_ALLOWANCE);
+        assert(worker_enqueue_stream());
+        uint32_t limit = tick() + 5000;
+        while (evidence_checked < 32) {
+            display_pump(); pool_drain(); drain_frame_results();
+            assert((int32_t)(limit - tick()) > 0 && state() == VIDEO_READY); delay(1);
+        }
+        control_command(p, VIDEO_CONTROL_STATUS, 0);
+        assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED &&
+               video_read32(snapshot + 96) == VIDEO_EVIDENCE_ROWS &&
+               video_read32(snapshot + 100) == 32 && video_read32(snapshot + 104) == 32 &&
+               video_read32(snapshot + 108) && video_read32(snapshot + 120) == 2 &&
+               video_read32(snapshot + 80) == 32 && !video_read32(snapshot + 24));
+        assert(decoded_calls == 34 && copied_frames == 32 && crc_calls == 32 &&
+               calibrations == 64 && clock_inits == 1 && cycle_reads == 68 && evidence_was_full);
+        control_command(p, VIDEO_CONTROL_STOP, 1);
+        assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); finish(); assert(!context.video_control.error);
+        shadow_free(owned_shadow); context.framebuffer_shadow = 0;
+    }
+    puts("off has no window/calibration/CRC/ACK waits; verified rows bounded, lossless and anomalous timing nonfatal PASS");
+}
+
+static void evidence_replays(void) {
+    for (uint32_t unread = 0; unread < 2; ++unread) {
+        configure(); request_next = 0; consume_enabled = 1; upload_limit = 3;
+        context.framebuffer_shadow = 0;
+        uint8_t p[VIDEO_START_BYTES], saved[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+        uint8_t frozen[VIDEO_FRAME_RESULT_BYTES];
+        control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_VERIFY_FRAMES | VIDEO_PRESENT_NATIVE;
+        assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); await_ready(); assert(!worker_enqueue_stream());
+        uint32_t limit = tick() + 3000;
+        for (;;) {
+            display_pump(); pool_drain();
+            assert(!take(1, 100));
+            uint32_t high = ((video_owner *)context.video_owner)->evidence->high; give(1);
+            if (high == 1) break;
+            assert((int32_t)(limit - tick()) > 0); delay(1);
+        }
+        control_command(p, VIDEO_CONTROL_FRAME_ACK, 1);
+        video_write32(p + 12, context.video.token); video_write32(p + 16, 2);
+        assert(control_response(p, 20, snapshot, VIDEO_FRAME_ACK_BYTES) == VIDEO_CONTROL_FORMAT);
+        control_command(p, VIDEO_CONTROL_FRAME_READ, 1);
+        video_write32(p + 12, context.video.token + 1); video_write32(p + 16, 1);
+        assert(control_response(p, 20, snapshot, VIDEO_FRAME_RESULT_BYTES) == VIDEO_CONTROL_STALE);
+        control_command(p, VIDEO_CONTROL_FRAME_READ, 1);
+        video_write32(p + 12, context.video.token); video_write32(p + 16, 2);
+        assert(control_response(p, 20, snapshot, VIDEO_FRAME_RESULT_BYTES) == VIDEO_CONTROL_BUSY);
+        control_command(p, VIDEO_CONTROL_FRAME_READ, 1);
+        video_write32(p + 12, context.video.token); video_write32(p + 16, 1);
+        cfw_message_route wrong = control_route; wrong.origin = 2; wrong.here = 2; wrong.reply_capacity = 30;
+        assert(video_control_received(p, 20, &wrong) == -1 && control_reply[10] == VIDEO_CONTROL_STALE);
+        assert(control_response(p, 20, frozen, VIDEO_FRAME_RESULT_BYTES) == VIDEO_CONTROL_ACCEPTED);
+        memcpy(saved, p, sizeof(saved));
+        if (!unread) {
+            control_command(p, VIDEO_CONTROL_FRAME_ACK, 1);
+            video_write32(p + 12, context.video.token); video_write32(p + 16, 1);
+            assert(control_response(p, 20, snapshot, VIDEO_FRAME_ACK_BYTES) == VIDEO_CONTROL_ACCEPTED);
+            assert(control_response(saved, 20, snapshot, VIDEO_FRAME_RESULT_BYTES) == VIDEO_CONTROL_ACCEPTED &&
+                   !memcmp(snapshot, frozen, sizeof(frozen)));
+            control_command(p, VIDEO_CONTROL_FRAME_READ, 1);
+            video_write32(p + 12, context.video.token); video_write32(p + 16, 1);
+            assert(control_response(p, 20, snapshot, VIDEO_FRAME_RESULT_BYTES) == VIDEO_CONTROL_STALE);
+        }
+        control_command(p, VIDEO_CONTROL_STOP, 1);
+        assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); finish();
+        assert(context.video_control.error == (unread ? VIDEO_CONTROL_INCOMPLETE : 0));
+        shadow_free(owned_shadow); context.framebuffer_shadow = 0;
+    }
+    configure(); request_next = 0;
+    uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+    control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_VERIFY_FRAMES;
+    assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); await_ready(); uint32_t allocations = allocation_calls;
+    finish(); pool_drain();
+    for (uint32_t failure = 1; failure <= allocations; ++failure) {
+        configure(); request_next = 0; fail_at = failure;
+        control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_VERIFY_FRAMES;
+        assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); finish();
+        assert(!context.video_owner && !allocations_live && !task_live);
+    }
+    puts("CRC padding golden, frozen READ/PAGE, owner/token/future ACK, unread STOP and allocation rollback PASS");
 }
 
 static void presentation_failures(void) {
@@ -1407,6 +1587,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "queue-extension")) queue_extension();
     else if (!strcmp(argv[1], "recovery")) recovery();
     else if (!strcmp(argv[1], "consumer")) consumer();
+    else if (!strcmp(argv[1], "evidence")) evidence();
+    else if (!strcmp(argv[1], "evidence-replays")) evidence_replays();
     else if (!strcmp(argv[1], "presentation-failures")) presentation_failures();
     else if (!strcmp(argv[1], "original-display")) original_display();
     else if (!strcmp(argv[1], "inactivity")) inactivity();

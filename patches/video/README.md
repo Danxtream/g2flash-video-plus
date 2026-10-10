@@ -109,7 +109,8 @@ Start is 24 bytes: header, LE32 stream ID, LE16 width/height, reference count,
 DPB frame count, presentation flags, zero reserved byte and LE32 interval
 in milliseconds. Only 320x192, one reference, two DPB frames and intervals
 10..1000 ms are accepted. Flag bit 0 selects native centering; zero selects
-pixel doubling. Other flag bits are reserved. Chroma remains skipped. Release
+pixel doubling. Flag bit 7 requests frame verification; other bits are reserved.
+Chroma remains skipped. Release
 the previous custom
 lease normally, reacquire the framebuffer lease, then start; an allocated
 texture cache or conflicting shadow/cache command refuses admission.
@@ -126,7 +127,7 @@ No new timer, permanent task or boot-time video allocation is introduced.
 
 Four exact request/reply entries per ingress lens prevent repeated operations.
 Request IDs increase separately per ingress; older uncached IDs or conflicting
-duplicates refuse. Each reply freezes a 96-byte status snapshot. A page query
+duplicates refuse. Each reply freezes a 128-byte status snapshot. A page query
 has the original request ID and one page byte, and never executes the control.
 One response per query fits the proven notification capacity, including MTU23.
 Replies are ID31, source lens bit, LE32 request ID, page/count and snapshot bytes.
@@ -139,8 +140,8 @@ high-water, stream high-water, last error and interval. Record/NAL maxima are
 LE32 at 32/36; geometry at 40/42, references/DPB at 44/45, forced chroma skip and
 single-slice limit at 46/47, four/six-slot bounds at 48/49. Capacity/free slots are bytes 50/51; LE32
 accepted/consumed NAL counts are at 56/60. Expected sequence is LE32 at 52. Completed pictures are LE32 at 64;
-bytes 68..79 carry recovery and diagnostic details. Stage 6 announces ordered
-decoding and copy-completed presentation; byte 71 advertises allowed START
+bytes 68..79 carry recovery and diagnostic details. Stage 7 announces ordered
+decoding, copy-completed presentation and optional verification; byte 71 advertises allowed START
 presentation flags. LE32 at 80/84/88/92 holds copied picture count, failed-copy
 count, last copy tick and selected flags. Copy completion means physical
 framebuffer copy plus cache flush, not proof of optical scanout.
@@ -229,6 +230,51 @@ releases an unclaimed job; if copying already started it waits for completion
 and still reports failure. Missing completion retains the pointer, semaphore
 and owner in quarantine instead of guessing that a free or gate release is safe.
 The display wait is bounded and leaves normal interrupts/watchdog running.
+
+### Optional frame verification
+
+START flag bit 7 requests verification; it defaults off. Bit 0 independently
+selects native presentation. Other bits remain reserved. Off playback allocates
+no result window, performs no CRC or clock work and never waits for result ACKs.
+Diagnostics remain available. Verification adds at most 1,536 bytes to the
+cached ledger cap, with a single lazy allocation of sixteen 64-byte rows and
+bookkeeping. It does not change the decoder, panel packing or display path.
+
+Before claiming another NAL, a full result window waits on existing events and
+lease/activity deadlines. No result is overwritten. Explicit READ (opcode 8)
+and cumulative ACK (9) use the usual header followed by LE32 stream, owner
+token and picture ordinal, twenty bytes total. READ returns a frozen 80-byte
+response; ACK returns sixteen bytes. Both begin with version, opcode, result,
+zero flags, then stream, token and ordinal. Source/owner/token checks reject
+stale sessions. An ACK past the published cursor refuses; older ACKs cannot
+retire newer results or renew activity. Exact request retries and PAGE queries
+use the existing frozen replay cache. STOP with unread rows marks the run
+incomplete before safe reclamation, including a final copy racing with STOP.
+
+The READ payload at offset 16 has sixteen LE32 values: ordinal, first and last
+contributing NAL sequence, width/height packed as low/high halves, Y CRC32,
+decode cycles, millisecond ticks, calibrated clock before/after in Hz, timing
+flags, decode-return tick, copy/flush tick, call count, finishing-call cycles
+and ticks, and no-output-call cycles. CRC covers active Y bytes without stride
+padding, using reflected polynomial 0xedb88320 and initial/final xor 0xffffffff.
+A row is published only after actual physical copy and cache flush.
+
+DWT CYCCNT and the donor millisecond tick bracket only C ABI calls. Unsigned
+deltas support counter wrap. Calibration samples at least ten ticks outside
+those brackets, with at most twenty one-millisecond waits; failed calibration
+or overflowing timing accumulation marks the row invalid without aborting.
+CRC, calibration, packing, display and transport are outside decode timing.
+The PC additionally flags clock changes over four percent and cycle/tick
+disagreement, reports both timing scales, excludes anomalous timing rows and
+counts exclusions while still checking every hash. Real decode, format,
+memory, deadline, cancellation, count and hash failures invalidate a run.
+
+STATUS LE32 offsets 96/100/104/108 hold verification capacity, published cursor,
+acknowledged cursor and full-window stall episodes. Off mode reports zero.
+Offsets 112/116/120 report cumulative no-output-call cycles/ticks/count,
+including parameter sets and any tail after the last picture. Offset 124 marks
+incomplete verification. Presentation count at 80 remains independent of NAL
+consumption and the result acknowledgement cursor.
 
 ### Upstream session cleanup
 

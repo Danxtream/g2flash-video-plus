@@ -6,6 +6,7 @@
 #include "../cfw_context.h"
 #include "../h264/g2_h264.h"
 #include "platform.h"
+#include "evidence.h"
 
 /* Keep the new worker out of the original C text section. Otherwise clang's
  * same-section MOVW address folding overflows for distant stock callbacks.
@@ -25,8 +26,18 @@ typedef struct {
     uint8_t complete_control[VIDEO_EVENT_CONTROL_BYTES] __attribute__((aligned(8)));
     video_nal_queue queue;
     video_storage storage;
+    video_evidence *evidence;
     g2_h264_runtime runtime;
 } video_owner;
+
+static int video_evidence_space(video_owner *);
+static void video_evidence_before(video_owner *, uint32_t);
+static void video_evidence_after(video_owner *, g2_h264_result);
+static void video_evidence_frame(video_owner *, const g2_h264_frame_info *);
+static int video_evidence_publish_locked(video_owner *, uint32_t);
+static int video_evidence_read_locked(customCfwContext *, const uint8_t *, uint8_t, uint8_t *);
+static int video_evidence_ack_locked(customCfwContext *, const uint8_t *, uint8_t, uint8_t *);
+static void video_evidence_status_locked(customCfwContext *, uint8_t *);
 
 static video_owner *video_current_owner(void) {
     customCfwContext *ctx = peekCustomCfwContext();
@@ -128,6 +139,7 @@ static int video_worker_consume(video_owner *owner) {
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
     video_nal_view view;
     int claimed = !video_lifecycle_cancelled(&ctx->video, owner->token) &&
+        video_evidence_space(owner) &&
         video_queue_claim(&owner->queue, owner->token, &view);
     if (claimed) {
         if (!video_lifecycle_pin(&ctx->video, owner->token, 0)) {
@@ -137,7 +149,9 @@ static int video_worker_consume(video_owner *owner) {
     }
     video_control_give(ctx);
     if (!claimed) return 0;
+    if (owner->evidence) video_evidence_before(owner, view.sequence);
     g2_h264_result decoded = g2_h264_decode(owner->decoder, view.bytes, view.length);
+    if (owner->evidence) video_evidence_after(owner, decoded);
     video_storage_finish_call(&owner->storage);
     g2_h264_frame_info frame = {0};
     g2_h264_dpb_info dpb = {0};
@@ -148,6 +162,7 @@ static int video_worker_consume(video_owner *owner) {
          !g2_h264_dpb(owner->decoder, &dpb) ||
          dpb.capacity != VIDEO_FRAME_DPB || dpb.allocated_frames > dpb.capacity))
         decoded = G2_H264_ERROR;
+    if (decoded == G2_H264_FRAME_READY && owner->evidence) video_evidence_frame(owner, &frame);
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
     int released = decoded != G2_H264_ERROR && video_queue_release(&owner->queue, &view);
     int unpinned = video_lifecycle_unpin(&ctx->video, owner->token, 0);
@@ -169,9 +184,15 @@ static int video_worker_consume(video_owner *owner) {
             frame.stride * frame.height, VIDEO_SOURCE_Y8,
             ctx->video_control.options & VIDEO_PRESENT_NATIVE ? VIDEO_SCALE_NATIVE : VIDEO_SCALE_DOUBLE,
             frame.y};
-        if (!video_present_frame(&descriptor) &&
-            !video_lifecycle_cancelled(&ctx->video, owner->token))
+        int presented = video_present_frame(&descriptor);
+        if (!presented && !video_lifecycle_cancelled(&ctx->video, owner->token))
             video_runtime_fail(VIDEO_FAULT_DISPLAY);
+        if (presented && owner->evidence) {
+            if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
+            int recorded = video_evidence_publish_locked(owner, descriptor.ordinal);
+            video_control_give(ctx);
+            if (!recorded) video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
+        }
     }
     return 1;
 }
@@ -440,6 +461,14 @@ int video_worker_start_guarded(uint32_t ingress_allowance, uint32_t generation) 
                 video_abort_start(ctx, token); return 0;
             }
         }
+        if (ctx->video_control.options & VIDEO_VERIFY_FRAMES) {
+            owner->storage.limit += VIDEO_EVIDENCE_ALLOWANCE;
+            owner->evidence = video_storage_alloc(&owner->storage, sizeof(*owner->evidence));
+            if (!owner->evidence || video_lifecycle_cancelled(&ctx->video, token)) {
+                video_abort_start(ctx, token); return 0;
+            }
+            bzero((uint8_t *)owner->evidence, sizeof(*owner->evidence));
+        }
     }
     video_fill_stack(owner);
     owner->runtime = (g2_h264_runtime){video_runtime_alloc, video_runtime_release,
@@ -592,6 +621,8 @@ static int video_stop_token(uint32_t token, uint32_t timeout_ms) {
     video_owner *owner = ctx->video_owner;
     if (ctx->video.state == VIDEO_IDLE) { video_control_give(ctx); return 1; }
     if (ctx->video.state == VIDEO_QUARANTINED) { video_control_give(ctx); return 0; }
+    if (owner && owner->evidence && owner->evidence->high != owner->evidence->acked &&
+        !ctx->video_control.error) ctx->video_control.error = VIDEO_CONTROL_INCOMPLETE;
     video_lifecycle_stop(&ctx->video);
     video_worker_wake_locked(ctx->video.token, VIDEO_WAKE_CANCEL);
     video_display_fold_locked();
@@ -643,6 +674,10 @@ static int video_stop_token(uint32_t token, uint32_t timeout_ms) {
         goto quarantine;
     }
     if (!video_control_take(ctx)) goto quarantine;
+    /* A final copy may finish after STOP was requested. Inspect unread rows
+     * again after the worker is parked and terminated, before reclaiming. */
+    if (owner && owner->evidence && owner->evidence->high != owner->evidence->acked &&
+        !ctx->video_control.error) ctx->video_control.error = VIDEO_CONTROL_INCOMPLETE;
     video_lifecycle_terminated(&ctx->video);
     if (!video_lifecycle_can_reclaim(&ctx->video)) {
         video_control_give(ctx); goto quarantine;
