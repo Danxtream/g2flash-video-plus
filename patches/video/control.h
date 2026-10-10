@@ -17,7 +17,7 @@ enum {
     VIDEO_CONTROL_HEADER_BYTES = 8,
     VIDEO_START_BYTES = 24,
     VIDEO_CONTROL_REPLAYS = 4,
-    VIDEO_STATUS_BYTES = 80,
+    VIDEO_STATUS_BYTES = 96,
     VIDEO_DIAGNOSTICS_BYTES = 128,
     VIDEO_REPLY_HEADER_BYTES = 8,
     VIDEO_RECORD_LIMIT = 4096,
@@ -33,6 +33,7 @@ enum {
     VIDEO_CONTROLLER_STOP = 2,
     VIDEO_CONTROLLER_REAP = 4,
     VIDEO_CONTROLLER_LEASE = 8,
+    VIDEO_CONTROLLER_PRESENT = 16,
     VIDEO_CONTROL_ACCEPTED = 0,
     VIDEO_CONTROL_FORMAT,
     VIDEO_CONTROL_STALE,
@@ -46,7 +47,8 @@ enum {
     VIDEO_CONTROL_INACTIVITY,
     VIDEO_CONTROL_INPUT,
     VIDEO_CONTROL_CONFLICT,
-    VIDEO_CONTROL_SEQUENCE
+    VIDEO_CONTROL_SEQUENCE,
+    VIDEO_CONTROL_DISPLAY
 };
 
 /* Cached exact requests and frozen snapshots make retries idempotent, including
@@ -62,6 +64,7 @@ typedef struct {
 typedef struct {
     uint32_t request_high[2], stream_high, stream, interval;
     uint32_t start_guard, control_generation, error, owner_origin;
+    uint32_t options;
     volatile uint32_t active_deadline;
     volatile uint32_t controller_serial, controller_job, controller_reasons;
     volatile uint32_t controller_park_token;
@@ -86,6 +89,8 @@ void video_control_cancel_locked(void);
 void video_control_notify_lease(int released);
 /* Last worker notification uses only stable context and its generation token. */
 void video_controller_parked(uint32_t token);
+/* Display hook posts stable completion only, through zero-timeout dispatch. */
+void video_controller_presented(uint32_t token);
 /* Refuse conflicting shadow/cache mutation while video preparation owns RAM. */
 int video_control_blocks_custom(const uint8_t *, uint32_t);
 /* Task-context transport admission preserves the display reserve and shadow

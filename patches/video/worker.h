@@ -34,7 +34,8 @@ enum {
     VIDEO_FAULT_INACTIVITY,
     VIDEO_FAULT_FORMAT,
     VIDEO_FAULT_CONFLICT,
-    VIDEO_FAULT_SEQUENCE
+    VIDEO_FAULT_SEQUENCE,
+    VIDEO_FAULT_DISPLAY
 };
 
 /* Completed-owner diagnostics persist after teardown. valid is false while an

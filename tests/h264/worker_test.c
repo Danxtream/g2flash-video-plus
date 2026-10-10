@@ -25,6 +25,7 @@ static uint32_t fail_at, fail_task, bad_tcb, fail_terminate, fail_view;
 static uint32_t cancel_new, expire_new, fail_publication, defer_reclaimed;
 static uint32_t feed, fed, stream_ok, corrupt_guard, suppress_park;
 static uint32_t consume_enabled, decoded_calls, consumed_frames, decode_paused, refuse_extension;
+static uint32_t upload_limit;
 static uint32_t mutex_calls, release_calls, runtime_at_release;
 static uint32_t event_calls, fail_event, inject_cancel, inject_renew;
 static uint32_t worker_waits, longest_wait, renewed;
@@ -47,6 +48,36 @@ static uint8_t control_reply[30];
 static uint32_t control_reply_size;
 static void (*heap_sample_hook)(void);
 static const uint32_t shadow_present = 1;
+typedef struct { uint32_t direct_submitted, direct_failed; } cfw_rectlist;
+static void present_shadow(uint32_t, uint32_t, cfw_rectlist *);
+static uint8_t *cfw_shadow_buffer(void);
+void display_copy_hook(void);
+static void display_pump(void);
+static void *display_thread_entry(void *);
+static uint32_t display_gate, display_job, fail_gate, fail_queue, missing_fb;
+static uint32_t display_allocated, fail_shadow, copied_frames, overlay_calls, flush_calls, stock_copies;
+static uint8_t physical_frame[VIDEO_PANEL_BYTES];
+static uint8_t *owned_shadow;
+static int display_take(void) {
+    assert(image_depth && !service_context);
+    if (fail_gate) return 0;
+    assert(!display_gate); display_gate = 1; return 1;
+}
+static void display_signal(void) { assert(display_gate); display_gate = 0; }
+static void *shadow_allocate(uint32_t bytes) {
+    assert(!image_depth && !service_context && bytes == VIDEO_PANEL_BYTES && !owned_shadow);
+    if (fail_shadow) return 0;
+    owned_shadow = malloc(bytes); assert(owned_shadow); display_allocated = bytes + 4;
+    return owned_shadow;
+}
+static void shadow_free(void *pointer) {
+    assert(!image_depth && !service_context && pointer == owned_shadow && !context.direct_pending);
+    free(pointer); owned_shadow = 0; display_allocated = 0;
+}
+#define VIDEO_DISPLAY_TAKE display_take
+#define VIDEO_DISPLAY_SIGNAL display_signal
+#define VIDEO_SHADOW_ALLOC shadow_allocate
+#define VIDEO_SHADOW_FREE shadow_free
 
 static void test_zero(uint8_t *p, uint32_t n) { memset(p, 0, n); }
 static customCfwContext *peekCustomCfwContext(void) { return &context; }
@@ -154,6 +185,10 @@ static int video_platform_heap_view(void *p, uint32_t heap, video_heap_view *out
         out->free_bytes -= cached_used;
         if (out->max_alloc > out->free_bytes) out->max_alloc = out->free_bytes;
     }
+    if (i == 1) {
+        out->free_bytes -= display_allocated;
+        if (out->max_alloc > out->free_bytes) out->max_alloc = out->free_bytes;
+    }
     return 1;
 }
 static void *video_platform_allocate(void *p, uint32_t n) { assert(!p); return allocate(n); }
@@ -182,6 +217,8 @@ static g2_h264_result worker_decode(void *, const uint8_t *, uint32_t);
 #define g2_h264_decode worker_decode
 #include "../../patches/video/worker.c"
 #undef g2_h264_decode
+#include "../../patches/video/pack.c"
+#include "../../patches/video/present.c"
 #include "../../patches/video/controller.c"
 #include "../../patches/video/diagnostics.c"
 #include "../../patches/video/control.c"
@@ -335,6 +372,8 @@ static int terminate(uint32_t id) {
     assert(!pthread_cancel(worker)); assert(!pthread_join(worker, 0)); task_live = 0; return 0;
 }
 static void configure(void) {
+    assert(!display_job && !display_gate && !owned_shadow);
+    fail_gate = fail_queue = missing_fb = fail_shadow = copied_frames = overlay_calls = flush_calls = stock_copies = 0;
     assert(!allocations_live && !task_live);
     memset(&context, 0, sizeof(context)); context.image_mutex = 1;
     context.direct_lease_deadline = tick() + 60000;
@@ -349,6 +388,7 @@ static void configure(void) {
     fail_pool = pool_calls = control_reply_size = 0;
     controller_used = 512; controller_samples = 0; heap_sample_hook = 0;
     consume_enabled = decoded_calls = consumed_frames = decode_paused = refuse_extension = 0;
+    upload_limit = 0;
     for (uint32_t i = 0; i < 4; ++i) assert(!events[i].control);
     views[0] = (video_heap_view){382756, 376832};
     views[1] = (video_heap_view){285680, 278528};
@@ -599,14 +639,14 @@ static void controls(void) {
     configure(); request_next = 0;
     control_command(p, VIDEO_CONTROL_CAPABILITIES, 0);
     assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED);
-    assert(snapshot[1] == 5 && snapshot[3] == VIDEO_IDLE && !snapshot[50] &&
+    assert(snapshot[1] == 6 && snapshot[3] == VIDEO_IDLE && !snapshot[50] &&
            !allocations_live && !creates && !pool_calls);
     control_command(p, VIDEO_CONTROL_START, 1);
     context.texture_cache = (void *)(uintptr_t)1;
     assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_LEASE && !pool_calls);
     context.texture_cache = 0;
     control_command(p, VIDEO_CONTROL_START, 1);
-    p[18] = 1;
+    p[18] = 2;
     assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_FORMAT && !pool_calls);
     control_command(p, VIDEO_CONTROL_START, 1);
     assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED && pool_count == 1);
@@ -901,11 +941,13 @@ static int receive_header(uint32_t stream, uint32_t sequence, uint8_t header) {
 int worker_enqueue_stream(void);
 int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
     assert(bytes <= VIDEO_RAW_NAL_BYTES && !worker_thread);
+    if (upload_limit && sequence >= upload_limit) return 0;
     uint8_t record[VIDEO_SLOT_BYTES] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_NAL};
     video_write32(record + 2, 1); video_write32(record + 6, sequence);
     memcpy(record + VIDEO_NAL_HEADER_BYTES, nal, bytes);
     uint32_t limit = tick() + 3000;
     for (;;) {
+        display_pump(); pool_drain();
         if (!video_control_received(record, VIDEO_NAL_HEADER_BYTES + bytes, &control_route)) break;
         assert((int32_t)(limit - tick()) > 0 && state() == VIDEO_READY); delay(1);
     }
@@ -919,23 +961,29 @@ int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
 static void consumer(void) {
     for (uint32_t refused = 0; refused < 2; ++refused) {
         configure(); request_next = 0; consume_enabled = 1;
+        context.framebuffer_shadow = 0;
         uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
         control_command(p, VIDEO_CONTROL_START, 1);
+        p[18] = refused ? VIDEO_PRESENT_NATIVE : 0;
         assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
         pool_drain(); await_ready();
         refuse_extension = refused; // Refuse only after both real DPB planes were allocated.
         assert(worker_enqueue_stream());
         uint32_t limit = tick() + 5000;
         for (;;) {
+            display_pump(); pool_drain();
             control_command(p, VIDEO_CONTROL_STATUS, 0);
             assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED);
             if (video_read32(snapshot + 60) == 34 && video_read32(snapshot + 64) == 32) break;
             assert((int32_t)(limit - tick()) > 0 && snapshot[3] == VIDEO_READY); delay(1);
         }
         assert(decoded_calls == 34 && consumed_frames == 32 && snapshot[50] == (refused ? 4 : 6));
+        assert(video_read32(snapshot + 80) == 32 && copied_frames == 32 && flush_calls == 32 && !overlay_calls);
         control_command(p, VIDEO_CONTROL_STOP, 1);
         assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
         pool_drain(); finish();
+        assert(context.framebuffer_shadow == owned_shadow && owned_shadow);
+        shadow_free(owned_shadow); context.framebuffer_shadow = 0;
     }
     configure(); request_next = 0; consume_enabled = 1;
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
@@ -956,6 +1004,61 @@ static void await_reclaimed(void) {
         pool_drain(); assert((int32_t)(limit - tick()) > 0); delay(1);
     }
     assert(!allocations_live && !task_live);
+}
+
+static void presentation_failures(void) {
+    for (uint32_t variant = 0; variant < 7; ++variant) {
+        configure(); request_next = 0; consume_enabled = 1; upload_limit = 3;
+        context.framebuffer_shadow = 0;
+        uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+        control_command(p, VIDEO_CONTROL_START, 1);
+        assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); await_ready();
+        if (variant == 0) fail_shadow = 1;
+        if (variant == 1) fail_gate = 1;
+        if (variant == 2) fail_queue = 1;
+        if (variant == 3) missing_fb = 1;
+        if (variant == 6) fail_queue = 2;
+        assert(!worker_enqueue_stream());
+        uint32_t limit = tick() + 5000;
+        if (variant == 4 || variant == 5) {
+            while (!__atomic_load_n(&display_job, __ATOMIC_ACQUIRE)) {
+                assert((int32_t)(limit - tick()) > 0); delay(1);
+            }
+            assert(context.video.output_pins == 1 && context.direct_pending && owned_shadow);
+        }
+        if (variant == 5) {
+            control_command(p, VIDEO_CONTROL_STOP, 1);
+            assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+            pool_drain();
+            assert(state() == VIDEO_STOPPING && context.video_owner && context.video_presentation.pin);
+            display_pump();
+        }
+        for (;;) {
+            if (variant != 4) display_pump();
+            pool_drain();
+            uint32_t current = state();
+            if (current == VIDEO_IDLE || current == VIDEO_QUARANTINED) break;
+            assert((int32_t)(limit - tick()) > 0); delay(1);
+        }
+        if (variant == 4) {
+            assert(state() == VIDEO_QUARANTINED && context.video_owner && allocations_live &&
+                   context.direct_pending && owned_shadow && display_gate && context.video.output_pins == 1);
+            /* Test-process disposal models external reset after proving retention;
+             * production has no escape that clears an unknown submitted job. */
+            clean_quarantine(); display_job = display_gate = 0;
+            context.direct_pending = 0; context.direct_shadow = 0;
+        } else {
+            finish();
+            assert(context.video_presentation.presented == (variant == 5 ? 1u : 0u));
+            assert(!display_gate && !display_job && !context.video_presentation.pin);
+            if (variant == 2 || variant == 3 || variant == 6)
+                assert(context.video_presentation.failures == 1);
+        }
+        if (owned_shadow) { shadow_free(owned_shadow); context.framebuffer_shadow = 0; }
+        assert(!overlay_calls);
+    }
+    puts("heap/gate/queue/copy refusal, STOP completion, claimed-queue failure and timeout retention PASS");
 }
 static void recovery(void) {
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
@@ -1062,6 +1165,12 @@ static void cfw_texture_cache_release(customCfwContext *ctx) {
     ++stock_cache_releases; ctx->texture_cache = 0;
 }
 static void cfw_shadow_release(customCfwContext *ctx) {
+    if (ctx->framebuffer_shadow == owned_shadow && owned_shadow) {
+        /* Upstream cleanup owns its display gate; the video paths must have
+         * finished copying before this original synchronous free is reached. */
+        assert(!ctx->direct_pending);
+        free(owned_shadow); owned_shadow = 0; display_allocated = 0;
+    }
     ++stock_shadow_releases; ctx->framebuffer_shadow = 0;
 }
 static int stock_timer_stop(uint32_t timer) { assert(timer); ++timer_stops; return 0; }
@@ -1095,7 +1204,75 @@ int cfw_wake_lease_active(void) { return 0; }
 #define FACECLAW_OP_FB_ACQUIRE 5u
 #define FACECLAW_OP_FB_RELEASE 6u
 #define FACECLAW_OP_WEAR_QUERY 7u
+#define CFW_IMAGE_ALLOC shadow_allocate
+#define CFW_FRAMEBUFFER_BYTES VIDEO_PANEL_BYTES
+#define IMAGE_W VIDEO_PANEL_WIDTH
+#define IMAGE_H VIDEO_PANEL_HEIGHT
+#define PANEL_W VIDEO_PANEL_WIDTH
+#define PANEL_H VIDEO_PANEL_HEIGHT
+#define PANEL_BYTES VIDEO_PANEL_BYTES
+static void cfw_time_start(uint32_t *value) { *value = tick(); }
+static uint32_t cfw_time_end(uint32_t *value) { return (tick() - *value) * 1000; }
+static void cfw_draw_flags(uint8_t *fb, uint32_t w, uint32_t h) {
+    assert(fb && w == 640 && h == 480); ++overlay_calls;
+}
+static int display_queue(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t w, uint32_t h) {
+    assert(!a && !b && !c && !d && w == 640 && h == 480 && image_depth && display_gate);
+    if (fail_queue == 2) {
+        pthread_t copier;
+        __atomic_store_n(&display_job, 1, __ATOMIC_RELEASE);
+        assert(!pthread_create(&copier, 0, display_thread_entry, 0));
+        assert(!pthread_join(copier, 0));
+        return -1;
+    }
+    if (fail_queue) return -1;
+    assert(!display_job); __atomic_store_n(&display_job, 1, __ATOMIC_RELEASE); return 0;
+}
+static void display_flush(void *descriptor) {
+    assert(!image_depth);
+    uint32_t *p = descriptor;
+    assert(p[1] == VIDEO_PANEL_BYTES && owned_shadow);
+    assert((context.direct_pending != 0) == (context.video_presentation.phase == VIDEO_DISPLAY_COPYING));
+    ++flush_calls;
+}
+#define FW_DISPLAY_QUEUE display_queue
+#define FW_DISPLAY_FB (missing_fb ? 0 : physical_frame)
+#define FW_FLUSH display_flush
+#define FW_DISPLAY_COPY() (++stock_copies)
 #include "upstream_cleanup.h"
+
+static void display_pump(void) {
+    if (!__atomic_exchange_n(&display_job, 0, __ATOMIC_ACQ_REL)) return;
+    assert(!image_depth && display_gate && context.direct_pending);
+    display_copy_hook();
+    if (!missing_fb) {
+        int native = context.video_control.options & VIDEO_PRESENT_NATIVE;
+        for (uint32_t y = 0; y < VIDEO_PANEL_HEIGHT; ++y)
+            for (uint32_t x = 0; x < VIDEO_PANEL_STRIDE; ++x)
+                assert(physical_frame[y * VIDEO_PANEL_STRIDE + x] ==
+                    ((native ? y >= 144 && y < 336 && x >= 80 && x < 240 : y >= 48 && y < 432) ? 0x88 : 0));
+        ++copied_frames;
+    }
+    display_signal();
+}
+static void *display_thread_entry(void *unused) {
+    (void)unused; display_pump(); return 0;
+}
+
+static void original_display(void) {
+    configure(); context.framebuffer_shadow = shadow_allocate(VIDEO_PANEL_BYTES);
+    memset(owned_shadow, 0xff, VIDEO_PANEL_BYTES);
+    context.direct_pending = 1; context.direct_shadow = owned_shadow; display_gate = 1;
+    display_copy_hook(); display_signal();
+    assert(!context.direct_pending && !context.direct_shadow && context.direct_active &&
+           overlay_calls == 1 && flush_calls == 1 && !context.video_presentation.presented);
+    for (uint32_t i = 0; i < VIDEO_PANEL_BYTES; ++i) assert(physical_frame[i] == 0xff);
+    display_copy_hook(); assert(!stock_copies && context.direct_active);
+    context.direct_lease_deadline = 0;
+    display_copy_hook(); assert(stock_copies == 1 && !context.direct_active);
+    shadow_free(owned_shadow); context.framebuffer_shadow = 0;
+    puts("ordinary image overlay, physical copy, lease preservation and stock fallback PASS");
+}
 
 static void cleanup(void) {
     uint8_t p[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
@@ -1230,6 +1407,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "queue-extension")) queue_extension();
     else if (!strcmp(argv[1], "recovery")) recovery();
     else if (!strcmp(argv[1], "consumer")) consumer();
+    else if (!strcmp(argv[1], "presentation-failures")) presentation_failures();
+    else if (!strcmp(argv[1], "original-display")) original_display();
     else if (!strcmp(argv[1], "inactivity")) inactivity();
     else if (!strcmp(argv[1], "cleanup")) cleanup();
     else if (!strcmp(argv[1], "lease-notifications")) lease_notifications();

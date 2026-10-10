@@ -7,7 +7,7 @@ acquiring the video lease; this owner never frees another client's resources.
 
 Call start, stop and reset outside the image mutex and display gate. Handlers
 already holding the image mutex may only request cancellation there, then leave
-that scope before reaping. The future presenter keeps image-before-display lock
+that scope before reaping. The presenter keeps image-before-display lock
 order and pins borrowed output with the generation token. No decoder call, heap
 operation, task termination or worker wait occurs while those locks are held.
 
@@ -21,7 +21,8 @@ Retain 32 KiB in cached heap 20, 32 KiB in display heap 13 and 16 KiB in heap 27
 Live free/max views do not reserve memory: each allocation and its resulting
 reserve is checked. Heap 13 admission includes the missing 153,600-byte shadow
 and caller-supplied outstanding ingress/inflater peak. Existing buffers are not
-charged twice. There is no video allocation or fallback in heaps 13 or 27.
+charged twice. Heap 13 supplies only jim's shared shadow; heap 27 has no video
+allocation or fallback.
 
 Only the worker constructs and destroys C++. Its complete runtime table is
 published before arming and remains bound through cancellation and destruction.
@@ -91,7 +92,7 @@ The descriptor carries ownership generation, picture ordinal, geometry,
 stride, storage extent and scale. It also accepts owned A4 for a later queued
 presenter; borrowed decoder planes must be consumed before the next decode.
 No second panel buffer or decoded-frame queue is added. Packing itself is
-independent of the asynchronous display services and is not yet wired to them.
+independent of the asynchronous display services.
 Stock side 2 maps to left source 1, and side 1 to right source 2. Both use the
 same pixel order; no optical mirror is inferred from those different values.
 
@@ -105,9 +106,11 @@ header. Stop/reset append the current LE32 stream ID. Reset ends ownership;
 a fresh start uses a strictly increasing stream ID after reclamation.
 
 Start is 24 bytes: header, LE32 stream ID, LE16 width/height, reference count,
-DPB frame count, zero presentation flags, zero reserved byte and LE32 interval
+DPB frame count, presentation flags, zero reserved byte and LE32 interval
 in milliseconds. Only 320x192, one reference, two DPB frames and intervals
-10..1000 ms are accepted. Chroma remains skipped. Release the previous custom
+10..1000 ms are accepted. Flag bit 0 selects native centering; zero selects
+pixel doubling. Other flag bits are reserved. Chroma remains skipped. Release
+the previous custom
 lease normally, reacquire the framebuffer lease, then start; an allocated
 texture cache or conflicting shadow/cache command refuses admission.
 
@@ -123,7 +126,7 @@ No new timer, permanent task or boot-time video allocation is introduced.
 
 Four exact request/reply entries per ingress lens prevent repeated operations.
 Request IDs increase separately per ingress; older uncached IDs or conflicting
-duplicates refuse. Each reply freezes an 80-byte status snapshot. A page query
+duplicates refuse. Each reply freezes a 96-byte status snapshot. A page query
 has the original request ID and one page byte, and never executes the control.
 One response per query fits the proven notification capacity, including MTU23.
 Replies are ID31, source lens bit, LE32 request ID, page/count and snapshot bytes.
@@ -136,8 +139,11 @@ high-water, stream high-water, last error and interval. Record/NAL maxima are
 LE32 at 32/36; geometry at 40/42, references/DPB at 44/45, forced chroma skip and
 single-slice limit at 46/47, four/six-slot bounds at 48/49. Capacity/free slots are bytes 50/51; LE32
 accepted/consumed NAL counts are at 56/60. Expected sequence is LE32 at 52. Completed pictures are LE32 at 64;
-bytes 68..79 carry recovery and diagnostic details. Stage 5 announces ordered
-decoder consumption and completed-picture counts, without presentation.
+bytes 68..79 carry recovery and diagnostic details. Stage 6 announces ordered
+decoding and copy-completed presentation; byte 71 advertises allowed START
+presentation flags. LE32 at 80/84/88/92 holds copied picture count, failed-copy
+count, last copy tick and selected flags. Copy completion means physical
+framebuffer copy plus cache flush, not proof of optical scanout.
 Transport ACK confirms only
 accepted command validation; refusals preserve upstream NACK/context-reset rules.
 
@@ -179,7 +185,7 @@ missing NAL cannot repair an expired stream. Thirty seconds without accepted
 NAL input or a fresh owner-origin status/capability request retires a session;
 cached control replay does not renew it. Event waits use the nearest activity,
 gap or existing framebuffer-lease deadline, including millisecond tick wrap.
-No timer, polling loop or display wait is added.
+No timer or polling loop is added.
 
 Conflicting duplicates, sequence exhaustion, invalid header progression and
 expired gaps stop acceptance and require fresh START with a larger stream ID.
@@ -199,6 +205,30 @@ weighted prediction or multiple slices. Baseline CAVLC, Main CABAC and High
 CABAC with 8x8 transforms are supported; High CAVLC with 8x8 is rejected.
 I_PCM remains rejected by the decoder. Queries return actual lazy DPB storage,
 independent of which reconstruction features are compiled into the decoder.
+
+### Shared display lifetime
+
+Prepare the single 153,600-byte shadow outside publication/display locks with
+fresh heap-13 free/max and reserve checks. Revalidate the lease and generation
+before publishing it, and free an unused private candidate outside locks.
+Replace the missing-shadow allowance with that actual allocation; subsequent
+frames reuse it. The worker packs borrowed Y before any further decoder call.
+
+Acquire image_mutex before the stock display semaphore. The donor's void gate
+wrapper discards its timeout, so the presenter checks the authenticated
+underlying take result. Packing and tagging precede the existing refresh enqueue.
+The existing display hook claims the stable tag, copies and flushes the shared
+shadow, then posts completion by atomics and zero-timeout controller enqueue.
+It never waits, allocates, frees or borrows a worker/event pointer. Only video
+jobs suppress the diagnostics overlay; other image behavior stays the same.
+
+The controller folds actual completion and retires the lifetime pin before
+waking the worker. STOP defers reaping while a submitted copy needs that same
+controller, so it cannot block the callback needed to finish. Queue refusal
+releases an unclaimed job; if copying already started it waits for completion
+and still reports failure. Missing completion retains the pointer, semaphore
+and owner in quarantine instead of guessing that a free or gate release is safe.
+The display wait is bounded and leaves normal interrupts/watchdog running.
 
 ### Upstream session cleanup
 

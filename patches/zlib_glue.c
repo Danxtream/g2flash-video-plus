@@ -685,8 +685,10 @@ static void present_shadow(uint32_t w, uint32_t h, cfw_rectlist *rl) {
     ctx->direct_shadow = shadow;
     ctx->direct_pending = 1;                          /* publish last */
     if (FW_DISPLAY_QUEUE(0, 0, 0, 0, PANEL_W, PANEL_H) != 0) {
-        ctx->direct_pending = 0;
-        ctx->direct_shadow = 0;
+        if (video_display_queue_failed()) {
+            ctx->direct_pending = 0;
+            ctx->direct_shadow = 0;
+        } else if (rl) rl->direct_submitted = 1;
         if (rl) rl->direct_failed = 1;
         return;
     }
@@ -784,17 +786,20 @@ void display_copy_hook(void) {
     }
 
     const uint8_t *shadow = ctx->direct_shadow;
+    uint32_t video_token = video_display_claim();
     uint8_t *fb = FW_DISPLAY_FB;
     uint32_t t;
     cfw_time_start(&t);
     int ok = fb != 0;
     if (ok) {
         memcpy(fb, shadow, PANEL_BYTES);
-        cfw_draw_flags(fb, PANEL_W, PANEL_H);
+        if (!video_token) cfw_draw_flags(fb, PANEL_W, PANEL_H);
     }
 
-    ctx->direct_pending = 0;                         /* consume before returning gate */
-    ctx->direct_shadow = 0;
+    if (!video_token) {
+        ctx->direct_pending = 0;                         /* consume before returning gate */
+        ctx->direct_shadow = 0;
+    }
     if (ok) {
         uint32_t desc[2] = {(uint32_t)(uintptr_t)fb, PANEL_BYTES};
         FW_FLUSH(desc);
@@ -805,4 +810,9 @@ void display_copy_hook(void) {
         FW_DISPLAY_COPY();
     }
     ctx->last_present_us = cfw_time_end(&t);
+    if (video_token) {
+        ctx->direct_pending = 0;
+        ctx->direct_shadow = 0;
+        video_display_complete(video_token, ok);
+    }
 }

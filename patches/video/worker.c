@@ -54,6 +54,7 @@ static uint32_t video_fault_reason(uint32_t fault) {
     case VIDEO_FAULT_FORMAT: return VIDEO_CONTROL_INPUT;
     case VIDEO_FAULT_CONFLICT: return VIDEO_CONTROL_CONFLICT;
     case VIDEO_FAULT_SEQUENCE: return VIDEO_CONTROL_SEQUENCE;
+    case VIDEO_FAULT_DISPLAY: return VIDEO_CONTROL_DISPLAY;
     default: return fault >= G2_H264_FAIL_ALLOC && fault <= G2_H264_FAIL_LENGTH ?
         VIDEO_CONTROL_MEMORY : VIDEO_CONTROL_DECODER;
     }
@@ -143,7 +144,8 @@ static int video_worker_consume(video_owner *owner) {
     if (decoded == G2_H264_FRAME_READY &&
         (g2_h264_frame(owner->decoder, &frame) != G2_H264_FRAME_READY ||
          !frame.y || frame.width != VIDEO_FRAME_WIDTH || frame.height != VIDEO_FRAME_HEIGHT ||
-         frame.stride < frame.width || !g2_h264_dpb(owner->decoder, &dpb) ||
+         frame.stride < frame.width || frame.stride > UINT32_MAX / frame.height ||
+         !g2_h264_dpb(owner->decoder, &dpb) ||
          dpb.capacity != VIDEO_FRAME_DPB || dpb.allocated_frames > dpb.capacity))
         decoded = G2_H264_ERROR;
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
@@ -156,8 +158,21 @@ static int video_worker_consume(video_owner *owner) {
     if (fault) video_fault_locked(ctx, fault);
     video_control_give(ctx);
     if (fault) video_runtime_fail(fault);
-    if (decoded == G2_H264_FRAME_READY)
-        video_worker_picture_complete(owner->token, dpb.allocated_frames == dpb.capacity);
+    if (decoded == G2_H264_FRAME_READY) {
+        if (!video_worker_picture_complete(owner->token, dpb.allocated_frames == dpb.capacity)) {
+            if (!video_lifecycle_cancelled(&ctx->video, owner->token))
+                video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
+            return 1;
+        }
+        video_frame_descriptor descriptor = {owner->token, owner->control_generation,
+            owner->queue.pictures, frame.width, frame.height, frame.stride,
+            frame.stride * frame.height, VIDEO_SOURCE_Y8,
+            ctx->video_control.options & VIDEO_PRESENT_NATIVE ? VIDEO_SCALE_NATIVE : VIDEO_SCALE_DOUBLE,
+            frame.y};
+        if (!video_present_frame(&descriptor) &&
+            !video_lifecycle_cancelled(&ctx->video, owner->token))
+            video_runtime_fail(VIDEO_FAULT_DISPLAY);
+    }
     return 1;
 }
 
@@ -393,6 +408,7 @@ int video_worker_start_guarded(uint32_t ingress_allowance, uint32_t generation) 
         video_control_generation_valid(ctx, generation) &&
         (ctx->framebuffer_shadow == 0) == missing ? video_lifecycle_claim(&ctx->video) : 0;
     if (token) {
+        ctx->video_presentation = (video_presentation_state){0};
         owner->token = token;
         video_queue_init(&owner->queue, token);
         ctx->video_last_report = (video_worker_report){0};
@@ -578,6 +594,14 @@ static int video_stop_token(uint32_t token, uint32_t timeout_ms) {
     if (ctx->video.state == VIDEO_QUARANTINED) { video_control_give(ctx); return 0; }
     video_lifecycle_stop(&ctx->video);
     video_worker_wake_locked(ctx->video.token, VIDEO_WAKE_CANCEL);
+    video_display_fold_locked();
+    if (ctx->video_presentation.pin) {
+        /* Do not occupy the controller while a display completion needs it.
+         * The completion/park notification schedules the bounded reap later. */
+        ctx->video_presentation.stop_wait = 1;
+        video_control_give(ctx);
+        return 0;
+    }
     if (ctx->video_reaper || (owner && owner->thread == VIDEO_OS_THREAD_ID())) {
         video_control_give(ctx); return 0;
     }

@@ -32,7 +32,8 @@ static int video_controller_schedule(customCfwContext *ctx) {
 int video_controller_request_locked(uint32_t reasons) {
     customCfwContext *ctx = peekCustomCfwContext();
     if (!ctx || !reasons || reasons & ~(VIDEO_CONTROLLER_START |
-        VIDEO_CONTROLLER_STOP | VIDEO_CONTROLLER_REAP | VIDEO_CONTROLLER_LEASE)) return 0;
+        VIDEO_CONTROLLER_STOP | VIDEO_CONTROLLER_REAP | VIDEO_CONTROLLER_LEASE |
+        VIDEO_CONTROLLER_PRESENT)) return 0;
     __atomic_fetch_or(&ctx->video_control.controller_reasons, reasons, __ATOMIC_ACQ_REL);
     return video_controller_schedule(ctx);
 }
@@ -80,6 +81,15 @@ void video_controller_parked(uint32_t token) {
         __atomic_store_n(&ctx->video_quarantine_token, token, __ATOMIC_RELEASE);
 }
 
+void video_controller_presented(uint32_t token) {
+    customCfwContext *ctx = peekCustomCfwContext();
+    if (!ctx || !token || token != __atomic_load_n(&ctx->video.token, __ATOMIC_ACQUIRE)) return;
+    __atomic_fetch_or(&ctx->video_control.controller_reasons, VIDEO_CONTROLLER_PRESENT,
+                       __ATOMIC_ACQ_REL);
+    if (!video_controller_schedule(ctx))
+        __atomic_store_n(&ctx->video_quarantine_token, token, __ATOMIC_RELEASE);
+}
+
 static void video_controller_entry(uint32_t app, const uint8_t *data,
                                     uint32_t serial, uint16_t event) {
     customCfwContext *ctx = peekCustomCfwContext();
@@ -113,6 +123,13 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
         }
         uint32_t parked = __atomic_exchange_n(&s->controller_park_token, 0, __ATOMIC_ACQ_REL);
         video_fold_signals(ctx);
+        video_display_fold_locked();
+        if (ctx->video_presentation.stop_wait && !ctx->video_presentation.pin) {
+            reasons |= VIDEO_CONTROLLER_STOP;
+            ctx->video_presentation.stop_wait = 0;
+        }
+        int deferred = ctx->video_presentation.pin && (reasons & VIDEO_CONTROLLER_STOP);
+        if (deferred) ctx->video_presentation.stop_wait = 1;
         int current = parked && parked == ctx->video.token;
         if (current) {
             __atomic_store_n(&s->start_guard, 0, __ATOMIC_RELEASE);
@@ -121,7 +138,7 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
         }
         video_control_give(ctx);
         int stopped = 1;
-        if (reasons & VIDEO_CONTROLLER_STOP || current)
+        if (!deferred && (reasons & VIDEO_CONTROLLER_STOP || current))
             stopped = video_worker_stop(VIDEO_STOP_LIMIT_MS);
         int started = 0;
         if (stopped && guard && reasons & VIDEO_CONTROLLER_START)

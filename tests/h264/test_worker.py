@@ -20,7 +20,8 @@ class WorkerTests(unittest.TestCase):
         # Compile the actual upstream cleanup/lease functions with stock-service
         # mocks. Extraction avoids copying a second implementation into tests.
         functions = []
-        for filename, names in (("patches/zlib_glue.c", ("cfw_cleanup_session",)),
+        for filename, names in (("patches/zlib_glue.c", ("cfw_cleanup_session", "present_shadow", "display_copy_hook")),
+                                ("patches/image_buffers.c", ("cfw_shadow_buffer",)),
                                 ("patches/settings_ext.c", ("cfw_fb_lease_active", "faceclaw_apply_control"))):
             source = (ROOT / filename).read_text(encoding="utf-8")
             for name in names:
@@ -97,6 +98,12 @@ class WorkerTests(unittest.TestCase):
 
     def test_ordered_real_decoder_consumes_owned_nals_and_counts_actual_pictures(self):
         self.check_case("consumer")
+
+    def test_display_refusal_copy_completion_stop_races_and_unknown_job_quarantine(self):
+        self.check_case("presentation-failures")
+
+    def test_ordinary_image_overlay_lease_and_stock_fallback_remain_unchanged(self):
+        self.check_case("original-display")
 
     def test_completed_picture_and_full_dpb_admit_optional_slots_or_retain_four(self):
         self.check_case("queue-extension")
