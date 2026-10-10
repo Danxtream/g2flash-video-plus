@@ -232,6 +232,7 @@ static g2_h264_result worker_decode(void *, const uint8_t *, uint32_t);
 #include "../../patches/video/lifecycle.c"
 #include "../../patches/video/queue.c"
 #define g2_h264_decode worker_decode
+#include "../../patches/video/decode_timing.c"
 #include "../../patches/video/worker.c"
 #undef g2_h264_decode
 #include "../../patches/video/pack.c"
@@ -659,11 +660,16 @@ static uint8_t control_response(const uint8_t *p, uint32_t n, uint8_t *snapshot,
     return snapshot[2];
 }
 static uint8_t control_snapshot(const uint8_t *p, uint32_t n, uint8_t *snapshot) {
-    return control_response(p, n, snapshot, VIDEO_STATUS_BYTES);
+    memset(snapshot, 0, VIDEO_STATUS_BYTES);
+    return control_response(p, n, snapshot, p[1] == VIDEO_CONTROL_STATUS ?
+                            VIDEO_STATUS_BYTES : VIDEO_BASE_STATUS_BYTES);
 }
 static uint8_t control_variable_pages(const uint8_t *p, uint32_t n, uint8_t *snapshot,
                                       uint32_t length, uint8_t lens, uint8_t capacity,
                                       uint8_t page_capacity) {
+    if (length == VIDEO_STATUS_BYTES && p[1] != VIDEO_CONTROL_STATUS) {
+        memset(snapshot, 0, length); length = VIDEO_BASE_STATUS_BYTES;
+    }
     cfw_message_route route = {lens, lens, lens, capacity, 0};
     control_reply_size = 0;
     int result = video_control_received(p, n, &route);
@@ -1196,8 +1202,25 @@ static void consumer(void) {
         assert(decoded_calls == 34 && consumed_frames == 32 && snapshot[50] == (refused ? 4 : 6));
         assert(video_read32(snapshot + 80) == 32 && copied_frames == 32 && flush_calls == 32 && !overlay_calls);
         assert(!((video_owner *)context.video_owner)->evidence && !video_read32(snapshot + 96) &&
-               !cycle_reads && !clock_inits && !calibrations && !crc_calls);
+               cycle_reads == 68 && clock_inits == 1 && !calibrations && !crc_calls);
+        assert(snapshot[128] == VIDEO_DECODE_TOTAL_VERSION && video_read32(snapshot + 132) == 32 &&
+               snapshot[130] == 2 && !snapshot[131]);
+        video_decode_totals completed = context.video_decode_last;
+        uint32_t buckets = 0;
+        for (uint32_t i = 0; i < VIDEO_DECODE_BUCKETS; ++i) buckets += completed.buckets[i];
+        assert(buckets == 32);
         control_command(p, VIDEO_CONTROL_STOP, 1);
+        assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); finish();
+        assert(!memcmp(&completed, &context.video_decode_last, sizeof(completed)));
+        control_command(p, VIDEO_CONTROL_STATUS, 0);
+        assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED && video_read32(snapshot + 132) == 32);
+        uint8_t frozen[VIDEO_STATUS_BYTES]; memcpy(frozen, snapshot, sizeof(frozen));
+        context.video_decode_last.flags |= VIDEO_DECODE_LONG_SAMPLE;
+        assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED && !memcmp(frozen, snapshot, sizeof(frozen)));
+        control_command(p, VIDEO_CONTROL_START, 2);
+        assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED && !context.video_decode_last.pictures);
+        control_command(p, VIDEO_CONTROL_STOP, 2);
         assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
         pool_drain(); finish();
         assert(context.framebuffer_shadow == owned_shadow && owned_shadow);
@@ -1232,12 +1255,12 @@ static void evidence(void) {
     assert(video_frame_crc(&frame) == 0xcbf43926U);
     video_owner test_owner = {0}; video_evidence window = {0}; test_owner.evidence = &window;
     force_cycles = 1; forced_cycles = 3;
-    window.start_cycles = UINT32_MAX - 4; window.start_tick = tick();
-    video_evidence_after(&test_owner, G2_H264_CONSUMED);
+    test_owner.timing.start_cycles = UINT32_MAX - 4; test_owner.timing.start_tick = tick();
+    video_decode_after(&test_owner, G2_H264_CONSUMED);
     assert(window.building.cycles == 8 && window.building.no_output_cycles == 8 &&
            !window.building.flags && window.building.calls == 1);
     window.building.cycles = UINT32_MAX - 4;
-    video_evidence_after(&test_owner, G2_H264_FRAME_READY);
+    video_decode_after(&test_owner, G2_H264_FRAME_READY);
     assert(window.building.flags & VIDEO_TIMING_INVALID);
     force_cycles = 0;
     for (uint32_t anomaly = 0; anomaly < 2; ++anomaly) {
@@ -1267,7 +1290,7 @@ static void evidence(void) {
         pool_drain(); finish(); assert(!context.video_control.error);
         shadow_free(owned_shadow); context.framebuffer_shadow = 0;
     }
-    puts("off has no window/calibration/CRC/ACK waits; verified rows bounded, lossless and anomalous timing nonfatal PASS");
+    puts("off has bounded aggregates but no window/calibration/CRC/ACK waits; verified rows bounded, lossless and anomalous timing nonfatal PASS");
 }
 
 static void evidence_replays(void) {

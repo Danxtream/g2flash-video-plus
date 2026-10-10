@@ -64,7 +64,7 @@ class WindowWire:
                         if op == CREDITS:
                             self.replays[key] = struct.pack('<IBB', lens, 32+4, 0)
                         else:
-                            self.replays[key] = status_bytes(self.states[lens], 1, token=10+lens)
+                            self.replays[key] = status_bytes(self.states[lens], 1, token=10+lens, extended=op == STATUS)
                     raw = self.replays[key]
                     count = (len(raw)+self.page_bytes-1)//self.page_bytes
                     self.notes.put((CTRL[2], frame(struct.pack('<BBIBB', 31, lens, request, page, count)

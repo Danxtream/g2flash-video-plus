@@ -23,7 +23,8 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     video_control_state *s = &ctx->video_control;
     uint8_t *p = entry->snapshot;
     bzero(p, VIDEO_STATUS_BYTES);
-    entry->snapshot_bytes = VIDEO_STATUS_BYTES;
+    entry->snapshot_bytes = entry->command[1] == VIDEO_CONTROL_STATUS ?
+        VIDEO_STATUS_BYTES : VIDEO_BASE_STATUS_BYTES;
     p[0] = VIDEO_PROTOCOL_VERSION;
     p[1] = 7; /* Shared-shadow presentation with optional frame verification. */
     p[2] = entry->result;
@@ -53,7 +54,8 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     video_write32(p + 64, queue.pictures);
     p[68] = s->error >= VIDEO_CONTROL_GAP ? 2 : queue.gap_deadline ? 1 : 0;
     p[69] = queue.header_progress;
-    p[70] = 7 | VIDEO_FEATURE_CREDITS; /* Diagnostics, presentation, verification and credits. */
+    p[70] = 7 | VIDEO_FEATURE_CREDITS | VIDEO_FEATURE_DECODE_TOTALS |
+        (1u << VIDEO_STATUS_EXTENSION_SHIFT); /* Advertise one 64-byte STATUS extension. */
     p[71] = VIDEO_PRESENT_NATIVE | VIDEO_VERIFY_FRAMES;
     video_write32(p + 72, queue.gap_deadline);
     video_write32(p + 76, queue.gap_sequence);
@@ -62,6 +64,8 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     video_write32(p + 88, ctx->video_presentation.copy_tick);
     video_write32(p + 92, s->options);
     video_evidence_status_locked(ctx, p);
+    if (entry->snapshot_bytes == VIDEO_STATUS_BYTES)
+        video_decode_encode(&ctx->video_decode_last, p + VIDEO_BASE_STATUS_BYTES);
 }
 
 /* Credits are a frozen owner-bound snapshot, not an acknowledgement that a
@@ -131,6 +135,7 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         uint32_t deadline = VIDEO_TICK + VIDEO_INACTIVITY_LIMIT_MS;
         __atomic_store_n(&s->active_deadline, deadline ? deadline : 1, __ATOMIC_RELEASE);
         s->error = 0;
+        ctx->video_decode_last = (video_decode_totals){0};
         if (!video_controller_request_locked(VIDEO_CONTROLLER_START)) {
             __atomic_store_n(&s->start_guard, 0, __ATOMIC_RELEASE); s->error = VIDEO_CONTROL_DISPATCH;
             __atomic_fetch_and(&s->controller_reasons, ~VIDEO_CONTROLLER_START, __ATOMIC_ACQ_REL);

@@ -27,7 +27,7 @@ typedef struct {
  * never waits for an ACK; the always-available diagnostics are independent. */
 typedef struct {
     video_frame_result rows[VIDEO_EVIDENCE_ROWS], building;
-    uint32_t high, acked, stalls, blocked, start_cycles, start_tick;
+    uint32_t high, acked, stalls, blocked;
     uint32_t no_output_cycles, no_output_ticks, no_output_calls;
 } video_evidence;
 

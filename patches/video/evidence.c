@@ -33,6 +33,23 @@ static uint32_t video_clock_calibrate(void) {
 #define VIDEO_CLOCK_CALIBRATE video_clock_calibrate
 #endif
 
+/* One counter pair also feeds optional verification: no duplicate sampling,
+ * calibration in normal mode, or statistics-driven worker wait. */
+static void video_decode_before(video_owner *owner, uint32_t sequence, uint8_t kind) {
+    video_decode_accumulator *a = &owner->timing;
+    if (!a->clock_started) { VIDEO_CLOCK_INIT(); a->clock_started = 1; }
+    if (owner->evidence) video_evidence_before(owner, sequence);
+    a->vcl = kind >= 1 && kind <= 5;
+    a->start_tick = VIDEO_TICK; a->start_cycles = VIDEO_CYCLES;
+}
+static void video_decode_after(video_owner *owner, g2_h264_result result) {
+    video_decode_accumulator *a = &owner->timing;
+    uint32_t cycles = VIDEO_CYCLES - a->start_cycles;
+    uint32_t now = VIDEO_TICK, ticks = now - a->start_tick;
+    video_decode_add(a, cycles, ticks, result == G2_H264_FRAME_READY);
+    if (owner->evidence) video_evidence_after(owner, result, cycles, ticks, now);
+}
+
 uint32_t video_frame_crc(const g2_h264_frame_info *frame) {
     uint32_t crc = UINT32_MAX;
     for (uint32_t y = 0; y < frame->height; ++y)
@@ -56,19 +73,15 @@ static int video_evidence_space(video_owner *owner) {
 static void video_evidence_before(video_owner *owner, uint32_t sequence) {
     video_evidence *w = owner->evidence;
     if (!w->building.calls) {
-        if (!w->high) VIDEO_CLOCK_INIT();
         w->building.first_nal = sequence;
         w->building.clock_before = VIDEO_CLOCK_CALIBRATE();
         if (!w->building.clock_before) w->building.flags |= VIDEO_TIMING_INVALID;
     }
     w->building.last_nal = sequence;
-    w->start_tick = VIDEO_TICK;
-    w->start_cycles = VIDEO_CYCLES;
 }
-static void video_evidence_after(video_owner *owner, g2_h264_result result) {
+static void video_evidence_after(video_owner *owner, g2_h264_result result,
+                                  uint32_t cycles, uint32_t ticks, uint32_t now) {
     video_evidence *w = owner->evidence;
-    uint32_t cycles = VIDEO_CYCLES - w->start_cycles;
-    uint32_t now = VIDEO_TICK, ticks = now - w->start_tick;
     video_frame_result *r = &w->building;
     if (cycles > UINT32_MAX - r->cycles || ticks > UINT32_MAX - r->ticks || r->calls == UINT32_MAX)
         r->flags |= VIDEO_TIMING_INVALID;

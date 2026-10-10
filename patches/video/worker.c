@@ -27,12 +27,15 @@ typedef struct {
     video_nal_queue queue;
     video_storage storage;
     video_evidence *evidence;
+    video_decode_accumulator timing;
     g2_h264_runtime runtime;
 } video_owner;
 
+static void video_decode_before(video_owner *, uint32_t, uint8_t);
+static void video_decode_after(video_owner *, g2_h264_result);
 static int video_evidence_space(video_owner *);
 static void video_evidence_before(video_owner *, uint32_t);
-static void video_evidence_after(video_owner *, g2_h264_result);
+static void video_evidence_after(video_owner *, g2_h264_result, uint32_t, uint32_t, uint32_t);
 static void video_evidence_frame(video_owner *, const g2_h264_frame_info *);
 static int video_evidence_publish_locked(video_owner *, uint32_t);
 static int video_evidence_read_locked(customCfwContext *, const uint8_t *, uint8_t, uint8_t *);
@@ -149,9 +152,9 @@ static int video_worker_consume(video_owner *owner) {
     }
     video_control_give(ctx);
     if (!claimed) return 0;
-    if (owner->evidence) video_evidence_before(owner, view.sequence);
+    video_decode_before(owner, view.sequence, view.bytes[0] & 31);
     g2_h264_result decoded = g2_h264_decode(owner->decoder, view.bytes, view.length);
-    if (owner->evidence) video_evidence_after(owner, decoded);
+    video_decode_after(owner, decoded);
     video_storage_finish_call(&owner->storage);
     g2_h264_frame_info frame = {0};
     g2_h264_dpb_info dpb = {0};
@@ -164,6 +167,7 @@ static int video_worker_consume(video_owner *owner) {
         decoded = G2_H264_ERROR;
     if (decoded == G2_H264_FRAME_READY && owner->evidence) video_evidence_frame(owner, &frame);
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
+    ctx->video_decode_last = owner->timing.totals;
     int released = decoded != G2_H264_ERROR && video_queue_release(&owner->queue, &view);
     int unpinned = video_lifecycle_unpin(&ctx->video, owner->token, 0);
     owner->decode_pin = 0;

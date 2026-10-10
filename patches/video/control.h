@@ -20,13 +20,17 @@ enum {
     VIDEO_CREDITS_REQUEST_BYTES = 20,
     VIDEO_CREDITS_BYTES = 6,
     VIDEO_FEATURE_CREDITS = 8,
+    VIDEO_FEATURE_DECODE_TOTALS = 16,
+    VIDEO_STATUS_EXTENSION_UNIT = 64,
+    VIDEO_STATUS_EXTENSION_SHIFT = 5,
     VIDEO_CREDIT_CAPACITY_SIX = 8,
     VIDEO_CREDIT_STATE_SHIFT = 4,
     VIDEO_CREDIT_GAP = 128,
     VIDEO_CONTROL_HEADER_BYTES = 8,
     VIDEO_START_BYTES = 24,
     VIDEO_CONTROL_REPLAYS = 4,
-    VIDEO_STATUS_BYTES = 128,
+    VIDEO_BASE_STATUS_BYTES = 128,
+    VIDEO_STATUS_BYTES = VIDEO_BASE_STATUS_BYTES + VIDEO_STATUS_EXTENSION_UNIT,
     VIDEO_DIAGNOSTICS_BYTES = 128,
     VIDEO_REPLY_HEADER_BYTES = 8,
     /* Nine-byte PAGE plus its five-byte transport record header. */
@@ -70,7 +74,7 @@ typedef struct {
     uint8_t length, result, capacity, pending;
     uint8_t snapshot_bytes;
     uint8_t command[VIDEO_START_BYTES];
-    uint8_t snapshot[VIDEO_DIAGNOSTICS_BYTES];
+    uint8_t snapshot[VIDEO_STATUS_BYTES];
 } video_control_replay;
 
 typedef struct {

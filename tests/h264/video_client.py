@@ -13,7 +13,7 @@ from receive_client import (control, diagnostics, diagnostic_alerts,
                             DIAGNOSTICS, PAGE, nal)
 
 FRAME_READ, FRAME_ACK, CREDITS, VERIFY_FRAMES, NATIVE = 8, 9, 10, 128, 1
-STATUS_BYTES, FRAME_BYTES, ACK_BYTES = 128, 80, 16
+BASE_STATUS_BYTES, STATUS_BYTES, FRAME_BYTES, ACK_BYTES = 128, 192, 80, 16
 RESULT_FIELDS = ('ordinal', 'first_nal', 'last_nal', 'geometry', 'crc', 'cycles', 'ticks',
                  'clock_before', 'clock_after', 'flags', 'decode_tick', 'copy_tick', 'calls',
                  'finishing_cycles', 'finishing_ticks', 'no_output_cycles')
@@ -22,10 +22,10 @@ RESULT_FIELDS = ('ordinal', 'first_nal', 'last_nal', 'geometry', 'crc', 'cycles'
 def status(raw):
     """Require the active decoder/display contract and bounded independent counts."""
     raw = bytes(raw)
-    if (len(raw) != STATUS_BYTES or raw[:2] != bytes((VERSION, 7)) or raw[3] > 4 or
+    if (len(raw) not in (BASE_STATUS_BYTES, STATUS_BYTES) or raw[:2] != bytes((VERSION, 7)) or raw[3] > 4 or
             struct.unpack_from('<IIHHBB', raw, 32) != (4096, 4086, 320, 192, 1, 2) or
             raw[46:50] != bytes((1, 1, 4, 6)) or raw[50] not in (0, 4, 6) or raw[51] > raw[50] or
-            raw[70] not in (7, 15) or raw[71] != VERIFY_FRAMES | NATIVE or raw[68] > 2 or raw[69] > 7):
+            raw[70] != 63 or raw[71] != VERIFY_FRAMES | NATIVE or raw[68] > 2 or raw[69] > 7):
         raise ValueError('unsupported or inconsistent playback contract')
     result = dict(version=raw[0], stage=raw[1], result=raw[2], state=raw[3], capacity=raw[50],
                   credits=raw[51], recovery=raw[68], headers=raw[69], compact_credits=bool(raw[70] & 8))
@@ -44,7 +44,26 @@ def status(raw):
     if not result['options'] & VERIFY_FRAMES and any(result[k] for k in
             ('result_capacity', 'result_high', 'acked', 'result_stalls', 'no_output_cycles', 'no_output_ticks', 'no_output_calls')):
         raise ValueError('ordinary playback unexpectedly reports verification work')
+    result['status_bytes'] = BASE_STATUS_BYTES + (raw[70] >> 5)*64
+    result['decode_totals'] = decode_totals(raw[BASE_STATUS_BYTES:]) if len(raw) == STATUS_BYTES else None
     return result
+
+
+def decode_totals(raw):
+    """Decode bounded wall/cycle aggregates, without inventing percentiles."""
+    if len(raw) != 64 or raw[0] != 1 or raw[1] & ~3:
+        raise ValueError('unsupported decode aggregate format')
+    flags, headers, pictures, cycles, ticks, maximum_cycles, maximum_ticks = struct.unpack_from('<BHIQQII', raw, 1)
+    buckets = struct.unpack_from('<6I', raw, 32)
+    if not flags & 2 and sum(buckets) != pictures:
+        raise ValueError('inconsistent decode aggregate buckets')
+    header_cycles, header_ticks = struct.unpack_from('<II', raw, 56)
+    return dict(flags=flags, pictures=pictures, cycles=cycles, ticks=ticks,
+                max_cycles=maximum_cycles, max_ticks=maximum_ticks, buckets=buckets,
+                header_calls=headers, header_cycles=header_cycles, header_ticks=header_ticks,
+                mean_ms=ticks/pictures if pictures else None,
+                cycles_per_wall_tick_mhz=cycles/ticks/1000 if ticks and not flags else None,
+                note='Decode brackets include preemption; bucket counts do not establish median or P90.')
 
 
 def frame_result(raw):
@@ -183,7 +202,7 @@ class VideoClient(VideoLink):
         if op == START:
             payload[18] = (NATIVE if native else 0) | (VERIFY_FRAMES if verify else 0)
         return paired_report({source: status(raw) for source, raw in
-                              self.raw_replies(payload, STATUS_BYTES).items()})
+                              self.raw_replies(payload, STATUS_BYTES if op == STATUS else BASE_STATUS_BYTES).items()})
 
     def credits(self, stream, tokens):
         """Query both owners once; neither reply alone grants paired input slots."""

@@ -70,7 +70,7 @@ def parse_page(frame):
         return None
     if (frame[3] != len(frame) - 8 or not 9 <= len(body) <= 30 or
             crc16(body) != frame[-2:] or body[1] not in (1, 2) or
-            not 0 < body[7] <= 128 or body[6] >= body[7]):
+            not 0 < body[7] <= 192 or body[6] >= body[7]):
         raise ValueError('invalid video reply envelope')
     return body[1], struct.unpack_from('<I', body, 2)[0], body[6], body[7], body[8:]
 

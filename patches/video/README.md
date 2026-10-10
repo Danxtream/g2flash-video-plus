@@ -127,7 +127,7 @@ No new timer, permanent task or boot-time video allocation is introduced.
 
 Four exact request/reply entries per ingress lens prevent repeated operations.
 Request IDs increase separately per ingress; older uncached IDs or conflicting
-duplicates refuse. Each reply freezes a 128-byte status snapshot. A page query
+duplicates refuse. Each reply freezes its bounded snapshot. A page query
 has the original request ID and one page byte, and never executes the control.
 One response per query fits the proven notification capacity, including MTU23.
 The frozen page width also fits the shorter nine-byte page request: its
@@ -264,7 +264,8 @@ The display wait is bounded and leaves normal interrupts/watchdog running.
 
 START flag bit 7 requests verification; it defaults off. Bit 0 independently
 selects native presentation. Other bits remain reserved. Off playback allocates
-no result window, performs no CRC or clock work and never waits for result ACKs.
+no result window, performs no CRC or clock calibration and never waits for
+result ACKs.
 Diagnostics remain available. Verification adds at most 1,536 bytes to the
 cached ledger cap, with a single lazy allocation of sixteen 64-byte rows and
 bookkeeping. It does not change the decoder, panel packing or display path.
@@ -304,6 +305,36 @@ Offsets 112/116/120 report cumulative no-output-call cycles/ticks/count,
 including parameter sets and any tail after the last picture. Offset 124 marks
 incomplete verification. Presentation count at 80 remains independent of NAL
 consumption and the result acknowledgement cursor.
+
+### Ordinary decode timing
+
+Capability byte 70 bit 4 advertises decode totals. Bits 5..7 count 64-byte
+STATUS extension units beyond the original 128 bytes: one unit, 192 bytes
+total. Capabilities, START/STOP/RESET and diagnostics retain their 128-byte
+lengths. CREDITS stays six bytes. Clients reject unsupported lengths/schema.
+
+Offset 128 starts a 64-byte extension: version byte 1, diagnostic flags byte,
+LE16 non-VCL call count, LE32 completed-picture count, LE64 cycle/tick sums,
+LE32 maximum picture cycles/ticks, six LE32 bucket counts, and LE32 non-VCL
+cycle/tick sums. Bucket upper bounds are 30, 50, 62, 80, 100 and unbounded
+milliseconds. Parameter-set/SEI work is separate; VCL calls accumulate until
+FRAME_READY. NAL consumption, completed pictures and copies remain independent.
+
+The worker enables DWT once per session and reads cycles/ticks immediately
+around each C ABI decode call. Optional verification shares those samples.
+Normal mode adds no calibration, CRC, allocation, result window or ACK wait.
+Unsigned deltas cover a single counter wrap. Brackets of at least one second
+set flag bit 0 because their cycle delta is not qualified. Saturating counters
+set bit 1; flags never abort decoding. Statistics with flags remain diagnostic.
+
+Totals publish coherently under the existing short publication lock and freeze
+with each STATUS request. Reads/retries do not reset them. The last totals
+survive STOP; an accepted fresh START resets them. Stable replay storage grows
+by 512 bytes and retained totals by 64 bytes, plus the worker's lazy accumulator.
+Tick totals are wall time with millisecond granularity and include preemption.
+Cycles also include preempting tasks/interrupts. Bins do not establish a median,
+P90 or an exclusive decoder CPU share; hardware scheduling needs separate
+evidence.
 
 ### Upstream session cleanup
 

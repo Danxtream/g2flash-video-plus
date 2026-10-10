@@ -45,6 +45,7 @@
 #include "video/lifecycle.c"
 #include "video/queue.c"
 #include "video/pack.c"
+#include "video/decode_timing.c"
 #include "video/worker.c"
 #include "video/present.c"
 #include "video/evidence.c"

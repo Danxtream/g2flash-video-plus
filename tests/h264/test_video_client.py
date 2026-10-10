@@ -17,17 +17,21 @@ from video_client import (VideoClient, status, frame_result, timing, summarize, 
 from reference_clip import read_nals, build_reference, make_reference, decoder_identity
 
 
-def status_bytes(state=0, stream=0, token=1, consumed=0, pictures=0, options=0, high=0, acked=0):
-    raw = bytearray(128)
+def status_bytes(state=0, stream=0, token=1, consumed=0, pictures=0, options=0, high=0, acked=0, extended=False):
+    raw = bytearray(192 if extended else 128)
     raw[:4] = bytes((1, 7, 0, state))
     struct.pack_into('<II', raw, 4, stream, token)
     struct.pack_into('<I', raw, 20, stream)
     struct.pack_into('<IIHHBB', raw, 32, 4096, 4086, 320, 192, 1, 2)
     raw[46:52] = bytes((1, 1, 4, 6, 4 if state else 0, 4 if state else 0))
-    raw[70:72] = bytes((15, 129))
+    raw[70:72] = bytes((63, 129))
     struct.pack_into('<IIII', raw, 52, consumed, consumed, consumed, pictures)
     struct.pack_into('<IIII', raw, 80, pictures, 0, 100, options)
     struct.pack_into('<IIII', raw, 96, 16 if options & VERIFY_FRAMES and state else 0, high, acked, 0)
+    if extended:
+        raw[128] = 1
+        struct.pack_into('<I', raw, 132, pictures)
+        struct.pack_into('<I', raw, 160, pictures)
     return bytes(raw)
 
 
@@ -74,7 +78,7 @@ class PlaybackWire(MockTransport):
                             self.acked = ordinal; self.replays[request] = head
                     else:
                         self.replays[request] = diagnostic_bytes() if op == 7 else status_bytes(
-                            self.state, self.stream, options=self.options)
+                            self.state, self.stream, options=self.options, extended=op == STATUS)
         super().write(*args)
         if self.lose_once and op is not None and (self.lose_op is None or op == self.lose_op):
             self.lose_once = False
@@ -91,11 +95,11 @@ class FakePlayback:
         self.refused = False
         self.lens = self.targets = 1
         self.status_reads = self.credit_reads = 0
-    def report(self):
+    def report(self, extended=False):
         pictures = sum(r['last_nal'] < self.consumed for r in self.reference['frames'])
         report = status(status_bytes(self.state, 1, consumed=self.consumed, pictures=pictures,
                                     options=self.options, high=self.high if self.state else 0,
-                                    acked=self.acked if self.state else 0))
+                                    acked=self.acked if self.state else 0, extended=extended))
         report['credits'] = 4 - len(self.pending)
         report['accepted'] = self.index
         return report
@@ -122,7 +126,7 @@ class FakePlayback:
             self.stops += 1; self.state = 0
             if self.fail == 'cleanup':
                 result = self.report(); result['error'] = 15; return result
-        return self.report()
+        return self.report(extended=op == STATUS)
     def credits(self, stream, tokens):
         assert stream == 1 and tokens == {1: 1}
         self.credit_reads += 1
