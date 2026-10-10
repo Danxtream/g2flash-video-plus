@@ -21,7 +21,8 @@ static customCfwContext *peekCustomCfwContext(void) {
  * slot ptr is range-checked to SRAM and the struct's magic verified before
  * trusting it, so warm-reset garbage can't be mistaken for a live context.
  * Returns 0 if the one-time struct malloc fails. */
-static customCfwContext *getCustomCfwContext(void) {
+/* Keep first-use allocation and initialization out of ordinary callers. */
+static __attribute__((noinline)) customCfwContext *createCustomCfwContext(void) {
     for (;;) {
         /* BLE and the bridge can create the context concurrently. Publish only
          * fully initialized state; free a losing allocation instead of replacing
@@ -40,4 +41,9 @@ static customCfwContext *getCustomCfwContext(void) {
             return ctx;
         FW_FREE(ctx);
     }
+}
+
+static inline __attribute__((always_inline)) customCfwContext *getCustomCfwContext(void) {
+    customCfwContext *ctx = peekCustomCfwContext();
+    return ctx ? ctx : createCustomCfwContext();
 }
