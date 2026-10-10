@@ -24,10 +24,10 @@ def status(raw):
     if (len(raw) != STATUS_BYTES or raw[:2] != bytes((VERSION, 7)) or raw[3] > 4 or
             struct.unpack_from('<IIHHBB', raw, 32) != (4096, 4086, 320, 192, 1, 2) or
             raw[46:50] != bytes((1, 1, 4, 6)) or raw[50] not in (0, 4, 6) or raw[51] > raw[50] or
-            raw[70:72] != bytes((7, VERIFY_FRAMES | NATIVE)) or raw[68] > 2 or raw[69] > 7):
+            raw[70] not in (7, 15) or raw[71] != VERIFY_FRAMES | NATIVE or raw[68] > 2 or raw[69] > 7):
         raise ValueError('unsupported or inconsistent playback contract')
     result = dict(version=raw[0], stage=raw[1], result=raw[2], state=raw[3], capacity=raw[50],
-                  credits=raw[51], recovery=raw[68], headers=raw[69])
+                  credits=raw[51], recovery=raw[68], headers=raw[69], compact_credits=bool(raw[70] & 8))
     for name, offset in (('stream', 4), ('token', 8), ('stream_high', 20), ('error', 24),
                          ('interval', 28), ('expected', 52), ('accepted', 56), ('consumed', 60),
                          ('pictures', 64), ('presented', 80), ('copy_failures', 84), ('copy_tick', 88),

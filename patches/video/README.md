@@ -152,6 +152,31 @@ framebuffer copy plus cache flush, not proof of optical scanout.
 Transport ACK confirms only
 accepted command validation; refusals preserve upstream NACK/context-reset rules.
 
+### Compact receive credits
+
+Capability byte 70 bit 3 advertises CREDITS (opcode 10). Its 20-byte request
+contains the usual header followed by LE32 stream, left generation token and
+right generation token. Each lens validates its own token and the ingress
+owner; single-lens requests zero the other token. Exact retries freeze the
+original snapshot and never renew activity again. A fresh valid query renews
+the existing owner deadline without allocating storage.
+
+The six-byte snapshot contains LE32 next-to-consume NAL sequence, one packed
+byte and the control result/error byte. Packed bits 0..2 are free credits,
+bit 3 selects capacity six rather than four, bits 4..6 are lifecycle state
+and bit 7 is a pending gap. Idle/starting/refused replies grant no credits.
+Together with the eight-byte reply header it fits one 14-byte page on a large
+MTU. MTU23 uses the existing bounded page fallback. The layout is specific to
+CREDITS, rather than the version/stage prefix of the full STATUS snapshot.
+
+Both-target packets are sent once and forwarded through the existing bridge.
+Each lens returns its own source-tagged ACK and credit snapshot; a local ACK
+does not establish peer acceptance. Senders reserve one slot on each target,
+fence both sets of record ACKs before a fresh query, and use the smaller free
+count plus both next-to-consume sequence windows. Consumption only frees slots
+while that single producer is paused. One lens's optional slot extension does
+not enlarge the other's capacity. No NAL count is treated as a picture count.
+
 Transport allocation checks preserve the heap-13 reserve and missing-shadow
 allowance before and after stock-coordinated allocation. Cached decoder sizes
 come from actual requests, including future compile-time feature changes.

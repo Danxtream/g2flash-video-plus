@@ -62,8 +62,10 @@ int cfw_message_received_routed(const uint8_t *p, uint16_t n, uint16_t crc,
     ++received; last_route = *route; last_size = n; memcpy(last_payload, p, n);
     if (refused) return -1;
     if (n && p[0] == 31) {
-        uint8_t reply[9] = {31, route->here, 1, 0, 0, 0, 0, 1, 1};
-        assert(!cfw_message_video_reply(route, reply, sizeof(reply)));
+        uint8_t reply[14] = {31, route->here, 1, 0, 0, 0, 0, 1, 1};
+        uint16_t bytes = n == 20 && p[1] == 10 ? 14 : 9;
+        if (bytes == 14) { reply[12] = 4 | 2u << 4; reply[13] = 0; }
+        assert(!cfw_message_video_reply(route, reply, bytes));
     }
     return 0;
 }
@@ -114,6 +116,30 @@ static void cleanup(void) {
 }
 int main(void) {
     uint8_t body[24] = {31, 0, 1};
+    /* One BLE query forwards to its peer; the peer returns its own ACK and
+     * compact page. Ingress acceptance must not stand in for peer acceptance. */
+    for (uint8_t ingress = 1; ingress <= 2; ++ingress) {
+        side = ingress == 1 ? 2 : 1;
+        body[1] = 10;
+        send_record_chunks(body, 20, CFW_MESSAGE_BOTH, CFW_MESSAGE_RESET_CONTEXT, 9, 0, 233);
+        assert(received == 1 && ble_count == 2 && ble[0].size == 14 &&
+               ble[0].bytes[1] == ingress && ble[1].bytes[4] == ingress);
+        uint32_t requests = bridge_count;
+        assert(requests == 1);
+        side = ingress == 1 ? 1 : 2;
+        for (uint32_t i = 0; i < requests; ++i)
+            assert(!cfw_message_bridge_received(CFW_MESSAGE_SID, bridge[i].bytes, bridge[i].size, 0));
+        assert(received == 2 && bridge_count == requests + 2 &&
+               last_route.origin == ingress && last_route.here == 3 - ingress &&
+               last_route.targets == CFW_MESSAGE_BOTH && last_route.reply_capacity == 25);
+        side = ingress == 1 ? 2 : 1;
+        for (uint32_t i = requests; i < bridge_count; ++i)
+            assert(!cfw_message_bridge_received(CFW_MESSAGE_SID, bridge[i].bytes, bridge[i].size, 0));
+        assert(ble_count == 4 && ble[2].size == 14 && ble[2].bytes[1] == 3 - ingress &&
+               ble[3].bytes[0] == CFW_MESSAGE_ACK && ble[3].bytes[4] == 3 - ingress);
+        cleanup();
+    }
+    body[1] = 0;
     /* RESET_CONTEXT on each record makes capacity depend on that request,
      * even when the negotiated MTU has room for much larger packets. */
     for (uint8_t lens = 1; lens <= 2; ++lens) {

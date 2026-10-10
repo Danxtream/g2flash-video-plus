@@ -686,6 +686,97 @@ static uint8_t control_variable_pages(const uint8_t *p, uint32_t n, uint8_t *sna
     assert((result == 0) == (snapshot[2] == VIDEO_CONTROL_ACCEPTED));
     return snapshot[2];
 }
+static int credit_response(const uint8_t *p, cfw_message_route route, uint8_t snapshot[6]) {
+    int result = video_control_received(p, VIDEO_CREDITS_REQUEST_BYTES, &route);
+    uint32_t bytes = control_reply_size - VIDEO_REPLY_HEADER_BYTES;
+    assert(bytes && bytes <= VIDEO_CREDITS_BYTES && control_reply[6] == 0);
+    uint32_t pages = (VIDEO_CREDITS_BYTES + bytes - 1) / bytes;
+    assert(control_reply[7] == pages && control_reply[1] == route.here);
+    memcpy(snapshot, control_reply + VIDEO_REPLY_HEADER_BYTES, bytes);
+    uint8_t page[9] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_PAGE, VIDEO_PROTOCOL_VERSION};
+    memcpy(page + 4, p + 4, 4);
+    route.reply_capacity = route.reply_capacity < VIDEO_PAGE_REPLY_CAPACITY ?
+        route.reply_capacity : VIDEO_PAGE_REPLY_CAPACITY;
+    for (uint32_t i = 1; i < pages; ++i) {
+        page[8] = i;
+        assert(!video_control_received(page, sizeof(page), &route));
+        uint32_t n = VIDEO_CREDITS_BYTES - i * bytes;
+        if (n > bytes) n = bytes;
+        memcpy(snapshot + i * bytes, control_reply + VIDEO_REPLY_HEADER_BYTES, n);
+    }
+    assert((result == 0) == (snapshot[5] == VIDEO_CONTROL_ACCEPTED));
+    return snapshot[5];
+}
+static void credits(void) {
+    /* Separate recipients select their own token; the same bridge origin is
+     * retained. Test asymmetric state without treating a local ACK as paired. */
+    for (uint8_t here = 1; here <= 2; ++here) for (uint8_t origin = 1; origin <= 2; ++origin)
+    for (uint8_t budget = 9; budget <= 21; budget += 12) {
+        configure(); request_next = 0;
+        uint8_t p[VIDEO_START_BYTES], frozen[6], current[6], saved[VIDEO_START_BYTES];
+        control_command(p, VIDEO_CONTROL_START, 1);
+        cfw_message_route route = {here, origin, CFW_MESSAGE_BOTH, budget, 0};
+        assert(!video_control_received(p, 24, &route));
+        pool_drain(); await_ready();
+        uint32_t token = context.video.token;
+        control_command(p, VIDEO_CONTROL_CREDITS, 1);
+        video_write32(p + 12, here == 1 ? token : token + 19);
+        video_write32(p + 16, here == 2 ? token : token + 19);
+        memcpy(saved, p, sizeof(saved));
+        assert(!credit_response(p, route, frozen));
+        assert(!video_read32(frozen) && (frozen[4] & 7) == 4 &&
+               (frozen[4] >> VIDEO_CREDIT_STATE_SHIFT & 7) == VIDEO_READY);
+        assert(control_reply[7] == (budget == 9 ? 6 : 1));
+        uint32_t deadline = context.video_control.active_deadline;
+        assert(!take(1, 1000));
+        const uint8_t header[] = {0x67};
+        video_owner *owner = context.video_owner;
+        assert(video_queue_push(&owner->queue, 0, header, sizeof(header)) == 1);
+        assert(!give(1));
+        assert(!credit_response(saved, route, current) && !memcmp(current, frozen, 6));
+        assert(context.video_control.active_deadline == deadline);
+        control_command(p, VIDEO_CONTROL_CREDITS, 1);
+        video_write32(p + (here == 1 ? 12 : 16), token);
+        assert(!credit_response(p, route, current) && (current[4] & 7) == 3);
+        assert(!take(1, 1000));
+        video_nal_view view;
+        assert(video_queue_claim(&owner->queue, token, &view));
+        assert(video_queue_release(&owner->queue, &view));
+        assert(!give(1));
+        control_command(p, VIDEO_CONTROL_CREDITS, 1);
+        video_write32(p + (here == 1 ? 12 : 16), token);
+        assert(!credit_response(p, route, current) && video_read32(current) == 1 &&
+               (current[4] & 7) == 4);
+        assert(!take(1, 1000));
+        uint8_t extension[2 * VIDEO_SLOT_BYTES];
+        assert(video_queue_extend(&owner->queue, extension));
+        assert(video_queue_push(&owner->queue, 2, header, sizeof(header)) == 1);
+        assert(video_queue_watch(&owner->queue, tick()));
+        assert(!give(1));
+        control_command(p, VIDEO_CONTROL_CREDITS, 1);
+        video_write32(p + (here == 1 ? 12 : 16), token);
+        uint32_t allocations = allocation_calls;
+        assert(!credit_response(p, route, current) && video_read32(current) == 1 &&
+               (current[4] & 7) == 5 && (current[4] & VIDEO_CREDIT_CAPACITY_SIX) &&
+               (current[4] & VIDEO_CREDIT_GAP) && allocation_calls == allocations);
+        memcpy(saved, p, sizeof(saved));
+        saved[12] ^= 1; saved[16] ^= 1;
+        assert(video_control_received(saved, 20, &route) == -1); /* Conflicting cached request. */
+        control_command(p, VIDEO_CONTROL_CREDITS, 1);
+        video_write32(p + (here == 1 ? 12 : 16), token + 1);
+        assert(credit_response(p, route, current) == VIDEO_CONTROL_STALE && !(current[4] & 7));
+        control_command(p, VIDEO_CONTROL_CREDITS, 2);
+        video_write32(p + (here == 1 ? 12 : 16), token);
+        assert(credit_response(p, route, current) == VIDEO_CONTROL_STALE && !(current[4] & 7));
+        control_command(p, VIDEO_CONTROL_STOP, 1);
+        assert(!video_control_received(p, 12, &route));
+        pool_drain(); finish();
+        control_command(p, VIDEO_CONTROL_CREDITS, 1);
+        video_write32(p + (here == 1 ? 12 : 16), token);
+        assert(credit_response(p, route, current) == VIDEO_CONTROL_STALE && !(current[4] & 7));
+    }
+    puts("owner-bound six-byte credits, both origins/recipients, frozen retries and MTU23 PASS");
+}
 static void control_paging(void) {
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES], retry[VIDEO_STATUS_BYTES];
     /* Uncompressed records add five bytes. At a large MTU the transport
@@ -1637,6 +1728,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "preparation")) preparation_cancel();
     else if (!strcmp(argv[1], "controls")) controls();
     else if (!strcmp(argv[1], "control-paging")) control_paging();
+    else if (!strcmp(argv[1], "credits")) credits();
     else if (!strcmp(argv[1], "diagnostics")) diagnostics();
     else if (!strcmp(argv[1], "control-preparation")) control_preparation();
     else if (!strcmp(argv[1], "control-failures")) control_failures();

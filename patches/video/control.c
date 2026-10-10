@@ -53,7 +53,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     video_write32(p + 64, queue.pictures);
     p[68] = s->error >= VIDEO_CONTROL_GAP ? 2 : queue.gap_deadline ? 1 : 0;
     p[69] = queue.header_progress;
-    p[70] = 7; /* Diagnostics, presentation and optional verification. */
+    p[70] = 7 | VIDEO_FEATURE_CREDITS; /* Diagnostics, presentation, verification and credits. */
     p[71] = VIDEO_PRESENT_NATIVE | VIDEO_VERIFY_FRAMES;
     video_write32(p + 72, queue.gap_deadline);
     video_write32(p + 76, queue.gap_sequence);
@@ -64,10 +64,37 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     video_evidence_status_locked(ctx, p);
 }
 
+/* Credits are a frozen owner-bound snapshot, not an acknowledgement that a
+ * peer accepted input. Both-target senders must account each lens separately. */
+static void video_credit_snapshot(customCfwContext *ctx, video_control_replay *entry) {
+    video_queue_report queue;
+    video_worker_queue_report_locked(&queue);
+    uint32_t state = video_lifecycle_state(&ctx->video);
+    uint8_t *p = entry->snapshot;
+    entry->snapshot_bytes = VIDEO_CREDITS_BYTES;
+    video_write32(p, queue.expected);
+    p[4] = (entry->result ? 0 : queue.credits) |
+        (queue.capacity == VIDEO_QUEUE_MAX ? VIDEO_CREDIT_CAPACITY_SIX : 0) |
+        (state << VIDEO_CREDIT_STATE_SHIFT) | (queue.gap_deadline ? VIDEO_CREDIT_GAP : 0);
+    p[5] = entry->result ? entry->result : ctx->video_control.error;
+}
+
 static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
-                               uint32_t n, uint8_t origin) {
+                               uint32_t n, uint8_t here, uint8_t origin) {
     video_control_state *s = &ctx->video_control;
     uint8_t op = p[1];
+    if (op == VIDEO_CONTROL_CREDITS) {
+        if (n != VIDEO_CREDITS_REQUEST_BYTES) return VIDEO_CONTROL_FORMAT;
+        uint32_t token = video_read32(p + (here == CFW_MESSAGE_LEFT ? 12 : 16));
+        if (!token || token != ctx->video.token || video_read32(p + 8) != s->stream ||
+            origin != s->owner_origin || !s->start_guard ||
+            !video_control_generation_valid(ctx, s->start_guard)) return VIDEO_CONTROL_STALE;
+        if (video_lifecycle_state(&ctx->video) != VIDEO_READY) return VIDEO_CONTROL_BUSY;
+        uint32_t deadline = VIDEO_TICK + VIDEO_INACTIVITY_LIMIT_MS;
+        __atomic_store_n(&s->active_deadline, deadline ? deadline : 1, __ATOMIC_RELEASE);
+        video_worker_wake_locked(token, VIDEO_WAKE_INPUT);
+        return VIDEO_CONTROL_ACCEPTED;
+    }
     if (op == VIDEO_CONTROL_CAPABILITIES || op == VIDEO_CONTROL_STATUS) {
         if (n != VIDEO_CONTROL_HEADER_BYTES) return VIDEO_CONTROL_FORMAT;
         if (s->start_guard && origin == s->owner_origin) {
@@ -187,8 +214,9 @@ int video_control_received(const uint8_t *data, uint16_t size,
         entry->capacity = route->reply_capacity < VIDEO_PAGE_REPLY_CAPACITY ?
             route->reply_capacity : VIDEO_PAGE_REPLY_CAPACITY;
         memcpy(entry->command, data, size);
-        entry->result = video_control_apply(ctx, data, size, route->origin);
+        entry->result = video_control_apply(ctx, data, size, route->here, route->origin);
         video_snapshot(ctx, entry);
+        if (data[1] == VIDEO_CONTROL_CREDITS) video_credit_snapshot(ctx, entry);
         if (data[1] == VIDEO_CONTROL_FRAME_READ || data[1] == VIDEO_CONTROL_FRAME_ACK) {
             bzero(entry->snapshot, VIDEO_DIAGNOSTICS_BYTES);
             entry->snapshot_bytes = data[1] == VIDEO_CONTROL_FRAME_READ ? VIDEO_FRAME_RESULT_BYTES : VIDEO_FRAME_ACK_BYTES;
