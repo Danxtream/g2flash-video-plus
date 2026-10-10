@@ -2,7 +2,7 @@
 
 SPDX-License-Identifier: GPL-3.0-only
 Run in Ubuntu from the repository root with --output <output-directory>.
-Optimization flags and callback tracing follow the glasses speed tests.
+Optimization flags follow the glasses speed tests; callback tracing is omitted.
 The firmware build also uses this tool to append the closed, inert decoder.
 """
 import argparse
@@ -47,8 +47,8 @@ def load_selection(path=HERE / "hot_functions.json"):
             raise ValueError("invalid " + key)
         if len(set(items)) != len(items):
             raise ValueError("duplicate " + key)
-    if len(config["promotions"]) != 219:
-        raise ValueError("decoder selection requires 219 promotion symbols")
+    if len(config["promotions"]) != 210:
+        raise ValueError("decoder selection requires 210 promotion symbols")
     mapping = config.get("external_promotions")
     if not isinstance(mapping, dict) or not set(mapping) <= set(config["promotions"]):
         raise ValueError("invalid external promotion mapping")

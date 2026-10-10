@@ -169,10 +169,11 @@ g2_h264_result decode(void *p, const uint8_t *n, uint32_t s) {
         run(["clang", "-std=c11", "-Wall", "-Wextra", "-Werror", "-I" + str(HERE),
              "-c", str(source), "-o", str(self.directory / "header.o")])
 
-    def test_decoder_config_keeps_callback_trace(self):
+    def test_decoder_config_omits_callback_trace(self):
         result = run(["clang++", *toolchain.compiler_flags(self.headers),
                       "-E", "-dM", str(HERE / "g2_h264.cpp")])
-        for macro in ("SUB0H264_TRACE 0", "SUB0H264_MAX_SPS_COUNT 1U",
+        for macro in ("SUB0H264_TRACE 0", "SUB0H264_ENABLE_CALLBACK_TRACE 0",
+                      "SUB0H264_MAX_SPS_COUNT 1U",
                       "SUB0H264_ENABLE_CHROMA_RECONSTRUCTION 0",
                       "SUB0H264_MAX_PPS_COUNT 1U", "SUB0H264_DISABLE_LEGACY_CURRENT_FRAME 1"):
             self.assertIn("#define " + macro, result.stdout)
@@ -181,7 +182,8 @@ g2_h264_result decode(void *p, const uint8_t *n, uint32_t s) {
              "-disable-llvm-passes", "-S", "-emit-llvm", str(HERE / "g2_h264.cpp"),
              "-o", str(ir)])
         text = ir.read_text(encoding="utf-8")
-        self.assertIn("DecodeTrace", text)
+        self.assertNotRegex(text,
+                            r"(?m)^define [^\n]*@_ZNK?8sub0h26411DecodeTrace(?:4emit|[0-9]+on[A-Z])")
         self.assertNotIn("steady_clock", text)
         self.assertNotIn("ds_profile", text)
 

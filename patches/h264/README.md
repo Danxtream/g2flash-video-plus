@@ -46,11 +46,11 @@ at the next decode/destroy. Decode/preflight errors require a decoder restart.
 The unchanged decoder still supports only single-slice pictures; this API does
 not bake that restriction into queue or transport sequencing.
 
-The decoder configuration used for the glasses speed tests keeps one SPS/PPS
-(ID zero), no legacy output copy, SUB0H264_TRACE=0 and all structured DecodeTrace
-callbacks compiled in. The timing shim and absent profile hooks disable
-measurement instrumentation only. CABAC, High support and stream-controlled
-deblocking are unchanged.
+The firmware keeps one SPS/PPS (ID zero), no legacy output copy and
+SUB0H264_TRACE=0. SUB0H264_ENABLE_CALLBACK_TRACE=0 also omits structured
+event calls and callback storage; the vendored default remains enabled.
+The timing shim and absent profile hooks disable instrumentation.
+CABAC, High support and stream-controlled deblocking are unchanged.
 
 toolchain.py discovers ARM GCC's installed newlib headers and the softfp multilib.
 It prints the C++23 PIC decoder flags used for the glasses speed tests, without

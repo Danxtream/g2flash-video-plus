@@ -107,7 +107,7 @@ class PartitionTests(unittest.TestCase):
 
     def test_frozen_selection_and_explicit_provider_mapping(self):
         config = builder.load_selection()
-        self.assertEqual(len(config["promotions"]), 219)
+        self.assertEqual(len(config["promotions"]), 210)
         self.assertEqual(len(config["hot_groups"]), 12)
         self.assertEqual(config["external_promotions"], {"_ZL7importsv": "g2_h264_runtime_current"})
         with tempfile.TemporaryDirectory() as directory:
@@ -220,8 +220,8 @@ class PartitionBuildTests(unittest.TestCase):
 
     def test_real_arm_selection_and_table_ownership(self):
         self.assertEqual(self.manifest["name"], "h264-decoder")
-        self.assertEqual(len(self.membership["promotion_mapping"]), 218)
-        self.assertEqual(sum(v == "hot" for v in self.membership["functions"].values()), 242)
+        self.assertEqual(len(self.membership["promotion_mapping"]), 209)
+        self.assertEqual(sum(v == "hot" for v in self.membership["functions"].values()), 233)
         preopt = (self.arm / "preopt.ll").read_text(encoding="utf-8")
         for helper in ("chromaMotionComp", "inverseHadamard2x2", "dequantChromaDcValues"):
             self.assertNotIn(helper, preopt)
@@ -232,7 +232,8 @@ class PartitionBuildTests(unittest.TestCase):
         cold = (self.arm / "cold.ll").read_text(encoding="utf-8")
         self.assertIn("available_externally", hot)
         self.assertNotIn("ds_profile", hot + cold)
-        self.assertIn("DecodeTrace", hot)
+        self.assertNotRegex(hot + cold,
+                            r"(?m)^define [^\n]*@_ZNK?8sub0h26411DecodeTrace(?:4emit|[0-9]+on[A-Z])")
         for name in self.membership["constants"]:
             self.assertRegex(hot, r"(?m)^@" + re.escape(name) + " = available_externally ")
             self.assertEqual(len(re.findall(r"(?m)^@" + re.escape(name) + " = ", cold)), 1)
@@ -273,9 +274,9 @@ class PartitionBuildTests(unittest.TestCase):
 
     def test_real_native_promotions_map_uniquely(self):
         mapping = self.native_membership["promotion_mapping"]
-        self.assertEqual(len(mapping), 218)
-        self.assertEqual(len(set(mapping.values())), 218)
-        self.assertEqual(sum(v == "hot" for v in self.native_membership["functions"].values()), 242)
+        self.assertEqual(len(mapping), 209)
+        self.assertEqual(len(set(mapping.values())), 209)
+        self.assertEqual(sum(v == "hot" for v in self.native_membership["functions"].values()), 233)
 
     def test_independent_lld_at_three_addresses(self):
         blob = (self.arm / "decoder.bin").read_bytes()
