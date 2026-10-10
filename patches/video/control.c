@@ -182,7 +182,10 @@ int video_control_received(const uint8_t *data, uint16_t size,
         *entry = (video_control_replay){0};
         entry->request = s->request_high[origin] = request;
         entry->length = size;
-        entry->capacity = route->reply_capacity;
+        /* A shorter PAGE resets the transport's inferred reply budget. Freeze
+         * the stride to fit that query too, or its pages will be refused. */
+        entry->capacity = route->reply_capacity < VIDEO_PAGE_REPLY_CAPACITY ?
+            route->reply_capacity : VIDEO_PAGE_REPLY_CAPACITY;
         memcpy(entry->command, data, size);
         entry->result = video_control_apply(ctx, data, size, route->origin);
         video_snapshot(ctx, entry);

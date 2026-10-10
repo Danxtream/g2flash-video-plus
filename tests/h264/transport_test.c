@@ -68,8 +68,9 @@ int cfw_message_received_routed(const uint8_t *p, uint16_t n, uint16_t crc,
     return 0;
 }
 
-static void send_record(const uint8_t *p, uint16_t n, uint8_t targets,
-                         uint8_t flags, uint8_t sequence, z_stream *z) {
+static void send_record_chunks(const uint8_t *p, uint16_t n, uint8_t targets,
+                               uint8_t flags, uint8_t sequence, z_stream *z,
+                               uint32_t chunk) {
     uint8_t wire[8192], record[8197];
     uint32_t wire_size = n;
     if (z) {
@@ -85,8 +86,9 @@ static void send_record(const uint8_t *p, uint16_t n, uint8_t targets,
     uint32_t total = wire_size + 5, offset = 0;
     do {
         uint32_t count = total - offset;
-        if (count > 9) count = 9; /* MTU23: 20-byte notification/packet payload. */
-        uint8_t packet[20] = {0xaa, 0x21, sequence++, count + 3, 1, 1, CFW_MESSAGE_SID, 0};
+        assert(chunk && chunk <= 244);
+        if (count > chunk) count = chunk;
+        uint8_t packet[255] = {0xaa, 0x21, sequence++, count + 3, 1, 1, CFW_MESSAGE_SID, 0};
         packet[8] = targets | (!offset ? CFW_MESSAGE_RESET : 0) |
                     (offset + count == total ? CFW_MESSAGE_END : 0);
         memcpy(packet + 9, record + offset, count);
@@ -96,6 +98,11 @@ static void send_record(const uint8_t *p, uint16_t n, uint8_t targets,
         memset(packet, 0xa5, sizeof(packet)); /* Stock delivery copied it. */
         offset += count;
     } while (offset < total);
+}
+static void send_record(const uint8_t *p, uint16_t n, uint8_t targets,
+                         uint8_t flags, uint8_t sequence, z_stream *z) {
+    /* MTU23: 20-byte notification/packet payload. */
+    send_record_chunks(p, n, targets, flags, sequence, z, 9);
 }
 static void cleanup(void) {
     for (uint32_t i = 0; i < 2; ++i) {
@@ -107,6 +114,22 @@ static void cleanup(void) {
 }
 int main(void) {
     uint8_t body[24] = {31, 0, 1};
+    /* RESET_CONTEXT on each record makes capacity depend on that request,
+     * even when the negotiated MTU has room for much larger packets. */
+    for (uint8_t lens = 1; lens <= 2; ++lens) {
+        side = lens == CFW_MESSAGE_LEFT ? 2 : 1;
+        send_record_chunks(body, 8, lens, CFW_MESSAGE_RESET_CONTEXT, 1, 0, 233);
+        assert(last_route.here == lens && last_route.origin == lens &&
+               last_route.reply_capacity == 13);
+        body[1] = 1;
+        send_record_chunks(body, 24, lens, CFW_MESSAGE_RESET_CONTEXT, 2, 0, 233);
+        assert(last_route.reply_capacity == 29);
+        body[1] = 5;
+        send_record_chunks(body, 9, lens, CFW_MESSAGE_RESET_CONTEXT, 3, 0, 233);
+        assert(last_route.reply_capacity == 14);
+        assert(received == 3 && ble_count == 6 && !bridge_count);
+        cleanup(); body[1] = 0;
+    }
     send_record(body, sizeof(body), CFW_MESSAGE_LEFT, CFW_MESSAGE_RESET_CONTEXT, 250, 0);
     assert(received == 1 && last_route.here == 1 && last_route.origin == 1 &&
            last_route.targets == 1 && last_route.reply_capacity == 9 &&

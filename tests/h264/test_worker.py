@@ -84,6 +84,9 @@ class WorkerTests(unittest.TestCase):
     def test_control_replies_replays_guarded_start_and_deferred_expiry_reaping(self):
         self.check_case("controls")
 
+    def test_control_pages_fit_smaller_query_budgets_without_reexecuting_start(self):
+        self.check_case("control-paging")
+
     def test_bounded_diagnostics_freeze_heaps_and_pool_stack_outside_locks(self):
         self.check_case("diagnostics")
 

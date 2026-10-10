@@ -661,6 +661,62 @@ static uint8_t control_response(const uint8_t *p, uint32_t n, uint8_t *snapshot,
 static uint8_t control_snapshot(const uint8_t *p, uint32_t n, uint8_t *snapshot) {
     return control_response(p, n, snapshot, VIDEO_STATUS_BYTES);
 }
+static uint8_t control_variable_pages(const uint8_t *p, uint32_t n, uint8_t *snapshot,
+                                      uint32_t length, uint8_t lens, uint8_t capacity,
+                                      uint8_t page_capacity) {
+    cfw_message_route route = {lens, lens, lens, capacity, 0};
+    control_reply_size = 0;
+    int result = video_control_received(p, n, &route);
+    assert(control_reply_size > VIDEO_REPLY_HEADER_BYTES && control_reply[6] == 0);
+    uint32_t count = control_reply_size - VIDEO_REPLY_HEADER_BYTES;
+    uint32_t pages = (length + count - 1) / count;
+    assert(control_reply[7] == pages);
+    memcpy(snapshot, control_reply + VIDEO_REPLY_HEADER_BYTES, count);
+    uint8_t page[9] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_PAGE, VIDEO_PROTOCOL_VERSION};
+    memcpy(page + 4, p + 4, 4); route.reply_capacity = page_capacity;
+    for (uint32_t i = 1; i < pages; ++i) {
+        page[8] = i; control_reply_size = 0;
+        assert(!video_control_received(page, sizeof(page), &route));
+        uint32_t offset = i * count, bytes = length - offset;
+        if (bytes > count) bytes = count;
+        assert(control_reply_size == VIDEO_REPLY_HEADER_BYTES + bytes &&
+               control_reply[6] == i && control_reply[7] == pages);
+        memcpy(snapshot + offset, control_reply + VIDEO_REPLY_HEADER_BYTES, bytes);
+    }
+    assert((result == 0) == (snapshot[2] == VIDEO_CONTROL_ACCEPTED));
+    return snapshot[2];
+}
+static void control_paging(void) {
+    uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES], retry[VIDEO_STATUS_BYTES];
+    /* Uncompressed records add five bytes. At a large MTU the transport
+     * infers capacity 29 for START, but only 14 for each nine-byte PAGE.
+     * MTU23 fragmentation instead leaves all these capacities at nine. */
+    for (uint8_t lens = 1; lens <= 2; ++lens) {
+        for (uint32_t large_mtu = 0; large_mtu <= 1; ++large_mtu) {
+            configure(); request_next = 0;
+            uint8_t page_capacity = large_mtu ? 14 : 9;
+            control_command(p, VIDEO_CONTROL_CAPABILITIES, 0);
+            assert(control_variable_pages(p, 8, snapshot, sizeof(snapshot), lens,
+                large_mtu ? 13 : 9, page_capacity) == VIDEO_CONTROL_ACCEPTED);
+            assert(snapshot[3] == VIDEO_IDLE);
+            control_command(p, VIDEO_CONTROL_START, 1);
+            assert(control_variable_pages(p, 24, snapshot, sizeof(snapshot), lens,
+                large_mtu ? 29 : 9, page_capacity) == VIDEO_CONTROL_ACCEPTED);
+            assert(snapshot[3] == VIDEO_STARTING && pool_calls == 1 && !allocations_live);
+            assert(control_variable_pages(p, 24, retry, sizeof(retry), lens,
+                large_mtu ? 29 : 9, page_capacity) == VIDEO_CONTROL_ACCEPTED);
+            assert(!memcmp(snapshot, retry, sizeof(snapshot)) && pool_calls == 1);
+            control_command(p, VIDEO_CONTROL_FRAME_READ, 1);
+            control_variable_pages(p, 20, snapshot, VIDEO_FRAME_RESULT_BYTES, lens,
+                large_mtu ? 25 : 9, page_capacity);
+            control_command(p, VIDEO_CONTROL_STOP, 1);
+            assert(control_variable_pages(p, 12, snapshot, sizeof(snapshot), lens,
+                large_mtu ? 17 : 9, page_capacity) == VIDEO_CONTROL_ACCEPTED);
+            pool_drain(); finish();
+        }
+    }
+    puts("request-sized replies, smaller PAGE budgets, exact START retries and both lenses PASS");
+}
 static void controls(void) {
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
     configure(); request_next = 0;
@@ -1580,6 +1636,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "wakeups")) wakeups();
     else if (!strcmp(argv[1], "preparation")) preparation_cancel();
     else if (!strcmp(argv[1], "controls")) controls();
+    else if (!strcmp(argv[1], "control-paging")) control_paging();
     else if (!strcmp(argv[1], "diagnostics")) diagnostics();
     else if (!strcmp(argv[1], "control-preparation")) control_preparation();
     else if (!strcmp(argv[1], "control-failures")) control_failures();

@@ -130,6 +130,10 @@ Request IDs increase separately per ingress; older uncached IDs or conflicting
 duplicates refuse. Each reply freezes a 128-byte status snapshot. A page query
 has the original request ID and one page byte, and never executes the control.
 One response per query fits the proven notification capacity, including MTU23.
+The frozen page width also fits the shorter nine-byte page request: its
+five-byte transport record header gives a 14-byte reply budget at a large MTU.
+Longer controls cannot widen pages beyond that budget; MTU23 retains one
+snapshot byte per page. Retrying a control keeps the original page width.
 Replies are ID31, source lens bit, LE32 request ID, page/count and snapshot bytes.
 The distinct bridge video-return envelope leaves upstream ACK/NACK validation
 unchanged. Send services copy each bounded stack reply before return.
