@@ -56,6 +56,7 @@ static void present_shadow(uint32_t, uint32_t, cfw_rectlist *);
 static uint8_t *cfw_shadow_buffer(void);
 void display_copy_hook(void);
 static void display_pump(void);
+static void pool_drain(void);
 static void *display_thread_entry(void *);
 static uint32_t display_gate, display_job, fail_gate, fail_queue, missing_fb;
 static uint32_t handoff_record[VIDEO_HANDOFF_RECORD_WORDS], handoff_queues, handoff_hold, fail_handoff;
@@ -372,11 +373,12 @@ static uint32_t event_wait(uint32_t id, uint32_t mask, uint32_t options, uint32_
     }
     if (worker_thread && inject_cancel && context.video.ready) {
         inject_cancel = 0;
-        assert(!take(1, 0)); video_worker_request_stop_locked(); give(1);
+        /* The controller may briefly hold the mutex while reading READY. */
+        assert(!take(1, 1000)); video_worker_request_stop_locked(); give(1);
     }
     if (worker_thread && inject_renew && context.video.ready) {
         inject_renew = 0; renewed = 1;
-        assert(!take(1, 0));
+        assert(!take(1, 1000));
         __atomic_store_n(&context.direct_lease_deadline, tick() + 5000, __ATOMIC_RELEASE);
         assert(video_worker_wake_locked(context.video.token, VIDEO_WAKE_LEASE)); give(1);
     }
@@ -459,6 +461,7 @@ static void finish(void) {
     for (uint32_t i = 0; i < 20 && !video_worker_stop(2000); ++i) delay(1);
     assert(state() == VIDEO_IDLE && !allocations_live && !cached_used && !task_live &&
            !context.video_owner && !context.video_runtime);
+    pool_drain();
 }
 static void clean_quarantine(void) {
     /* Test process cleanup only: production deliberately retains quarantine. */
@@ -470,6 +473,7 @@ static void clean_quarantine(void) {
     context.video_runtime = 0; context.video_owner = 0;
     if (owner) video_free_owner(owner);
     assert(!allocations_live);
+    pool_drain();
 }
 static void normal(void) {
     configure();
@@ -1223,7 +1227,8 @@ static void consumer(void) {
             display_pump(); pool_drain();
             control_command(p, VIDEO_CONTROL_STATUS, 0);
             assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED);
-            if (video_read32(snapshot + 60) == 34 && video_read32(snapshot + 64) == 32) break;
+            if (video_read32(snapshot + 60) == 34 && video_read32(snapshot + 64) == 32 &&
+                video_read32(snapshot + 80) == 32) break;
             assert((int32_t)(limit - tick()) > 0 && snapshot[3] == VIDEO_READY); delay(1);
         }
         assert(decoded_calls == 34 && consumed_frames == 32 && snapshot[50] == (refused ? 4 : 6));
