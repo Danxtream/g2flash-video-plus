@@ -78,6 +78,23 @@ Run the sanitized worker, storage and lifecycle checks with the existing suite:
 
     python3 -m unittest discover -s tests/h264 -v
 
+## Shared-shadow packing
+
+The bounded packer converts top-down Y8 to the panel's A4 layout, with the
+left pixel in the high nibble. Brightness conversion is exactly `Y >> 4`.
+Native 320x192 is centered at (160,144); doubling produces 640x384 at (0,48),
+with identical nearest-neighbor pixels and black 48-row top/bottom margins.
+Every preparation clears the shared shadow before packing, so mode changes
+cannot leave stale pixels. Input padding is never read as picture content.
+
+The descriptor carries ownership generation, picture ordinal, geometry,
+stride, storage extent and scale. It also accepts owned A4 for a later queued
+presenter; borrowed decoder planes must be consumed before the next decode.
+No second panel buffer or decoded-frame queue is added. Packing itself is
+independent of the asynchronous display services and is not yet wired to them.
+Stock side 2 maps to left source 1, and side 1 to right source 2. Both use the
+same pixel order; no optical mirror is inferred from those different values.
+
 ## Private transport controls
 
 ID 31 uses protocol version 1. The control header is ID, opcode, version,

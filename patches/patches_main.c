@@ -44,6 +44,7 @@
 #include "video/storage.c"
 #include "video/lifecycle.c"
 #include "video/queue.c"
+#include "video/pack.c"
 #include "video/worker.c"
 #include "video/controller.c"
 #include "video/diagnostics.c"
