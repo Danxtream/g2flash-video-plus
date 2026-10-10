@@ -66,7 +66,8 @@ enum {
     VIDEO_CONTROL_SEQUENCE,
     VIDEO_CONTROL_DISPLAY,
     VIDEO_CONTROL_INCOMPLETE,
-    VIDEO_CONTROL_POWER
+    VIDEO_CONTROL_POWER,
+    VIDEO_CONTROL_HANDOFF
 };
 
 /* Cached exact requests and frozen snapshots make retries idempotent, including
@@ -83,6 +84,7 @@ typedef struct {
     uint32_t request_high[2], stream_high, stream, interval;
     uint32_t start_guard, control_generation, error, owner_origin;
     uint32_t options;
+    uint32_t stop_generation; /* STOP remains visible until stock hand-back completes. */
     volatile uint32_t active_deadline;
     volatile uint32_t controller_serial, controller_job, controller_reasons;
     volatile uint32_t controller_park_token;

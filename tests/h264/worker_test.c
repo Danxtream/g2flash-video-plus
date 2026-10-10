@@ -58,6 +58,8 @@ void display_copy_hook(void);
 static void display_pump(void);
 static void *display_thread_entry(void *);
 static uint32_t display_gate, display_job, fail_gate, fail_queue, missing_fb;
+static uint32_t handoff_record[VIDEO_HANDOFF_RECORD_WORDS], handoff_queues, handoff_hold, fail_handoff;
+static uint32_t power_awake = 1, power_starts;
 static uint32_t display_allocated, fail_shadow, copied_frames, overlay_calls, flush_calls, stock_copies;
 static uint8_t physical_frame[VIDEO_PANEL_BYTES];
 static uint8_t *owned_shadow;
@@ -67,6 +69,7 @@ static int display_take(void) {
     assert(!display_gate); display_gate = 1; return 1;
 }
 static void display_signal(void) { assert(display_gate); display_gate = 0; }
+static int handoff_queue(const uint32_t *);
 static void *shadow_allocate(uint32_t bytes) {
     assert(!image_depth && !service_context && bytes == VIDEO_PANEL_BYTES && !owned_shadow);
     if (fail_shadow) return 0;
@@ -226,8 +229,8 @@ static uint32_t test_crc(const g2_h264_frame_info *);
 #define VIDEO_CLOCK_INIT test_clock_init
 #define VIDEO_CLOCK_CALIBRATE test_calibrate
 #define VIDEO_FRAME_CRC test_crc
-static int power_ready(void) { return 1; }
-static int power_start(void) { assert(!image_depth && !service_context); return 1; }
+static int power_ready(void) { return power_awake; }
+static int power_start(void) { assert(!image_depth && !service_context); ++power_starts; return 1; }
 static int power_send(const uint8_t *record) {
     assert(!image_depth && !service_context);
     if (record[3] == VIDEO_POWER_ACK) return 1;
@@ -293,6 +296,8 @@ static uint32_t new_thread(void (*fn)(void *), void *arg, const video_thread_att
     task_live = 1; assert(!pthread_create(&worker, 0, entry, start)); return 2;
 }
 static int delay(uint32_t ms) {
+    if (!worker_thread && !handoff_hold &&
+        __atomic_load_n(&display_job, __ATOMIC_ACQUIRE) == 2) display_pump();
     assert(!image_depth);
     struct timespec t = {0, ms >= 1000 ? 1000000 : ms * 1000000u};
     nanosleep(&t, 0); return 0;
@@ -416,6 +421,8 @@ static int terminate(uint32_t id) {
 static void configure(void) {
     assert(!display_job && !display_gate && !owned_shadow);
     fail_gate = fail_queue = missing_fb = fail_shadow = copied_frames = overlay_calls = flush_calls = stock_copies = 0;
+    handoff_queues = handoff_hold = fail_handoff = 0;
+    power_awake = 1; power_starts = 0;
     assert(!allocations_live && !task_live);
     memset(&context, 0, sizeof(context)); context.image_mutex = 1;
     context.direct_lease_deadline = tick() + 60000;
@@ -1604,19 +1611,58 @@ static int display_queue(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_
 static void display_flush(void *descriptor) {
     assert(!image_depth);
     uint32_t *p = descriptor;
-    assert(p[1] == VIDEO_PANEL_BYTES && owned_shadow);
-    assert((context.direct_pending != 0) == (context.video_presentation.phase == VIDEO_DISPLAY_COPYING));
+    assert(p[1] == VIDEO_PANEL_BYTES && (owned_shadow ||
+        context.video_handoff.phase == VIDEO_HANDOFF_COPYING));
+    assert((context.direct_pending != 0) == (context.video_presentation.phase == VIDEO_DISPLAY_COPYING ||
+        context.video_handoff.phase == VIDEO_HANDOFF_COPYING));
     ++flush_calls;
 }
 #define FW_DISPLAY_QUEUE display_queue
 #define FW_DISPLAY_FB (missing_fb ? 0 : physical_frame)
 #define FW_FLUSH display_flush
-#define FW_DISPLAY_COPY() (++stock_copies)
+static void stock_display_copy(void) {
+    ++stock_copies;
+    for (uint32_t y = 96; y < 384; ++y)
+        memset(physical_frame + y * VIDEO_PANEL_STRIDE + 16, 0x22, 288);
+}
+#define FW_DISPLAY_COPY stock_display_copy
 #include "upstream_cleanup.h"
+#define VIDEO_HANDOFF_NATIVE 1
+#define VIDEO_HANDOFF_QUEUE handoff_queue
+#include "../../patches/video/handoff.c"
+
+static int handoff_queue(const uint32_t *record) {
+    assert(!image_depth && !service_context && display_gate && !task_live && !allocations_live &&
+           context.direct_pending && !context.direct_shadow && !context.direct_active);
+    ++handoff_queues;
+    if (fail_handoff == 1) return 0;
+    assert(!display_job);
+    memcpy(handoff_record, record, sizeof(handoff_record));
+    assert(record[0] == 3 && !record[1] && !record[2] && !record[3] && !record[4] &&
+           record[5] == 640 && record[6] == 480 && record[7] && !record[8]);
+    __atomic_store_n(&display_job, 2, __ATOMIC_RELEASE);
+    if (fail_handoff == 2) { display_pump(); return 0; }
+    if (fail_handoff == 3) {
+        uint32_t unrelated[VIDEO_HANDOFF_RECORD_WORDS]; memcpy(unrelated, record, sizeof(unrelated));
+        unrelated[7] = 0; video_display_restore_copy(unrelated);
+        assert(context.video_handoff.phase == VIDEO_HANDOFF_QUEUED && context.direct_pending && display_gate);
+    }
+    return 1;
+}
 
 static void display_pump(void) {
-    if (!__atomic_exchange_n(&display_job, 0, __ATOMIC_ACQ_REL)) return;
+    uint32_t job = __atomic_exchange_n(&display_job, 0, __ATOMIC_ACQ_REL);
+    if (!job) return;
     assert(!image_depth && display_gate && context.direct_pending);
+    if (job == 2) {
+        video_display_restore_copy(handoff_record);
+        if (!missing_fb)
+            for (uint32_t y = 0; y < VIDEO_PANEL_HEIGHT; ++y)
+                for (uint32_t x = 0; x < VIDEO_PANEL_STRIDE; ++x)
+                    assert(physical_frame[y * VIDEO_PANEL_STRIDE + x] ==
+                        (y >= 96 && y < 384 && x >= 16 && x < 304 ? 0x22 : 0));
+        display_signal(); return;
+    }
     display_copy_hook();
     if (!missing_fb) {
         int native = context.video_control.options & VIDEO_PRESENT_NATIVE;
@@ -1645,6 +1691,77 @@ static void original_display(void) {
     display_copy_hook(); assert(stock_copies == 1 && !context.direct_active);
     shadow_free(owned_shadow); context.framebuffer_shadow = 0;
     puts("ordinary image overlay, physical copy, lease preservation and stock fallback PASS");
+}
+
+static void handback(void) {
+    uint8_t command[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+    for (uint32_t variant = 0; variant < 12; ++variant) {
+        configure(); request_next = 0; context.framebuffer_shadow = 0;
+        video_control_state *s = &context.video_control;
+        s->stream = s->stream_high = s->control_generation = 1;
+        s->owner_origin = CFW_MESSAGE_LEFT;
+        context.video_presentation.token = 7; context.video_presentation.generation = 1;
+        context.video_presentation.presented = 1; context.direct_active = 1;
+        memset(physical_frame, 0x88, sizeof(physical_frame));
+        video_display_note_output(7);
+        context.video_power.generation = 1; context.video_power.deadline = tick() + 5000;
+        context.video_power.stream = context.video_power.nonce = context.video_power.serial = 1;
+        context.video_power.peer_deadline = tick() + 5000; context.video_power.acquired = 1;
+        context.video_power.peer.deadline = tick() + 5000;
+        uint32_t peer_deadline = context.video_power.peer.deadline;
+        if (variant == 1) { memset(physical_frame, 0xaa, sizeof(physical_frame)); video_display_note_output(0); }
+        if (variant == 3) fail_handoff = 1;
+        if (variant == 4) handoff_hold = 1;
+        if (variant == 5) fail_handoff = 2;
+        if (variant == 6) {
+            context.video_presentation.presented = context.video_presentation.output_epoch = 0;
+        }
+        if (variant == 7) power_awake = 0;
+        if (variant == 8) fail_handoff = 3;
+        if (variant == 9) context.video_presentation.generation = 2;
+        if (variant == 10) fail_gate = 1;
+        if (variant == 11) missing_fb = 1;
+        if (variant == 2) {
+            s->start_guard = 1;
+            assert(!take(1, 0)); assert(!cfw_cleanup_session()); give(1);
+        } else {
+            control_command(command, VIDEO_CONTROL_STOP, 1);
+            assert(control_snapshot(command, 12, snapshot) == VIDEO_CONTROL_ACCEPTED &&
+                   snapshot[3] == VIDEO_STOPPING);
+        }
+        pool_drain();
+        assert(!task_live && !allocations_live && context.video_power.peer.deadline == peer_deadline);
+        if (variant == 4) {
+            assert(context.video_handoff.phase == VIDEO_HANDOFF_QUEUED &&
+                   context.direct_pending && display_gate && s->stop_generation);
+            control_command(command, VIDEO_CONTROL_STATUS, 0);
+            assert(control_snapshot(command, 8, snapshot) == VIDEO_CONTROL_ACCEPTED &&
+                   snapshot[3] == VIDEO_STOPPING && video_read32(snapshot + 24) == VIDEO_CONTROL_HANDOFF);
+            control_command(command, VIDEO_CONTROL_START, 2);
+            assert(control_snapshot(command, 24, snapshot) == VIDEO_CONTROL_BUSY);
+            display_copy_hook(); /* Periodic copy does not own this tagged queue job. */
+            assert(context.video_handoff.phase == VIDEO_HANDOFF_QUEUED && display_gate);
+            handoff_hold = 0; display_pump(); pool_drain();
+        }
+        assert(!s->stop_generation && !context.direct_pending && !display_gate && !display_job &&
+               !context.video_power.acquired && !context.video_power.deadline && !power_starts);
+        if (variant == 1 || variant == 6 || variant == 9) {
+            assert(!handoff_queues);
+            for (uint32_t i = 0; i < VIDEO_PANEL_BYTES; ++i)
+                assert(physical_frame[i] == (variant == 1 ? 0xaa : 0x88));
+        } else if (variant == 3 || variant == 10 || variant == 11) {
+            assert(s->error == VIDEO_CONTROL_HANDOFF && !context.direct_active);
+        } else {
+            assert(handoff_queues == 1 && !context.direct_active &&
+                   context.video_handoff.phase == VIDEO_HANDOFF_COMPLETE);
+        }
+        uint32_t previous = handoff_queues;
+        control_command(command, VIDEO_CONTROL_STOP, 1);
+        assert(control_snapshot(command, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+        pool_drain(); assert(handoff_queues == previous); /* No stale repaint on repeated STOP. */
+        finish();
+    }
+    puts("stock screen/margins, mode-11, new output, partial start, sleep, refusal and late copy PASS");
 }
 
 static void cleanup(void) {
@@ -1789,6 +1906,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "inactivity")) inactivity();
     else if (!strcmp(argv[1], "cleanup")) cleanup();
     else if (!strcmp(argv[1], "lease-notifications")) lease_notifications();
+    else if (!strcmp(argv[1], "handback")) handback();
     else assert(0);
     assert(!allocations_live && !task_live && !image_depth);
     printf("worker %s PASS\n", argv[1]);

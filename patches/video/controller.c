@@ -42,6 +42,7 @@ void video_control_cancel_locked(void) {
     customCfwContext *ctx = peekCustomCfwContext();
     if (!ctx || (!ctx->video_control.start_guard && ctx->video.state == VIDEO_IDLE)) return;
     __atomic_store_n(&ctx->video_control.start_guard, 0, __ATOMIC_RELEASE);
+    ctx->video_control.stop_generation = ctx->video_control.control_generation;
     __atomic_fetch_and(&ctx->video_control.controller_reasons, ~VIDEO_CONTROLLER_START,
                        __ATOMIC_ACQ_REL);
     video_worker_request_stop_locked();
@@ -128,7 +129,8 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
             reasons |= VIDEO_CONTROLLER_STOP;
             ctx->video_presentation.stop_wait = 0;
         }
-        int deferred = ctx->video_presentation.pin && (reasons & VIDEO_CONTROLLER_STOP);
+        int deferred = ctx->video_presentation.pin &&
+            ((reasons & VIDEO_CONTROLLER_STOP) || s->stop_generation);
         if (deferred) ctx->video_presentation.stop_wait = 1;
         int current = parked && parked == ctx->video.token;
         if (current) {
@@ -136,14 +138,20 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
             uint32_t fault = __atomic_load_n(&ctx->video.fault, __ATOMIC_ACQUIRE);
             if (fault) s->error = video_fault_reason(fault);
         }
+        int retiring = (reasons & VIDEO_CONTROLLER_STOP) || current || s->stop_generation;
+        if (retiring) s->stop_generation = s->control_generation;
+        uint32_t stop_generation = s->stop_generation;
         video_control_give(ctx);
         int stopped = 1;
-        if (!deferred && (reasons & VIDEO_CONTROLLER_STOP || current))
+        if (!deferred && retiring)
             stopped = video_worker_stop(VIDEO_STOP_LIMIT_MS);
         int started = 0;
         int power = 1;
-        if (!deferred && stopped && (reasons & VIDEO_CONTROLLER_STOP || current))
-            video_power_release(ctx->video_power.generation);
+        int handed = 1;
+        if (!deferred && stopped && retiring) {
+            handed = video_handoff_stop(stop_generation);
+            if (handed) video_power_release(ctx->video_power.generation);
+        }
         if (stopped && guard && reasons & VIDEO_CONTROLLER_START) {
             power = video_power_acquire(guard);
             if (power) started = video_worker_start_guarded(0, guard);
@@ -159,6 +167,10 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
             break;
         }
         video_fold_signals(ctx);
+        if (!deferred && retiring && stopped) {
+            if (handed <= 0 && !s->error) s->error = VIDEO_CONTROL_HANDOFF;
+            if (handed && s->stop_generation == stop_generation) s->stop_generation = 0;
+        }
         if (!stopped || ctx->video.state == VIDEO_QUARANTINED)
             s->error = VIDEO_CONTROL_QUARANTINE;
         else if (guard == s->start_guard && reasons & VIDEO_CONTROLLER_START && !started) {

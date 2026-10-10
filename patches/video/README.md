@@ -372,6 +372,23 @@ park, then releases that generation; an unknown copy remains quarantined.
 
 ### Upstream session cleanup
 
+STOP, RESET and session cancellation park the decoder before restoring the
+current stock UI through a copied type-3 display refresh. Its generation tag
+cannot be claimed by an unrelated or periodic refresh. Clear the full physical
+frame first, then let the stock compositor fill its viewport; this also removes
+the video's margins without a second saved framebuffer. The refresh does not
+wake a sleeping driver or restart an application.
+
+Every full-panel direct copy invalidates older video ownership. Hand-back
+preserves newer custom output, framebuffer leases and an independent peer owner.
+New video and custom shadow writes remain blocked through restoration; STATUS
+reports STOPPING until the bounded controller operation completes. Known queue
+refusal releases the gate and returns ordinary repaint policy with error 17
+(an earlier session fault is retained).
+Unknown completion retains only the gate and stable tags, refuses a new START,
+and permits safe late completion. Decoder storage has already been reclaimed;
+no borrowed plane or freed shadow can reach this job.
+
 Mode 11 cancels acceptance and pending START while holding the existing image
 mutex, then requests the controller without joining/freeing there. All existing
 shadow/cache, timer, buzzer, microphone, ALS, compass and dashboard cleanup

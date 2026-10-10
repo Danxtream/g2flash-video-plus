@@ -804,6 +804,7 @@ void display_copy_hook(void) {
         uint32_t desc[2] = {(uint32_t)(uintptr_t)fb, PANEL_BYTES};
         FW_FLUSH(desc);
         ctx->direct_active = 1;
+        video_display_note_output(video_token);
     } else {
         ctx->direct_active = 0;
         ctx->direct_failed = 1;

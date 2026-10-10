@@ -131,3 +131,6 @@ class WorkerTests(unittest.TestCase):
 
     def test_service_notifications_never_wait_or_free_and_ignore_old_generations(self):
         self.check_case("lease-notifications")
+
+    def test_stock_handback_waits_for_park_and_preserves_newer_output(self):
+        self.check_case("handback")

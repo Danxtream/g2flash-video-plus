@@ -50,6 +50,7 @@
 #include "video/present.c"
 #include "video/evidence.c"
 #include "video/power.c"
+#include "video/handoff.c"
 #include "video/controller.c"
 #include "video/diagnostics.c"
 #include "video/control.c"

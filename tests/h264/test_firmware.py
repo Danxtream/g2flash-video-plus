@@ -86,6 +86,11 @@ class FirmwareInclusionTests(unittest.TestCase):
                              (0x445c74, "fef711f9"),
                              (0x445c86, "fef708f9")):
             self.assertEqual(bytes.fromhex(guards[firmware.g2f(address)]), bytes.fromhex(old))
+        functions = {entry['name']: entry for entry in self.manifest['functions']}
+        target = next(new for offset, _, new, _ in patches if offset == firmware.g2f(0x4798f2))
+        address = firmware.mram_addr(firmware.align_up(old_size, firmware.BLOB_ALIGN))
+        self.assertEqual(target, firmware.enc_bl(0x4798f2,
+                         address + functions['video_display_refresh_gate']['offset']))
         start = firmware.align_up(old_size, firmware.BLOB_ALIGN) - old_size
         self.assertEqual(append[start:], self.blob)
         self.assertEqual(hashlib.sha256(append[start:]).hexdigest(), self.manifest["sha256"])

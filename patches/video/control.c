@@ -29,7 +29,8 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     p[1] = 7; /* Shared-shadow presentation with optional frame verification. */
     p[2] = entry->result;
     p[3] = video_lifecycle_state(&ctx->video);
-    if (p[3] == VIDEO_IDLE && s->start_guard) p[3] = VIDEO_STARTING;
+    if (p[3] == VIDEO_IDLE && s->stop_generation) p[3] = VIDEO_STOPPING;
+    else if (p[3] == VIDEO_IDLE && s->start_guard) p[3] = VIDEO_STARTING;
     video_write32(p + 4, s->stream);
     video_write32(p + 8, ctx->video.generation);
     video_write32(p + 12, s->request_high[0]);
@@ -122,7 +123,8 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         if (!stream || stream <= s->stream_high || interval < VIDEO_INTERVAL_MIN ||
             interval > VIDEO_INTERVAL_MAX) return VIDEO_CONTROL_FORMAT;
         if (ctx->texture_cache || !video_lease_valid(ctx)) return VIDEO_CONTROL_LEASE;
-        if (s->start_guard || s->controller_job || video_lifecycle_state(&ctx->video) != VIDEO_IDLE)
+        if (s->start_guard || s->stop_generation || s->controller_job ||
+            video_lifecycle_state(&ctx->video) != VIDEO_IDLE)
             return VIDEO_CONTROL_BUSY;
         if (s->control_generation == UINT32_MAX) return VIDEO_CONTROL_STALE;
         s->stream = s->stream_high = stream;
@@ -148,6 +150,7 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         if (!s->stream || video_read32(p + 8) != s->stream || origin != s->owner_origin)
             return VIDEO_CONTROL_STALE;
         __atomic_store_n(&s->start_guard, 0, __ATOMIC_RELEASE); /* Cancels even before a private owner is claimed. */
+        s->stop_generation = s->control_generation;
         video_worker_request_stop_locked();
         if (!video_controller_request_locked(VIDEO_CONTROLLER_STOP)) {
             s->error = VIDEO_CONTROL_DISPATCH;
@@ -277,7 +280,7 @@ int video_control_received(const uint8_t *data, uint16_t size,
 
 int video_control_blocks_custom(const uint8_t *p, uint32_t n) {
     customCfwContext *ctx = peekCustomCfwContext();
-    if (!ctx || !p || !n || (!ctx->video_control.start_guard &&
+    if (!ctx || !p || !n || (!ctx->video_control.start_guard && !ctx->video_control.stop_generation &&
         ctx->video.state == VIDEO_IDLE)) return 0;
     uint8_t mode = p[0] & 0x7f;
     return mode == 3 || mode == 6 || mode == 8 || mode == 9 || mode == 15 ||

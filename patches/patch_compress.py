@@ -406,6 +406,7 @@ def layout(img):
     short_long_addr = base + _fn(built, "gesture_short_long")["offset"]
     release_addr   = base + _fn(built, "gesture_release")["offset"]
     display_copy_addr = base + _fn(built, "display_copy_hook")["offset"]
+    display_refresh_addr = base + _fn(built, "video_display_refresh_gate")["offset"]
     wear_notify_addr = base + _fn(built, "faceclaw_send_wear_event")["offset"]
     compass_decode_addr = base + _fn(built, "compass_decode_capture")["offset"]
     compass_report_addr = base + _fn(built, "compass_report_event")["offset"]
@@ -501,8 +502,8 @@ def layout(img):
         (g2f(EVENAI_ENTRY_SITE[0]), EVENAI_ENTRY_SITE[1],
          enc_bw(EVENAI_ENTRY_SITE[0], evenai_entry_addr),
          "even_ai_display_ctrl entry -> conditional Faceclaw lease trampoline"),
-        *[(g2f(site), orig, enc_bl(site, display_copy_addr),
-           f"bl display_copy_hook @ {site:#x} (640x480 direct framebuffer)")
+        *[(g2f(site), orig, enc_bl(site, display_refresh_addr if site == 0x4798f2 else display_copy_addr),
+           f"bl {'video_display_refresh_gate' if site == 0x4798f2 else 'display_copy_hook'} @ {site:#x} (640x480 direct framebuffer)")
           for site, orig in DISPLAY_COPY_BL_SITES.items()],
         *[(g2f(site), orig, enc_bl(site, wear_notify_addr),
            f"bl faceclaw_send_wear_event @ {site:#x} (outside onboarding)")
