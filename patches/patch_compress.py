@@ -437,6 +437,15 @@ def layout(img):
 
     # --- in-place live-code edits + bl retargets (targets are the appended addrs) ---
     in_place = [
+        (g2f(0x4abfd0), "01 68 49 1e",
+         enc_bl(0x4abfd0, base + _fn(built, "video_dashboard_idle_gate")["offset"]),
+         "bl video_dashboard_idle_gate (finite video dashboard idle lease)"),
+        (g2f(0x445c74), "fe f7 11 f9",
+         enc_bl(0x445c74, base + _fn(built, "video_ui_refresh")["offset"]),
+         "bl video_ui_refresh (preserve foreground refresh and defer power maintenance)"),
+        (g2f(0x445c86), "fe f7 08 f9",
+         enc_bl(0x445c86, base + _fn(built, "video_ui_refresh")["offset"]),
+         "bl video_ui_refresh (preserve background refresh and defer power maintenance)"),
         # Stock profile_ancc_process_msg branches both WRITE_RSP (9) and
         # WRITE_CMD_RSP (10) to 0x4d4f1e, which formerly skipped the gate.
         # Redirect that two-byte branch to the existing r0=event / BL gate path.

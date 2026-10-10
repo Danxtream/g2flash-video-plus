@@ -33,7 +33,7 @@ int video_controller_request_locked(uint32_t reasons) {
     customCfwContext *ctx = peekCustomCfwContext();
     if (!ctx || !reasons || reasons & ~(VIDEO_CONTROLLER_START |
         VIDEO_CONTROLLER_STOP | VIDEO_CONTROLLER_REAP | VIDEO_CONTROLLER_LEASE |
-        VIDEO_CONTROLLER_PRESENT)) return 0;
+        VIDEO_CONTROLLER_PRESENT | VIDEO_CONTROLLER_POWER)) return 0;
     __atomic_fetch_or(&ctx->video_control.controller_reasons, reasons, __ATOMIC_ACQ_REL);
     return video_controller_schedule(ctx);
 }
@@ -141,8 +141,17 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
         if (!deferred && (reasons & VIDEO_CONTROLLER_STOP || current))
             stopped = video_worker_stop(VIDEO_STOP_LIMIT_MS);
         int started = 0;
-        if (stopped && guard && reasons & VIDEO_CONTROLLER_START)
-            started = video_worker_start_guarded(0, guard);
+        int power = 1;
+        if (!deferred && stopped && (reasons & VIDEO_CONTROLLER_STOP || current))
+            video_power_release(ctx->video_power.generation);
+        if (stopped && guard && reasons & VIDEO_CONTROLLER_START) {
+            power = video_power_acquire(guard);
+            if (power) started = video_worker_start_guarded(0, guard);
+            if (!started) video_power_release(guard);
+        }
+        /* Copy completions also maintain the lease during playback, when
+         * ordinary UI input may postpone its periodic refresh callback. */
+        video_power_step();
         if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) {
             __atomic_store_n(&s->controller_failed, 1, __ATOMIC_RELEASE);
             __atomic_store_n(&s->controller_reasons, 0, __ATOMIC_RELEASE);
@@ -155,7 +164,7 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
         else if (guard == s->start_guard && reasons & VIDEO_CONTROLLER_START && !started) {
             s->error = __atomic_load_n(&s->notify_release_generation, __ATOMIC_ACQUIRE) == guard ?
                 VIDEO_CONTROL_ACCEPTED : video_control_generation_valid(ctx, guard) ?
-                VIDEO_CONTROL_MEMORY : VIDEO_CONTROL_INACTIVITY;
+                (power ? VIDEO_CONTROL_MEMORY : VIDEO_CONTROL_POWER) : VIDEO_CONTROL_INACTIVITY;
             __atomic_store_n(&s->start_guard, 0, __ATOMIC_RELEASE);
         }
         if (!__atomic_load_n(&s->controller_reasons, __ATOMIC_ACQUIRE)) {

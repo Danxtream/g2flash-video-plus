@@ -69,6 +69,7 @@ static uint32_t video_fault_reason(uint32_t fault) {
     case VIDEO_FAULT_CONFLICT: return VIDEO_CONTROL_CONFLICT;
     case VIDEO_FAULT_SEQUENCE: return VIDEO_CONTROL_SEQUENCE;
     case VIDEO_FAULT_DISPLAY: return VIDEO_CONTROL_DISPLAY;
+    case VIDEO_FAULT_POWER: return VIDEO_CONTROL_POWER;
     default: return fault >= G2_H264_FAIL_ALLOC && fault <= G2_H264_FAIL_LENGTH ?
         VIDEO_CONTROL_MEMORY : VIDEO_CONTROL_DECODER;
     }
@@ -234,8 +235,10 @@ static void video_worker_entry(void *argument) {
         if (owner->control_generation) {
             uint32_t activity = __atomic_load_n(&ctx->video_control.active_deadline, __ATOMIC_ACQUIRE);
             uint32_t gap = __atomic_load_n(&owner->queue.gap_deadline, __ATOMIC_ACQUIRE);
+            uint32_t power = video_power_deadline(owner->control_generation);
             uint32_t fault = !activity || (int32_t)(activity - now) <= 0 ?
-                VIDEO_FAULT_INACTIVITY : gap && (int32_t)(gap - now) <= 0 ? VIDEO_FAULT_GAP : 0;
+                VIDEO_FAULT_INACTIVITY : gap && (int32_t)(gap - now) <= 0 ? VIDEO_FAULT_GAP :
+                !power ? VIDEO_FAULT_POWER : 0;
             if (fault) {
                 __atomic_store_n(&ctx->video.fault, fault, __ATOMIC_RELEASE);
                 __atomic_store_n(&ctx->video.cancel, 1, __ATOMIC_RELEASE);
@@ -243,6 +246,7 @@ static void video_worker_entry(void *argument) {
             }
             if (activity - now < timeout) timeout = activity - now;
             if (gap && gap - now < timeout) timeout = gap - now;
+            if (power - now < timeout) timeout = power - now;
             if (video_worker_consume(owner)) continue;
         }
         /* Sticky wake bits close the predicate-to-wait race. Only the nearest

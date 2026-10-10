@@ -336,6 +336,40 @@ Cycles also include preempting tasks/interrupts. Bins do not establish a median,
 P90 or an exclusive decoder CPU share; hardware scheduling needs separate
 evidence.
 
+### Paired display power
+
+START first acquires a finite display lease and requests the stock dashboard
+startup. Decoder arming requires the local UI, local driver and peer's matching
+acknowledgement to be ready. A LEFT-only session also wakes the RIGHT coordinator;
+a peer-only lease allocates no decoder, frame or framebuffer ownership.
+
+Power messages use bridge kind 4/version 1, independently from NAL transport
+credits. Their fixed 26 bytes contain sender, operation, result, generation,
+stream, request serial, remaining lease milliseconds and a session nonce.
+One copied mailbox bounds receive work. Exact duplicates do not extend a lease;
+released or expired owners cannot be revived by renewal. Separate local/peer
+leases keep simultaneous independent sessions from releasing each other.
+
+The lease lasts at most 15 seconds and renews every two seconds while the
+session's input and framebuffer leases remain valid. START waits at most two
+seconds, with bounded retries. Missing peer readiness refuses START; lost bridge,
+manual sleep or lease expiry cancels playback. Power errors report code 16.
+
+The authenticated stock pointer queues retain the original paired application
+lifecycle. A task-context adapter allocates bounded cached packets once, checks
+the live reserve, and submits with timeout zero. Refusal rolls back without
+CommonMalloc's retry loop or the public startup wrapper's asserting failure.
+After enqueue only the stock consumer owns the packet. No queue wait, allocation
+or free runs in the receive or UI maintenance callback.
+
+Only the dashboard's automatic idle decrement is held by an unexpired lease.
+Explicit shutdown, wear/OTA/fault paths and other applications remain unchanged.
+Foreground/background refresh dispatches still run once, with their original
+arguments and return value; the wrapper only posts bounded controller work.
+There is no new timer, boot allocation or permanent worker. Worker waits include
+the power deadline. STOP retains ownership until pending copies and the worker
+park, then releases that generation; an unknown copy remains quarantined.
+
 ### Upstream session cleanup
 
 Mode 11 cancels acceptance and pending START while holding the existing image

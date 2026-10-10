@@ -112,6 +112,8 @@ int video_present_frame(const video_frame_descriptor *frame) {
     if (!owner || !frame || owner->thread != VIDEO_OS_THREAD_ID() ||
         frame->token != owner->token || frame->generation != owner->control_generation ||
         !video_prepare_shadow(owner)) return 0;
+    if (owner->control_generation && !video_power_deadline(owner->control_generation))
+        video_runtime_fail(VIDEO_FAULT_POWER);
     customCfwContext *ctx = owner->context;
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) return 0;
     video_presentation_state *p = &ctx->video_presentation;

@@ -226,6 +226,25 @@ static uint32_t test_crc(const g2_h264_frame_info *);
 #define VIDEO_CLOCK_INIT test_clock_init
 #define VIDEO_CLOCK_CALIBRATE test_calibrate
 #define VIDEO_FRAME_CRC test_crc
+static int power_ready(void) { return 1; }
+static int power_start(void) { assert(!image_depth && !service_context); return 1; }
+static int power_send(const uint8_t *record) {
+    assert(!image_depth && !service_context);
+    if (record[3] == VIDEO_POWER_ACK) return 1;
+    uint8_t reply[VIDEO_POWER_BYTES]; memcpy(reply, record, sizeof(reply));
+    reply[1] ^= CFW_MESSAGE_BOTH; reply[3] = VIDEO_POWER_ACK; reply[4] = VIDEO_POWER_OK;
+    uint32_t status = video_power_received(reply, sizeof(reply));
+    assert(status == 0 || status == 6); return status == 0;
+}
+static uint32_t power_refresh(uint32_t app, uint32_t event, const void *data, uint32_t size) {
+    (void)app; (void)event; (void)data; (void)size; return 0;
+}
+#define VIDEO_POWER_NATIVE 1
+#define VIDEO_POWER_PLATFORM_READY power_ready
+#define VIDEO_POWER_PLATFORM_START power_start
+#define VIDEO_POWER_PLATFORM_SEND power_send
+#define VIDEO_POWER_HERE() CFW_MESSAGE_LEFT
+#define VIDEO_POWER_PLATFORM_REFRESH power_refresh
 static g2_h264_result worker_decode(void *, const uint8_t *, uint32_t);
 #include "../../patches/video/runtime_provider.c"
 #include "../../patches/video/storage.c"
@@ -238,6 +257,7 @@ static g2_h264_result worker_decode(void *, const uint8_t *, uint32_t);
 #include "../../patches/video/pack.c"
 #include "../../patches/video/present.c"
 #include "../../patches/video/evidence.c"
+#include "../../patches/video/power.c"
 #include "../../patches/video/controller.c"
 #include "../../patches/video/diagnostics.c"
 #include "../../patches/video/control.c"
@@ -1383,6 +1403,7 @@ static void presentation_failures(void) {
             assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
             pool_drain();
             assert(state() == VIDEO_STOPPING && context.video_owner && context.video_presentation.pin);
+            assert(context.video_power.deadline && context.video_power.acquired);
             display_pump();
         }
         for (;;) {
@@ -1403,6 +1424,7 @@ static void presentation_failures(void) {
             finish();
             assert(context.video_presentation.presented == (variant == 5 ? 1u : 0u));
             assert(!display_gate && !display_job && !context.video_presentation.pin);
+            assert(!context.video_power.deadline && !context.video_power.acquired);
             if (variant == 2 || variant == 3 || variant == 6)
                 assert(context.video_presentation.failures == 1);
         }

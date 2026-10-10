@@ -51,6 +51,9 @@ static int test_bridge(uint16_t app, const uint8_t *p, uint16_t n, void *argumen
 #define CFW_ZINIT(s) inflateInit(s)
 #define CFW_ZINFLATE(s) inflate(s, Z_NO_FLUSH)
 #define CFW_ZEND(s) inflateEnd(s)
+uint32_t video_power_received(const uint8_t *data, uint32_t size) {
+    (void)data; (void)size; return 6;
+}
 #include "../../patches/message_transport.c"
 
 int cfw_message_received(const uint8_t *p, uint16_t n, uint16_t crc) {
