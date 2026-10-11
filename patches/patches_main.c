@@ -40,6 +40,7 @@
 #include "debug.c"
 
 #include "ancs_relay.c"
+#include "video/radio.c"
 #include "video/runtime_provider.c"
 #include "video/storage.c"
 #include "video/lifecycle.c"

@@ -6,7 +6,9 @@
 
 static void video_controller_entry(uint32_t, const uint8_t *, uint32_t, uint16_t);
 
-static int video_controller_schedule(customCfwContext *ctx) {
+/* Keep the pool callback address within its ROPI section. Cross-section
+ * inlining can emit MOVW/MOVT address fixups unsupported by this linker. */
+__attribute__((noinline)) static int video_controller_schedule(customCfwContext *ctx) {
     video_control_state *s = &ctx->video_control;
     if (__atomic_load_n(&s->controller_job, __ATOMIC_ACQUIRE)) return 1;
     uint32_t serial = __atomic_load_n(&s->controller_serial, __ATOMIC_ACQUIRE);

@@ -119,7 +119,7 @@ class FirmwareInclusionTests(unittest.TestCase):
 
     def test_combined_bytes_exports_and_stock_patch_guards(self):
         append, patches, (_, _, old_size) = self.layout()
-        self.assertEqual(len(patches), 33)
+        self.assertEqual(len(patches), 35)
         guards = {offset: old for offset, old, _, _ in patches}
         for address, old in ((0x4abfd0, "0168491e"),
                              (0x445c74, "fef711f9"),
@@ -166,6 +166,7 @@ class FirmwareInclusionTests(unittest.TestCase):
         with mock.patch.object(firmware, "validate_ring_battery_stock"), \
                 mock.patch.object(firmware, "validate_message_transport_stock"), \
                 mock.patch.object(firmware, "validate_compass_calibration_stock"), \
+                mock.patch.object(firmware, "validate_video_radio_stock"), \
                 self.assertRaisesRegex(AssertionError, "absolute references"):
             firmware.layout(bytes(damaged))
 

@@ -512,3 +512,22 @@ optical synchronization. One early EOF snapshot can anchor the tail interval;
 upload still uses compact credits with no per-NAL STATUS polling.
 Diagnostic and transport waits do not belong in decode-only timing. Native mocks do not qualify optical
 orientation, hardware stack use or real Bluetooth throughput.
+## Standard host-link PHY adapter
+
+The radio adapter binds a connection only from the stock EUS write callback
+and the donor DM peripheral control block. Connection epochs survive handle
+reuse. The original DM and application handlers still process their events
+once; observing them creates no context, task or boot-time radio request.
+
+Task-context READ/SET requests use one copied, epoch-tagged WSF mailbox. The
+Cordio consumer revalidates the connection before submission. SET additionally
+requires a finite owner's permission. It refuses submission unless the stock
+HCI command queue is empty, a command credit is available, and the controller
+transport FIFO has room. Fixed WSF pools retain three spare buffers. Neither
+the observer nor any timer allocates, waits or issues a command.
+
+The donor retains Set PHY and Read PHY's completion parser, but omits the
+public Read PHY wrapper. The adapter constructs only that standard read
+command using the same allocator and queue. Completion events, rather than
+submission, establish negotiated TX/RX values. The existing boot feature edit
+and UART bridge behavior are unchanged. No generic HCI interface is exposed.

@@ -345,6 +345,25 @@ def validate_compass_calibration_stock(img):
             raise ValueError(f"compass calibration stock ABI mismatch at {address:#x}")
 
 
+def validate_video_radio_stock(img):
+    """Authenticate DM epochs, standard PHY commands and fixed WSF ownership."""
+    for address, size, digest in (
+        (0x4d50b6, 18, "96eb8d77a1b23539bdff1b6cb07525682451b13bcd0de95a2d0e3e8fc06c1013"),
+        (0x4ca448, 42, "0a0ec1917fae826f85d5ec1552d35a14d124520518469f1a0c5d3f894a49c085"),
+        (0x4ca71e, 38, "ae5559555e98a2b75ab504106079587026e3d53477bcd696bc9b3f46a048065d"),
+        (0x4cb3c0, 18, "7cdb7a2f4c53e4669a82bc56c124f77c9c5b2088cd365a8e3b9023b4e41b9f72"),
+        (0x4db19c, 292, "2cf9c00c60cf44eb6b6354b9b90032fdb763f0150a41742b54af8f0a9785be3f"),
+        (0x540da0, 142, "ab0f15bad734c6ebe0c8e00a4a44298be3e359fb160b023c82cc0d1761bc3100"),
+        (0x546576, 32, "59ea51848871a61a87e56370573fde5a482559363a5e20f460d17eb547e9c773"),
+        (0x546856, 188, "19f6fa3ea5b1007b9959896cf3f6960e791d234c7ea9593614302101f3711e21"),
+        (0x541970, 20, "d97544123ad9d58abe2b4201eb4e55c569d92ff0b4420e1998e4ee1d329e07c4"),
+        (0x58368e, 502, "4792137bc3cc1f852ca752be77e282e18c7239998e36d462971bbd62d983eb4e"),
+        (0x5827c8, 48, "762179432257160cf873db56cfa0ae57849aad690812029cc3c56874746fe5f4"),
+    ):
+        if hashlib.sha256(img[g2f(address):g2f(address) + size]).hexdigest() != digest:
+            raise ValueError(f"video radio stock ABI mismatch at {address:#x}")
+
+
 def layout(img):
     """Compile the single injected code blob (patches_main.c, which #includes every
     patch source) together with the H.264 decoder, and append it at the tail of the
@@ -354,6 +373,7 @@ def layout(img):
     validate_ring_battery_stock(img)
     validate_message_transport_stock(img)
     validate_compass_calibration_stock(img)
+    validate_video_radio_stock(img)
     idx, comp_off, old_ps = find_mainapp(img)
 
     # This reservation is safe only if the stock image has no absolute pointer
@@ -462,6 +482,11 @@ def layout(img):
         (g2f(0x4c9b78), "51334d00",
          struct.pack("<I", base + _fn(built, "cfw_ancs_write")["offset"] + 1).hex(),
          "connection-bound ANCS EUS write callback"),
+        *[(g2f(site), old,
+           struct.pack("<I", base + _fn(built, name)["offset"] + 1).hex(), description)
+          for site, old, name, description in [
+            (0x4c9b54, "337a4c00", "video_radio_dm_event", "observe standard host connection and PHY events"),
+            (0x4c9bbc, "e5904c00", "video_radio_app_handler", "consume epoch-tagged standard PHY requests")]],
         *[(g2f(site), old, enc_bl(site, message_bridge_addr),
            "bl cfw_message_bridge_received (ordered private bridge delivery before worker pool)")
           for site, old in MESSAGE_BRIDGE_BL_SITES],

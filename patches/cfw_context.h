@@ -9,6 +9,7 @@
 #include "video/decode_timing.h"
 #include "video/power.h"
 #include "video/handoff.h"
+#include "video/radio.h"
 
 /* Persistent CFW-owned state, independent of EvenHub image containers. The
  * full-panel shadow is an owned heap allocation. This context is anchored in
@@ -144,6 +145,7 @@ typedef struct {
     video_power_state video_power;
     volatile uint32_t video_output_epoch;
     video_handoff_state video_handoff;
+    video_radio_state video_radio;
 } customCfwContext;
 
 #define CFW_CTX_SLOT  0x2029f4a8U    /* first word of the CFW-reserved TLSF tail */
