@@ -94,6 +94,38 @@ class BleConnectionTests(unittest.TestCase):
         self.assertIsInstance(result, RuntimeError)
         self.assertEqual(transport.modes, [False] * 3)
 
+    def test_uncached_retry_disposes_then_waits_before_rebuilding(self):
+        events = []
+        class OrderedTransport(FakeTransport):
+            def connect(self, *, uncached=False):
+                events.append(('connect', uncached))
+                super().connect(uncached=uncached)
+            def disconnect(self):
+                events.append(('disconnect',)); super().disconnect()
+        transport = OrderedTransport([None, RuntimeError('Catastrophic failure'), ['write-without-response']])
+        with patch.object(connection.os, 'name', 'nt'), patch.object(connection, 'authenticate'):
+            connection.open_link(transport, sleep=lambda seconds: events.append(('sleep', seconds)))
+        self.assertEqual(events, [('connect', False), ('disconnect',), ('sleep', 10),
+                                 ('connect', True), ('disconnect',), ('sleep', 10),
+                                 ('connect', False), ('sleep', 2.5)])
+
+    def test_each_direct_retry_constructs_a_fresh_client_without_reusing_old_services(self):
+        clients = []
+        class FakeClient:
+            def __init__(self, device, **kwargs): clients.append(self)
+            async def connect(self, **kwargs): pass
+        bleak, device = ModuleType('bleak'), ModuleType('bleak.backends.device')
+        bleak.BleakClient = FakeClient; device.BLEDevice = lambda *args: args
+        transport = SimpleNamespace(address='00:11:22:33:44:55', side='left',
+            disconnected_event=threading.Event(), _call=asyncio.run,
+            _install_disconnect_error_hook=lambda: None)
+        with patch.object(connection.os, 'name', 'nt'), patch.dict('sys.modules', {
+                'bleak': bleak, 'bleak.backends.device': device}):
+            for uncached in (False, True, False):
+                connection.ReceiveBleTransport.connect(transport, uncached=uncached)
+        self.assertEqual(len({id(client) for client in clients}), 3)
+        self.assertIs(transport.client, clients[-1])
+
     def test_direct_paired_constructor_sets_winrt_option_only_for_fallback(self):
         for uncached in (False, True):
             calls = []
