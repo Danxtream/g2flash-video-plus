@@ -33,6 +33,7 @@ static void command_send(uint8_t *p) { assert(!depth && p == packet); ++reads; }
 static void set_phy(uint8_t id, uint8_t all, uint8_t tx, uint8_t rx, uint16_t options) {
     assert(!depth && id == 1 && !all && tx && rx && !options); ++sets;
 }
+#define VIDEO_RADIO_HERE() 1
 #define VIDEO_RADIO_CONTEXT mock_context
 #define VIDEO_RADIO_TICK tick
 #define VIDEO_RADIO_LOCK lock
@@ -110,6 +111,17 @@ int main(void) {
     video_radio_app_handler(1, 0);
     uint8_t unrelated[20] = {0, 0, 0xf3}; video_radio_app_handler(0, unrelated);
     assert(app_calls == 2 && !depth && !mail && sets == 1);
+    memset(&context, 0, sizeof(context)); video_radio_bind(1);
+    reads = sets = 0; tick = 123;
+    event(VIDEO_RADIO_DM_READ, 1, 0x123, 0, 1, 2);
+    uint8_t report[VIDEO_RADIO_REPORT_BYTES];
+    assert(video_radio_snapshot(report));
+    assert(report[3] == 1 && report[8] == 1 && report[9] == 32 && report[10] == 3 && report[11] == 1);
+    assert(report[12] == 1 && report[13] == 7 && report[34] == 1 && report[35] == 2);
+    assert(!(report[13] & 24) && !report[38] && !report[39]);
+    assert(mail && !reads && !sets); dispatch(); assert(reads == 1 && !sets);
+    event(VIDEO_RADIO_DM_CLOSE, 1, 0x123, 0, 0, 0);
+    assert(video_radio_snapshot(report) && !report[13] && !sets && !mail);
 #ifdef VIDEO_RADIO_PLATFORM_TEST
     void *mapped = mmap((void *)0x20000000U, 0x100000, PROT_READ | PROT_WRITE,
                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);

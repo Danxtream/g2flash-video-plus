@@ -14,6 +14,7 @@ _Static_assert(sizeof(video_radio_command) == 20, "copied PHY command ABI");
 
 #ifndef VIDEO_RADIO_CONTEXT
 #define VIDEO_RADIO_CONTEXT peekCustomCfwContext
+#define VIDEO_RADIO_HERE cfw_message_lens
 #define VIDEO_RADIO_TICK FW_MS_TICK
 #define VIDEO_RADIO_LOCK ((void (*)(void))0x00541841U)
 #define VIDEO_RADIO_UNLOCK ((void (*)(void))0x00541849U)
@@ -113,6 +114,7 @@ void video_radio_dm_event(void *event) {
             } else if (data[2] == VIDEO_RADIO_DM_CLOSE) {
                 link->connected = link->bound = link->valid = 0;
                 link->permission = 0;
+                link->before.valid = link->after.valid = 0;
                 if (s->connection == id) s->pending = 0;
             } else if ((data[2] == VIDEO_RADIO_DM_READ || data[2] == VIDEO_RADIO_DM_UPDATE) &&
                        link->connected && link->handle == video_radio_u16(data + 6)) {
@@ -200,6 +202,61 @@ void video_radio_app_handler(uint8_t events, void *message) {
     }
     /* The WSF dispatcher frees its copied message after this handler returns.
      * Stock HCI owns its command buffer after submission. */
+}
+
+static void video_radio_write32(uint8_t *p, uint32_t value) {
+    for (uint32_t i = 0; i < 4; ++i) p[i] = value >> (8 * i);
+}
+int video_radio_snapshot(uint8_t out[VIDEO_RADIO_REPORT_BYTES]) {
+    if (!out) return 0;
+    for (uint32_t i = 0; i < VIDEO_RADIO_REPORT_BYTES; ++i) out[i] = 0;
+    out[0] = VIDEO_PROTOCOL_VERSION; out[1] = VIDEO_CONTROL_DIAGNOSTICS; out[3] = VIDEO_RADIO_DIAGNOSTICS;
+    video_radio_write32(out + 4, VIDEO_RADIO_TICK);
+    out[8] = VIDEO_RADIO_REPORT_VERSION; out[9] = VIDEO_RADIO_RECORD_BYTES;
+    out[10] = VIDEO_RADIO_LINKS; out[11] = VIDEO_RADIO_HERE();
+    customCfwContext *ctx = VIDEO_RADIO_CONTEXT();
+    uint8_t observe = 0; uint32_t epoch = 0;
+    VIDEO_RADIO_LOCK();
+    for (uint32_t i = 0; i < VIDEO_RADIO_LINKS; ++i) {
+        uint8_t *p = out + 12 + i * VIDEO_RADIO_RECORD_BYTES;
+        p[0] = i + 1;
+        if (!ctx) continue;
+        video_radio_state *s = &ctx->video_radio;
+        video_radio_link *link = &s->links[i];
+        p[1] = link->connected | (link->bound << 1) | (link->valid << 2) |
+            (link->before.valid << 3) | (link->after.valid << 4) |
+            (!!link->owners << 5) | ((s->pending && s->connection == i + 1) << 6) |
+            (!!link->uncertain << 7);
+        p[2] = link->phase; p[3] = link->status;
+        video_radio_write32(p + 4, link->epoch);
+        video_radio_write32(p + 8, link->tick);
+        video_radio_write32(p + 12, link->before.tick);
+        video_radio_write32(p + 16, link->after.tick);
+        p[20] = link->before.tx; p[21] = link->before.rx;
+        p[22] = link->tx; p[23] = link->rx;
+        p[24] = link->after.tx; p[25] = link->after.rx;
+        p[26] = link->owners;
+        p[27] = s->connection == i + 1 && s->pending ? s->operation : 0;
+        video_radio_write32(p + 28, link->permission);
+    }
+    if (ctx) {
+        video_radio_state *s = &ctx->video_radio;
+        video_radio_write32(out + 108, s->serial);
+        video_radio_write32(out + 112, s->completed);
+        out[116] = s->pending; out[117] = s->result; out[118] = s->connection;
+        video_radio_write32(out + 120, s->epoch);
+        for (uint32_t n = 0; n < VIDEO_RADIO_LINKS && !s->pending; ++n) {
+            uint32_t i = (s->observe_next + n) % VIDEO_RADIO_LINKS;
+            video_radio_link *link = &s->links[i];
+            if (link->connected && link->bound && !link->owners && !link->uncertain) {
+                observe = i + 1; epoch = link->epoch; s->observe_next = (i + 1) % VIDEO_RADIO_LINKS;
+                break;
+            }
+        }
+    }
+    VIDEO_RADIO_UNLOCK();
+    if (observe) video_radio_request(observe, epoch, VIDEO_RADIO_READ, 0, 0, 0);
+    return 1;
 }
 
 #pragma clang section text=""

@@ -4,6 +4,10 @@
 #include "queue.h"
 #include "../cfw_context.h"
 
+#ifndef VIDEO_RADIO_SNAPSHOT
+#define VIDEO_RADIO_SNAPSHOT video_radio_snapshot
+#endif
+
 #pragma clang section text=".text.video"
 
 static uint32_t video_read32(const uint8_t *p) {
@@ -236,14 +240,17 @@ int video_control_received(const uint8_t *data, uint16_t size,
             entry->snapshot[1] = data[1];
             entry->snapshot[2] = entry->result;
         }
-        if (data[1] == VIDEO_CONTROL_DIAGNOSTICS && size == VIDEO_CONTROL_HEADER_BYTES) {
+        int radio = size == VIDEO_CONTROL_HEADER_BYTES + 4 &&
+            data[8] == VIDEO_RADIO_DIAGNOSTICS && !data[9] && !data[10] && !data[11];
+        if (data[1] == VIDEO_CONTROL_DIAGNOSTICS &&
+            (size == VIDEO_CONTROL_HEADER_BYTES || radio)) {
             entry->pending = 1;
             /* Heap walking and completed-worker sampling belong outside the
              * receive publication lock. Revalidate the reserved replay after
              * sampling: another request may have evicted it meanwhile. */
             video_control_give(ctx);
             uint8_t snapshot[VIDEO_DIAGNOSTICS_BYTES];
-            int sampled = video_diagnostics_snapshot(snapshot);
+            int sampled = radio ? VIDEO_RADIO_SNAPSHOT(snapshot) : video_diagnostics_snapshot(snapshot);
             if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) return -1;
             if (entry->request != request || !entry->pending) {
                 video_control_give(ctx); return -1;
@@ -254,7 +261,7 @@ int video_control_received(const uint8_t *data, uint16_t size,
             snapshot[0] = VIDEO_PROTOCOL_VERSION;
             snapshot[1] = VIDEO_CONTROL_DIAGNOSTICS;
             snapshot[2] = entry->result;
-            if (video_read32(snapshot + 8) != ctx->video.generation) snapshot[3] |= 32;
+            if (!radio && video_read32(snapshot + 8) != ctx->video.generation) snapshot[3] |= 32;
             memcpy(entry->snapshot, snapshot, sizeof(snapshot));
             entry->snapshot_bytes = VIDEO_DIAGNOSTICS_BYTES;
         }

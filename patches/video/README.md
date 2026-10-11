@@ -531,3 +531,26 @@ public Read PHY wrapper. The adapter constructs only that standard read
 command using the same allocator and queue. Completion events, rather than
 submission, establish negotiated TX/RX values. The existing boot feature edit
 and UART bridge behavior are unchanged. No generic HCI interface is exposed.
+
+The eight-byte DIAGNOSTICS request retains its heap/stack format. Adding a
+little-endian uint32 selection of 1 requests a separate 128-byte PHY report;
+other selections are refused. Header bytes 0..3 identify protocol, command,
+result and selection; bytes 4..7 hold the capture tick. Bytes 8..11 identify
+record version 1, record size 32, three connection slots and the source lens.
+Each record begins at 12 + 32 * index:
+
+| Offset | Field |
+| --- | --- |
+| 0..3 | Connection ID, validity/ownership flags, phase, last stock status |
+| 4..19 | Connection epoch; current, before and after sample ticks |
+| 20..25 | Before, current and after TX/RX PHY pairs |
+| 26..27 | Owner count and pending operation |
+| 28..31 | Finite changing permission token |
+
+Flags identify connected, EUS-bound, current/before/after valid, owned,
+pending and uncertain restoration in bits 0..7. Unavailable samples are
+explicit; a pre-video or restored value is never inferred from a preference.
+The tail reports command serial/completion at 108/112, pending/result/link at
+116..118, and its epoch at 120. Remaining bytes are zero. All pages and exact
+replays freeze one capture; only a new selection may post one bounded READ.
+This report never changes the PHY or enlarges normal STATUS traffic.

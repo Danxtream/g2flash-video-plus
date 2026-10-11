@@ -267,6 +267,15 @@ static g2_h264_result worker_decode(void *, const uint8_t *, uint32_t);
 #include "../../patches/video/power.c"
 #include "../../patches/video/controller.c"
 #include "../../patches/video/diagnostics.c"
+static uint32_t radio_samples;
+static int worker_radio_snapshot(uint8_t *out) {
+    ++radio_samples;
+    assert(!image_depth); memset(out, 0, VIDEO_RADIO_REPORT_BYTES);
+    out[0] = 1; out[1] = 7; out[3] = VIDEO_RADIO_DIAGNOSTICS;
+    out[8] = VIDEO_RADIO_REPORT_VERSION; out[9] = VIDEO_RADIO_RECORD_BYTES;
+    out[10] = VIDEO_RADIO_LINKS; return 1;
+}
+#define VIDEO_RADIO_SNAPSHOT worker_radio_snapshot
 #include "../../patches/video/control.c"
 static uint32_t test_crc(const g2_h264_frame_info *frame) {
     __atomic_fetch_add(&crc_calls, 1, __ATOMIC_RELAXED); return video_frame_crc(frame);
@@ -999,6 +1008,19 @@ static void diagnostics(void) {
     heap_sample_hook = evict_diagnostics;
     assert(video_control_received(request, 8, &control_route) == -1);
     assert(!allocation_calls && !creates && !image_depth);
+    heap_sample_hook = 0; radio_samples = 0;
+    control_command(request, VIDEO_CONTROL_DIAGNOSTICS, 0); request[8] = VIDEO_RADIO_DIAGNOSTICS;
+    assert(!video_control_received(request, 12, &control_route));
+    memcpy(page + 4, request + 4, 4);
+    for (uint32_t i = 0; i < sizeof(frozen); ++i) {
+        page[8] = i; assert(!video_control_received(page, sizeof(page), &control_route));
+        frozen[i] = control_reply[8];
+    }
+    assert(frozen[3] == VIDEO_RADIO_DIAGNOSTICS && frozen[8] == VIDEO_RADIO_REPORT_VERSION &&
+           frozen[9] == VIDEO_RADIO_RECORD_BYTES && frozen[10] == VIDEO_RADIO_LINKS);
+    assert(!video_control_received(request, 12, &control_route) && radio_samples == 1);
+    request[8] = 2; assert(video_control_received(request, 12, &control_route) == -1);
+    assert(radio_samples == 1 && !allocation_calls && !creates && !image_depth);
     puts("bounded stack scan, live invalid heaps, frozen MTU23 and concurrent replay eviction PASS");
 }
 static void *pool_run(void *argument) { (void)argument; pool_drain(); return 0; }
