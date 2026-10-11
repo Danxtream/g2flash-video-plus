@@ -17,6 +17,9 @@ BASE_STATUS_BYTES, STATUS_BYTES, FRAME_BYTES, ACK_BYTES = 128, 192, 80, 16
 RESULT_FIELDS = ('ordinal', 'first_nal', 'last_nal', 'geometry', 'crc', 'cycles', 'ticks',
                  'clock_before', 'clock_after', 'flags', 'decode_tick', 'copy_tick', 'calls',
                  'finishing_cycles', 'finishing_ticks', 'no_output_cycles')
+POWER_STEPS = ('none', 'local startup refused', 'local UI not awake', 'local driver not initialized',
+               'local active app is not dashboard', 'bridge send refused', 'peer acknowledgement missing',
+               'peer not ready', 'peer refused', 'owner cancelled or expired', 'peer acknowledgement expired')
 
 
 def status(raw):
@@ -25,10 +28,11 @@ def status(raw):
     if (len(raw) not in (BASE_STATUS_BYTES, STATUS_BYTES) or raw[:2] != bytes((VERSION, 7)) or raw[3] > 4 or
             struct.unpack_from('<IIHHBB', raw, 32) != (4096, 4086, 320, 192, 1, 2) or
             raw[46:50] != bytes((1, 1, 4, 6)) or raw[50] not in (0, 4, 6) or raw[51] > raw[50] or
-            raw[70] != 63 or raw[71] != VERIFY_FRAMES | NATIVE or raw[68] > 2 or raw[69] > 7):
+            raw[70] != 63 or raw[71] != VERIFY_FRAMES | NATIVE or raw[68] > 2 or raw[69] >> 3 >= len(POWER_STEPS)):
         raise ValueError('unsupported or inconsistent playback contract')
     result = dict(version=raw[0], stage=raw[1], result=raw[2], state=raw[3], capacity=raw[50],
-                  credits=raw[51], recovery=raw[68], headers=raw[69], compact_credits=bool(raw[70] & 8))
+                  credits=raw[51], recovery=raw[68], headers=raw[69] & 7, compact_credits=bool(raw[70] & 8),
+                  power_step=raw[69] >> 3, power_step_name=POWER_STEPS[raw[69] >> 3])
     for name, offset in (('stream', 4), ('token', 8), ('stream_high', 20), ('error', 24),
                          ('interval', 28), ('expected', 52), ('accepted', 56), ('consumed', 60),
                          ('pictures', 64), ('presented', 80), ('copy_failures', 84), ('copy_tick', 88),
@@ -300,7 +304,8 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, progress=
             raise ValueError(f'START refused: {state["result"]}')
         while state['state'] != 2:
             if state['error'] or any(r['state'] not in (1, 2) for r in per_lens(state).values()) or clock() > deadline:
-                raise RuntimeError('all targeted decoders did not become READY')
+                steps = {lens: r.get('power_step_name', 'unavailable') for lens, r in per_lens(state).items()}
+                raise RuntimeError(f'all targeted decoders did not become READY; power steps: {steps}')
             renew(); sleep(.02); state = client.command(STATUS)
         tokens = {lens: report['token'] for lens, report in per_lens(state).items()}
         if set(tokens) != set(sources(client.targets)) or any(not token for token in tokens.values()):

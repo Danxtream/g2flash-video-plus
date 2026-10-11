@@ -355,6 +355,22 @@ session's input and framebuffer leases remain valid. START waits at most two
 seconds, with bounded retries. Missing peer readiness refuses START; lost bridge,
 manual sleep or lease expiry cancels playback. Power errors report code 16.
 
+The local gate reads UI state at `0x20077298`, driver initialization at
+`0x20076784` and active dashboard app 1 at `0x20076770`. The pending-app word
+at `0x20076778` can be zero during normal dashboard refresh and is not a
+readiness signal.
+
+STATUS byte 69 keeps header progress in bits 0..2 and the last acquisition
+barrier in bits 3..7. Codes 0..10 name: none, local startup refused, local UI not
+awake, local driver not initialized, local active app is not dashboard, bridge
+send refused, peer acknowledgement missing, peer not ready, peer refused,
+owner cancelled or expired, and peer acknowledgement expired. The controller
+retains the last barrier after failed-start rollback; a new acquisition clears
+it and success leaves zero. A peer-not-ready result does not identify which
+stock gate blocked that peer. The sender reports each targeted lens's named
+barrier when READY fails. Snapshot length, pagination and power bridge records
+are unchanged; use the updated STATUS parser to read a nonzero barrier.
+
 The authenticated stock pointer queues retain the original paired application
 lifecycle. A task-context adapter allocates bounded cached packets once, checks
 the live reserve, and submits with timeout zero. Refusal rolls back without

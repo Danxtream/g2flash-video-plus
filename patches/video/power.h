@@ -19,6 +19,24 @@ enum {
     VIDEO_POWER_RETRY_MS = 50
 };
 
+/* Last acquisition barrier; retained after rollback for a later STATUS read. */
+enum {
+    VIDEO_POWER_STEP_NONE,
+    VIDEO_POWER_STEP_LOCAL_START,
+    VIDEO_POWER_STEP_LOCAL_UI,
+    VIDEO_POWER_STEP_LOCAL_DRIVER,
+    VIDEO_POWER_STEP_LOCAL_APP,
+    VIDEO_POWER_STEP_BRIDGE_SEND,
+    VIDEO_POWER_STEP_PEER_ACK,
+    VIDEO_POWER_STEP_PEER_READY,
+    VIDEO_POWER_STEP_PEER_REFUSED,
+    VIDEO_POWER_STEP_OWNER,
+    VIDEO_POWER_STEP_PEER_EXPIRED,
+    VIDEO_POWER_HEADER_MASK = 7,
+    VIDEO_POWER_STEP_SHIFT = 3
+};
+_Static_assert(VIDEO_POWER_STEP_PEER_EXPIRED < 32, "power step fits STATUS high bits");
+
 typedef struct {
     uint32_t generation, stream, nonce, serial;
     volatile uint32_t deadline;
@@ -35,6 +53,7 @@ typedef struct {
     volatile uint32_t mailbox_state;
     uint8_t mailbox[VIDEO_POWER_BYTES];
     uint32_t ack_serial, ack_result, ack_deadline;
+    volatile uint32_t acquire_step;
 } video_power_state;
 
 /* Task-context acquisition and rollback outside image/display locks. Local

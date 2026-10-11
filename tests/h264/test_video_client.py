@@ -13,7 +13,8 @@ import zlib
 from g2flash import CTRL
 from test_receive_client import Counter, MockTransport, frame, diagnostic_bytes
 from video_client import (VideoClient, status, frame_result, timing, summarize, stream_clip,
-                          START, STOP, STATUS, CAPABILITIES, FRAME_READ, FRAME_ACK, VERIFY_FRAMES, NATIVE)
+                          START, STOP, STATUS, CAPABILITIES, FRAME_READ, FRAME_ACK, VERIFY_FRAMES, NATIVE,
+                          POWER_STEPS)
 from reference_clip import read_nals, build_reference, make_reference, decoder_identity
 
 
@@ -165,6 +166,31 @@ def synthetic_reference(count=32):
 
 
 class VideoClientTests(unittest.TestCase):
+    def test_status_names_retained_power_step_without_changing_header_bits(self):
+        for code, name in enumerate(POWER_STEPS):
+            for headers in range(8):
+                raw = bytearray(status_bytes()); raw[69] = code << 3 | headers
+                report = status(raw)
+                self.assertEqual((report['power_step'], report['power_step_name'], report['headers']),
+                                 (code, name, headers))
+        for code in range(len(POWER_STEPS), 32):
+            raw = bytearray(status_bytes()); raw[69] = code << 3
+            with self.assertRaises(ValueError): status(raw)
+
+    def test_failed_start_names_each_lens_power_barrier_and_retires_session(self):
+        nals, reference = synthetic_reference()
+        class FailedPower(FakePlayback):
+            def command(self, op, stream=0, **kwargs):
+                if op == START:
+                    left = dict(state=0, result=0, error=16, power_step_name=POWER_STEPS[4])
+                    right = dict(left, power_step_name=POWER_STEPS[7])
+                    return dict(left, by_lens={1: left, 2: right})
+                return super().command(op, stream, **kwargs)
+        client = FailedPower(reference)
+        with self.assertRaisesRegex(RuntimeError, 'local active app is not dashboard.*peer not ready'):
+            stream_clip(client, nals, reference)
+        self.assertEqual(client.stops, 1)
+
     def test_full_and_minimum_mtu_all_status_result_and_diagnostic_pages(self):
         for size in (1, 22):
             for lens in (1, 2):

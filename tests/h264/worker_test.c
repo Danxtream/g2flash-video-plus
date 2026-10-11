@@ -853,6 +853,12 @@ static void controls(void) {
     assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED);
     assert(snapshot[1] == 7 && snapshot[3] == VIDEO_IDLE && !snapshot[50] &&
            !allocations_live && !creates && !pool_calls);
+    context.video_power.acquire_step = VIDEO_POWER_STEP_LOCAL_APP;
+    control_command(p, VIDEO_CONTROL_STATUS, 0);
+    assert(control_snapshot(p, 8, snapshot) == VIDEO_CONTROL_ACCEPTED &&
+           snapshot[69] >> VIDEO_POWER_STEP_SHIFT == VIDEO_POWER_STEP_LOCAL_APP &&
+           !(snapshot[69] & VIDEO_POWER_HEADER_MASK));
+    context.video_power.acquire_step = VIDEO_POWER_STEP_NONE;
     control_command(p, VIDEO_CONTROL_START, 1);
     context.texture_cache = (void *)(uintptr_t)1;
     assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_LEASE && !pool_calls);

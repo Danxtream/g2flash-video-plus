@@ -54,7 +54,8 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     video_write32(p + 60, queue.consumed);
     video_write32(p + 64, queue.pictures);
     p[68] = s->error >= VIDEO_CONTROL_GAP ? 2 : queue.gap_deadline ? 1 : 0;
-    p[69] = queue.header_progress;
+    p[69] = (queue.header_progress & VIDEO_POWER_HEADER_MASK) | (__atomic_load_n(&ctx->video_power.acquire_step,
+        __ATOMIC_ACQUIRE) << VIDEO_POWER_STEP_SHIFT);
     p[70] = 7 | VIDEO_FEATURE_CREDITS | VIDEO_FEATURE_DECODE_TOTALS |
         (1u << VIDEO_STATUS_EXTENSION_SHIFT); /* Advertise one 64-byte STATUS extension. */
     p[71] = VIDEO_PRESENT_NATIVE | VIDEO_VERIFY_FRAMES;

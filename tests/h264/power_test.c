@@ -12,6 +12,7 @@
 static customCfwContext contexts[2];
 static uint32_t here, now = 100, locks, service, schedules, starts[2], awake[2];
 static uint32_t drop, refuse, delayed, cancels, refreshes, bootstrap, shortage, cancel_delay;
+static uint32_t unready[2], missing_ack, expired_ack;
 static customCfwContext *peekCustomCfwContext(void) { return bootstrap ? 0 : &contexts[here]; }
 static customCfwContext *getCustomCfwContext(void) { return &contexts[here]; }
 static int video_control_generation_valid(customCfwContext *ctx, uint32_t generation) {
@@ -68,7 +69,10 @@ static uint32_t event_set(uint32_t event, uint32_t bits) { assert(event == 1 && 
 #define VIDEO_POWER_QUEUE_PUT put
 #define VIDEO_OS_EVENT_SET event_set
 #else
-static int ready(void) { return awake[here]; }
+static int ready(void) { return awake[here] && !unready[here]; }
+static uint32_t readiness_step(void) {
+    return !awake[here] ? VIDEO_POWER_STEP_LOCAL_UI : unready[here];
+}
 static int start(void) {
     assert(!service && !locks); ++starts[here];
     if (!refuse) awake[here] = 1;
@@ -76,6 +80,7 @@ static int start(void) {
 }
 static int send(const uint8_t *);
 #define VIDEO_POWER_PLATFORM_READY ready
+#define VIDEO_POWER_PLATFORM_STEP readiness_step
 #define VIDEO_POWER_PLATFORM_START start
 #define VIDEO_POWER_PLATFORM_SEND send
 #endif
@@ -104,6 +109,21 @@ static int put(uint32_t queue, const void *item, uint8_t priority, uint32_t time
 int main(void) {
     void *memory = mmap((void *)0x20074000, 0x4000, PROT_READ|PROT_WRITE,
         MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE, -1, 0); assert(memory == (void *)0x20074000);
+    /* The stock idle refresh uses the active app when no app is pending. */
+    *(uint8_t *)0x20077298 = 1; *(uint32_t *)0x20076784 = 1;
+    *(uint32_t *)0x20076770 = 1; *(uint32_t *)0x20076778 = 0;
+    assert(video_power_platform_ready());
+    assert(video_power_platform_step() == VIDEO_POWER_STEP_NONE);
+    *(uint32_t *)0x20076770 = 2; *(uint32_t *)0x20076778 = 1;
+    assert(!video_power_platform_ready());
+    assert(video_power_platform_step() == VIDEO_POWER_STEP_LOCAL_APP);
+    *(uint32_t *)0x20076770 = 1;
+    *(uint8_t *)0x20077298 = 0; assert(!video_power_platform_ready());
+    assert(video_power_platform_step() == VIDEO_POWER_STEP_LOCAL_UI);
+    *(uint8_t *)0x20077298 = 1;
+    *(uint32_t *)0x20076784 = 0; assert(!video_power_platform_ready());
+    assert(video_power_platform_step() == VIDEO_POWER_STEP_LOCAL_DRIVER);
+    *(uint32_t *)0x20076784 = 1;
     *(uint32_t *)0x20076d18 = 0x20074cd0; *(uint32_t *)0x20076d1c = 0x20074d20;
     *(uint32_t *)0x20076e6c = 1;
     for (uint32_t q = 0x20074cd0; q <= 0x20074d20; q += 0x50) {
@@ -134,14 +154,18 @@ static int send(const uint8_t *record) {
     assert(!service && !locks);
     if (drop) return 0;
     if (delayed && record[3] == VIDEO_POWER_ACK) { --delayed; return 1; }
+    if (missing_ack && record[3] == VIDEO_POWER_ACK) return 1;
+    uint8_t copy[VIDEO_POWER_BYTES]; memcpy(copy, record, sizeof(copy));
+    if (expired_ack && record[3] == VIDEO_POWER_ACK) video_power_write(copy + 18, 0);
     uint32_t saved = here; here ^= 1;
-    uint32_t result = video_power_received(record, VIDEO_POWER_BYTES);
+    uint32_t result = video_power_received(copy, VIDEO_POWER_BYTES);
     if (!result) video_power_step();
     here = saved; return !result;
 }
 static void reset(void) {
     memset(contexts, 0, sizeof(contexts)); memset(awake, 0, sizeof(awake));
     memset(starts, 0, sizeof(starts)); now = 100; here = service = locks = drop = refuse = delayed = bootstrap = shortage = cancel_delay = 0;
+    memset(unready, 0, sizeof(unready)); missing_ack = expired_ack = 0;
     for (uint32_t i = 0; i < 2; ++i) {
         contexts[i].image_mutex = 1; contexts[i].direct_lease_deadline = now + 90000;
         contexts[i].video_control.start_guard = 1; contexts[i].video_control.stream = 1;
@@ -154,6 +178,7 @@ int main(void) {
     for (uint32_t ingress = 0; ingress < 2; ++ingress) {
         reset(); here = ingress; delayed = 2;
         assert(video_power_acquire(1) && awake[0] && awake[1] && starts[0] == 1 && starts[1] == 1);
+        assert(contexts[here].video_power.acquire_step == VIDEO_POWER_STEP_NONE);
         assert(video_power_deadline(1) && video_dashboard_idle_count(1) == 1);
         /* The peer also starts an independent session. Either lease alone
          * keeps the dashboard awake; releasing one must not clear the other. */
@@ -169,12 +194,32 @@ int main(void) {
         assert(video_dashboard_idle_count(1) == 0 && !contexts[here].video_power.peer.deadline);
     }
     reset(); refuse = 1; assert(!video_power_acquire(1) && !contexts[0].video_power.deadline);
+    assert(contexts[0].video_power.acquire_step == VIDEO_POWER_STEP_LOCAL_START);
     reset(); drop = 1; uint32_t begin = now;
     assert(!video_power_acquire(1) && now - begin <= VIDEO_POWER_START_MS + 10);
+    assert(contexts[0].video_power.acquire_step == VIDEO_POWER_STEP_BRIDGE_SEND);
     reset(); drop = cancel_delay = 1;
     assert(!video_power_acquire(1) && !contexts[0].video_power.deadline && !contexts[0].video_power.acquired);
+    assert(contexts[0].video_power.acquire_step == VIDEO_POWER_STEP_OWNER);
     reset(); drop = 1; contexts[0].video_control.active_deadline = now + 20;
     assert(!video_power_acquire(1) && !contexts[0].video_power.deadline);
+    assert(contexts[0].video_power.acquire_step == VIDEO_POWER_STEP_OWNER);
+    for (uint32_t step = VIDEO_POWER_STEP_LOCAL_UI; step <= VIDEO_POWER_STEP_LOCAL_APP; ++step) {
+        reset(); unready[0] = step;
+        assert(!video_power_acquire(1) && contexts[0].video_power.acquire_step == step);
+        video_power_release(1); assert(contexts[0].video_power.acquire_step == step);
+        unready[0] = 0; contexts[0].video_control.start_guard = contexts[0].video_control.stream = 2;
+        assert(video_power_acquire(2));
+        assert(contexts[0].video_power.acquire_step == VIDEO_POWER_STEP_NONE);
+    }
+    reset(); missing_ack = 1; assert(!video_power_acquire(1));
+    assert(contexts[0].video_power.acquire_step == VIDEO_POWER_STEP_PEER_ACK);
+    reset(); unready[1] = VIDEO_POWER_STEP_LOCAL_DRIVER; assert(!video_power_acquire(1));
+    assert(contexts[0].video_power.acquire_step == VIDEO_POWER_STEP_PEER_READY);
+    reset(); contexts[1].video_power.peer.generation = contexts[1].video_power.peer.stream = 2;
+    assert(!video_power_acquire(1) && contexts[0].video_power.acquire_step == VIDEO_POWER_STEP_PEER_REFUSED);
+    reset(); expired_ack = 1; assert(!video_power_acquire(1));
+    assert(contexts[0].video_power.acquire_step == VIDEO_POWER_STEP_PEER_EXPIRED);
     reset(); assert(video_power_acquire(1)); awake[1] = 0;
     now += VIDEO_POWER_RENEW_MS; video_power_step(); video_power_step();
     assert(cancels && !contexts[0].video_control.start_guard); /* No automatic re-wake. */

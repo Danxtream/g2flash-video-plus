@@ -8,11 +8,19 @@
 #ifndef VIDEO_POWER_PLATFORM_READY
 /* UI state is published before INIT reaches the driver. Require both, and
  * never treat a framebuffer copy as evidence that the panel was powered up. */
-static int video_power_platform_ready(void) {
-    return *(const volatile uint8_t *)0x20077298U == 1 &&
-        *(const volatile uint32_t *)0x20076784U == 1 &&
-        *(const volatile uint32_t *)0x20076778U == 1;
+/* Shared by the readiness and diagnostic paths. Kept out of line because
+ * inlining it into both made clang emit ROPI MOVW/MOVT address fixups
+ * that the ARM build rejects. */
+__attribute__((noinline)) static uint32_t video_power_platform_step(void) {
+    if (*(const volatile uint8_t *)0x20077298U != 1) return VIDEO_POWER_STEP_LOCAL_UI;
+    if (*(const volatile uint32_t *)0x20076784U != 1) return VIDEO_POWER_STEP_LOCAL_DRIVER;
+    /* Stock refresh at 0x445c80 reads the active app here when no app is
+     * pending. The separate pending-app word at 0x20076778 may be zero. */
+    if (*(const volatile uint32_t *)0x20076770U != 1) return VIDEO_POWER_STEP_LOCAL_APP;
+    return VIDEO_POWER_STEP_NONE;
 }
+static int video_power_platform_ready(void) { return video_power_platform_step() == VIDEO_POWER_STEP_NONE; }
+#define VIDEO_POWER_PLATFORM_STEP video_power_platform_step
 #define VIDEO_POWER_PLATFORM_READY video_power_platform_ready
 #ifndef VIDEO_POWER_HERE
 #define VIDEO_POWER_HERE cfw_message_lens
@@ -85,6 +93,10 @@ static int video_power_platform_send(const uint8_t *p) {
 }
 #define VIDEO_POWER_PLATFORM_START video_power_platform_start
 #define VIDEO_POWER_PLATFORM_SEND video_power_platform_send
+#endif
+
+#ifndef VIDEO_POWER_PLATFORM_STEP
+#define VIDEO_POWER_PLATFORM_STEP() (VIDEO_POWER_PLATFORM_READY() ? VIDEO_POWER_STEP_NONE : VIDEO_POWER_STEP_LOCAL_UI)
 #endif
 
 static uint32_t video_power_read(const uint8_t *p) {
@@ -225,28 +237,45 @@ int video_power_acquire(uint32_t generation) {
     if (!ctx || !generation || !video_control_generation_valid(ctx, generation)) return 0;
     video_power_state *p = &ctx->video_power;
     __atomic_store_n(&p->generation, generation, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->acquire_step, VIDEO_POWER_STEP_NONE, __ATOMIC_RELEASE);
     p->stream = ctx->video_control.stream;
     p->nonce = VIDEO_TICK ^ (generation * 0x9e3779b9U); if (!p->nonce) p->nonce = 1;
     p->serial = 1; p->ack_serial = 0;
     __atomic_store_n(&p->acquired, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&p->deadline, video_power_limit(ctx->video_control.active_deadline), __ATOMIC_RELEASE);
-    if (!VIDEO_POWER_PLATFORM_READY() && !VIDEO_POWER_PLATFORM_START()) goto refused;
+    if (!VIDEO_POWER_PLATFORM_READY() && !VIDEO_POWER_PLATFORM_START()) {
+        __atomic_store_n(&p->acquire_step, VIDEO_POWER_STEP_LOCAL_START, __ATOMIC_RELEASE);
+        goto refused;
+    }
     uint32_t until = VIDEO_TICK + VIDEO_POWER_START_MS, retry = VIDEO_TICK;
+    int sent = -1;
     while (video_power_owner_live(ctx) && (int32_t)(until - VIDEO_TICK) > 0) {
         video_power_mail(ctx);
-        if (p->ack_serial == p->serial && p->ack_result == VIDEO_POWER_REFUSED) goto refused;
+        if (p->ack_serial == p->serial && p->ack_result == VIDEO_POWER_REFUSED) {
+            __atomic_store_n(&p->acquire_step, VIDEO_POWER_STEP_PEER_REFUSED, __ATOMIC_RELEASE);
+            goto refused;
+        }
         if (p->ack_serial == p->serial && p->ack_result == VIDEO_POWER_OK &&
             VIDEO_POWER_PLATFORM_READY() && video_power_live(p->ack_deadline)) {
             __atomic_store_n(&p->peer_deadline, p->ack_deadline, __ATOMIC_RELEASE);
             p->renewed = VIDEO_TICK;
+            __atomic_store_n(&p->acquire_step, VIDEO_POWER_STEP_NONE, __ATOMIC_RELEASE);
             __atomic_store_n(&p->acquired, 1, __ATOMIC_RELEASE); return 1;
         }
         if ((int32_t)(VIDEO_TICK - retry) >= 0) {
-            video_power_send_owner(p, VIDEO_POWER_ACQUIRE);
+            sent = video_power_send_owner(p, VIDEO_POWER_ACQUIRE);
             retry = VIDEO_TICK + VIDEO_POWER_RETRY_MS;
         }
+        uint32_t step = VIDEO_POWER_PLATFORM_STEP();
+        if (!step) step = p->ack_serial == p->serial ?
+            (p->ack_result == VIDEO_POWER_WAIT ? VIDEO_POWER_STEP_PEER_READY :
+             video_power_live(p->ack_deadline) ? VIDEO_POWER_STEP_NONE : VIDEO_POWER_STEP_PEER_EXPIRED) :
+            sent == 0 ? VIDEO_POWER_STEP_BRIDGE_SEND : VIDEO_POWER_STEP_PEER_ACK;
+        __atomic_store_n(&p->acquire_step, step, __ATOMIC_RELEASE);
         VIDEO_OS_DELAY(10);
     }
+    if (!video_power_owner_live(ctx))
+        __atomic_store_n(&p->acquire_step, VIDEO_POWER_STEP_OWNER, __ATOMIC_RELEASE);
 refused:
     video_power_release(generation); return 0;
 }
