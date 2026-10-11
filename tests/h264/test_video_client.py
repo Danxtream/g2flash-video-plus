@@ -43,6 +43,21 @@ def result_row(ordinal=1, first=0, last=2, crc=0x12345678):
                 finishing_ticks=49, no_output_cycles=100000, result=0, stream=1, token=1)
 
 
+class RadioContractTests(unittest.TestCase):
+    def test_radio_option_requires_its_advertised_bit_and_keeps_old_default(self):
+        old = status_bytes(options=0)
+        self.assertFalse(status(old)['radio_supported'])
+        raw = bytearray(status_bytes(options=2)); raw[71] = 131
+        self.assertTrue(status(raw)['radio_supported'])
+        self.assertEqual(status(raw)['options'], 2)
+        raw[71] = 129
+        with self.assertRaises(ValueError): status(raw)
+        raw[71] = 135
+        with self.assertRaises(ValueError): status(raw)
+        raw[71] = 131; struct.pack_into('<I', raw, 92, 4)
+        with self.assertRaises(ValueError): status(raw)
+
+
 class PlaybackWire(MockTransport):
     """Keep actual framing/pagination mocks and substitute playback snapshots."""
     def __init__(self, *args, lose_once=False, lose_op=None, **kwargs):

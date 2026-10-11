@@ -13,6 +13,7 @@ from receive_client import (control, diagnostics, diagnostic_alerts,
                             DIAGNOSTICS, PAGE, nal)
 
 FRAME_READ, FRAME_ACK, CREDITS, VERIFY_FRAMES, NATIVE = 8, 9, 10, 128, 1
+RADIO_OFF = 2
 BASE_STATUS_BYTES, STATUS_BYTES, FRAME_BYTES, ACK_BYTES = 128, 192, 80, 16
 RESULT_FIELDS = ('ordinal', 'first_nal', 'last_nal', 'geometry', 'crc', 'cycles', 'ticks',
                  'clock_before', 'clock_after', 'flags', 'decode_tick', 'copy_tick', 'calls',
@@ -28,11 +29,11 @@ def status(raw):
     if (len(raw) not in (BASE_STATUS_BYTES, STATUS_BYTES) or raw[:2] != bytes((VERSION, 7)) or raw[3] > 4 or
             struct.unpack_from('<IIHHBB', raw, 32) != (4096, 4086, 320, 192, 1, 2) or
             raw[46:50] != bytes((1, 1, 4, 6)) or raw[50] not in (0, 4, 6) or raw[51] > raw[50] or
-            raw[70] != 63 or raw[71] != VERIFY_FRAMES | NATIVE or raw[68] > 2 or raw[69] >> 3 >= len(POWER_STEPS)):
+            raw[70] != 63 or raw[71] not in (VERIFY_FRAMES | NATIVE, VERIFY_FRAMES | NATIVE | RADIO_OFF) or raw[68] > 2 or raw[69] >> 3 >= len(POWER_STEPS)):
         raise ValueError('unsupported or inconsistent playback contract')
     result = dict(version=raw[0], stage=raw[1], result=raw[2], state=raw[3], capacity=raw[50],
                   credits=raw[51], recovery=raw[68], headers=raw[69] & 7, compact_credits=bool(raw[70] & 8),
-                  power_step=raw[69] >> 3, power_step_name=POWER_STEPS[raw[69] >> 3])
+                  power_step=raw[69] >> 3, power_step_name=POWER_STEPS[raw[69] >> 3], radio_supported=bool(raw[71] & RADIO_OFF))
     for name, offset in (('stream', 4), ('token', 8), ('stream_high', 20), ('error', 24),
                          ('interval', 28), ('expected', 52), ('accepted', 56), ('consumed', 60),
                          ('pictures', 64), ('presented', 80), ('copy_failures', 84), ('copy_tick', 88),
@@ -41,7 +42,7 @@ def status(raw):
                          ('no_output_calls', 120), ('incomplete', 124)):
         result[name] = struct.unpack_from('<I', raw, offset)[0]
     if (result['consumed'] > result['accepted'] or (result['state'] == 2 and result['presented'] > result['pictures']) or
-            result['options'] & ~(VERIFY_FRAMES | NATIVE) or result['acked'] > result['result_high'] or
+            result['options'] & ~raw[71] or result['acked'] > result['result_high'] or
             result['result_high'] > result['presented'] or result['result_capacity'] not in (0, 16) or
             result['result_high'] - result['acked'] > result['result_capacity']):
         raise ValueError('inconsistent playback counts or verification window')

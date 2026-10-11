@@ -132,6 +132,9 @@ class WorkerTests(unittest.TestCase):
     def test_service_notifications_never_wait_or_free_and_ignore_old_generations(self):
         self.check_case("lease-notifications")
 
+    def test_radio_options_replay_reserved_bits_refusal_and_partial_start_release(self):
+        self.check_case("radio-contract")
+
     def test_host_disconnect_posts_without_waiting_and_cancels_only_its_generation(self):
         self.check_case("radio-disconnect")
 

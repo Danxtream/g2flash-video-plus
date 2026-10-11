@@ -570,4 +570,12 @@ is explicit in diagnostics and blocks new changing owners until disconnect.
 An Off owner may still play without changing it. Callback paths only copy
 fixed state and post a zero-timeout controller reason. Disconnect retires the
 epoch and cancels its video generation in task context, never in the callback.
-The playback START contract does not call this lifecycle yet.
+START option bit 1 selects Off; zero is Video-only. The advertised mask is
+0x83 (native presentation, radio Off, verification). Reserved bits still fail,
+and replay includes the radio option. Acquire precedes power/storage startup;
+every failed/partial START and every normal, fault, sleep, lease, disconnect or
+reset retirement releases its generation. Quarantined worker storage remains
+allocated while independent fixed-state radio restoration is attempted.
+Unconfirmed acquisition reports control error 18. STOP may reach IDLE before
+asynchronous restoration finishes; inspect the PHY diagnostics after it.
+Boot and non-video traffic do not request a PHY.

@@ -264,7 +264,17 @@ static g2_h264_result worker_decode(void *, const uint8_t *, uint32_t);
 #include "../../patches/video/pack.c"
 #include "../../patches/video/present.c"
 #include "../../patches/video/evidence.c"
-static uint32_t radio_lost;
+static uint32_t radio_lost, radio_active, radio_acquires, radio_releases, radio_off, deny_radio;
+int video_radio_acquire(uint32_t generation, int off) {
+    assert(!image_depth && !service_context && context.video_control.start_guard == generation);
+    ++radio_acquires; radio_off = off;
+    if (deny_radio) return 0;
+    radio_active = generation; return 1;
+}
+void video_radio_release(uint32_t generation) {
+    assert(!image_depth && !service_context);
+    if (generation && radio_active == generation) { radio_active = 0; ++radio_releases; }
+}
 int video_radio_generation_lost(uint32_t generation) { return radio_lost == generation; }
 void video_radio_step(void) { assert(!image_depth && !service_context); }
 int video_radio_maintenance(void) { return 0; }
@@ -440,7 +450,9 @@ static void configure(void) {
     assert(!display_job && !display_gate && !owned_shadow);
     fail_gate = fail_queue = missing_fb = fail_shadow = copied_frames = overlay_calls = flush_calls = stock_copies = 0;
     handoff_queues = handoff_hold = fail_handoff = 0;
+    assert(!radio_active);
     power_awake = 1; power_starts = 0; radio_lost = 0;
+    radio_acquires = radio_releases = radio_off = deny_radio = 0;
     assert(!allocations_live && !task_live);
     memset(&context, 0, sizeof(context)); context.image_mutex = 1;
     context.direct_lease_deadline = tick() + 60000;
@@ -880,7 +892,7 @@ static void controls(void) {
     assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_LEASE && !pool_calls);
     context.texture_cache = 0;
     control_command(p, VIDEO_CONTROL_START, 1);
-    p[18] = 2;
+    p[18] = 4;
     assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_FORMAT && !pool_calls);
     control_command(p, VIDEO_CONTROL_START, 1);
     assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED && pool_count == 1);
@@ -1945,6 +1957,34 @@ static void radio_disconnect(void) {
     assert(!context.video_control.start_guard);
 }
 
+static void radio_contract(void) {
+    configure(); request_next = 0;
+    uint8_t p[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
+    control_command(p, VIDEO_CONTROL_CAPABILITIES, 0);
+    assert(!control_snapshot(p, 8, report) && report[71] == 0x83 && !radio_acquires);
+    control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_RADIO_OFF;
+    assert(!control_snapshot(p, 24, report));
+    assert(!control_snapshot(p, 24, report) && !radio_acquires);
+    p[18] = 0; assert(video_control_received(p, 24, &control_route)); p[18] = VIDEO_RADIO_OFF;
+    pool_drain(); await_ready(); assert(state() == VIDEO_READY && radio_off && radio_acquires == 1);
+    control_command(p, VIDEO_CONTROL_RESET, 1); assert(!control_snapshot(p, 12, report));
+    pool_drain(); finish(); assert(!radio_active && radio_releases == 1);
+    control_command(p, VIDEO_CONTROL_START, 2); deny_radio = 1;
+    assert(!control_snapshot(p, 24, report)); pool_drain();
+    assert(state() == VIDEO_IDLE && context.video_control.error == VIDEO_CONTROL_RADIO && !allocations_live);
+    deny_radio = 0; fail_at = allocation_calls + 1;
+    uint32_t created = creates;
+    control_command(p, VIDEO_CONTROL_START, 3); assert(!control_snapshot(p, 24, report)); pool_drain();
+    assert(!radio_active && radio_releases == 2 && !allocations_live && creates == created);
+    fail_at = 0;
+    control_command(p, VIDEO_CONTROL_START, 4); assert(!control_snapshot(p, 24, report));
+    pool_drain(); await_ready(); assert(state() == VIDEO_READY && !radio_off);
+    service_context = 1; video_control_notify_lease(1); service_context = 0;
+    pool_drain(); finish(); assert(!radio_active && radio_releases == 3);
+    control_command(p, VIDEO_CONTROL_START, 5); p[18] = 4;
+    assert(control_snapshot(p, 24, report) == VIDEO_CONTROL_FORMAT && !radio_active);
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (!strcmp(argv[1], "normal")) normal();
@@ -1974,6 +2014,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "lease-notifications")) lease_notifications();
     else if (!strcmp(argv[1], "handback")) handback();
     else if (!strcmp(argv[1], "radio-disconnect")) radio_disconnect();
+    else if (!strcmp(argv[1], "radio-contract")) radio_contract();
     else assert(0);
     assert(!allocations_live && !task_live && !image_depth);
     printf("worker %s PASS\n", argv[1]);

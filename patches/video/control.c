@@ -62,7 +62,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
         __ATOMIC_ACQUIRE) << VIDEO_POWER_STEP_SHIFT);
     p[70] = 7 | VIDEO_FEATURE_CREDITS | VIDEO_FEATURE_DECODE_TOTALS |
         (1u << VIDEO_STATUS_EXTENSION_SHIFT); /* Advertise one 64-byte STATUS extension. */
-    p[71] = VIDEO_PRESENT_NATIVE | VIDEO_VERIFY_FRAMES;
+    p[71] = VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES;
     video_write32(p + 72, queue.gap_deadline);
     video_write32(p + 76, queue.gap_sequence);
     video_write32(p + 80, ctx->video_presentation.presented);
@@ -122,7 +122,7 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         if (n != VIDEO_START_BYTES || p[12] != (VIDEO_FRAME_WIDTH & 255) ||
             p[13] != VIDEO_FRAME_WIDTH >> 8 || p[14] != VIDEO_FRAME_HEIGHT || p[15] ||
             p[16] != VIDEO_FRAME_REFERENCES || p[17] != VIDEO_FRAME_DPB ||
-            p[18] & ~(VIDEO_PRESENT_NATIVE | VIDEO_VERIFY_FRAMES) || p[19])
+            p[18] & ~(VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES) || p[19])
             return VIDEO_CONTROL_FORMAT;
         uint32_t stream = video_read32(p + 8), interval = video_read32(p + 20);
         if (!stream || stream <= s->stream_high || interval < VIDEO_INTERVAL_MIN ||

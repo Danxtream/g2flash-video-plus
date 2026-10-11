@@ -111,6 +111,7 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
      * coalesce requests without borrowing owner storage or joining a task. */
     for (uint32_t step = 0; step < VIDEO_CONTROL_REPLAYS; ++step) {
         if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) {
+            video_radio_release(__atomic_load_n(&s->control_generation, __ATOMIC_ACQUIRE));
             __atomic_store_n(&s->controller_failed, 1, __ATOMIC_RELEASE);
             __atomic_store_n(&s->controller_reasons, 0, __ATOMIC_RELEASE);
             __atomic_store_n(&ctx->video_quarantine_token, ctx->video.token, __ATOMIC_RELEASE);
@@ -161,21 +162,28 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
             stopped = video_worker_stop(VIDEO_STOP_LIMIT_MS);
         int started = 0;
         int power = 1;
+        int radio = 1;
         int handed = 1;
         if (!deferred && stopped && retiring) {
             handed = video_handoff_stop(stop_generation);
             if (handed) video_power_release(ctx->video_power.generation);
         }
+        if (!deferred && retiring) video_radio_release(stop_generation);
         if (stopped && guard && reasons & VIDEO_CONTROLLER_START) {
-            power = video_power_acquire(guard);
-            if (power) started = video_worker_start_guarded(0, guard);
-            if (!started) video_power_release(guard);
+            radio = video_radio_acquire(guard, !!(s->options & VIDEO_RADIO_OFF));
+            if (radio) power = video_power_acquire(guard);
+            if (radio && power) started = video_worker_start_guarded(0, guard);
+            if (!started) {
+                video_power_release(guard);
+                video_radio_release(guard);
+            }
         }
         /* Copy completions also maintain the lease during playback, when
          * ordinary UI input may postpone its periodic refresh callback. */
         video_power_step();
         video_radio_step();
         if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) {
+            video_radio_release(__atomic_load_n(&s->control_generation, __ATOMIC_ACQUIRE));
             __atomic_store_n(&s->controller_failed, 1, __ATOMIC_RELEASE);
             __atomic_store_n(&s->controller_reasons, 0, __ATOMIC_RELEASE);
             __atomic_store_n(&ctx->video_quarantine_token, ctx->video.token, __ATOMIC_RELEASE);
@@ -191,13 +199,15 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
         else if (guard == s->start_guard && reasons & VIDEO_CONTROLLER_START && !started) {
             s->error = __atomic_load_n(&s->notify_release_generation, __ATOMIC_ACQUIRE) == guard ?
                 VIDEO_CONTROL_ACCEPTED : video_control_generation_valid(ctx, guard) ?
-                (power ? VIDEO_CONTROL_MEMORY : VIDEO_CONTROL_POWER) : VIDEO_CONTROL_INACTIVITY;
+                (radio ? (power ? VIDEO_CONTROL_MEMORY : VIDEO_CONTROL_POWER) :
+                 VIDEO_CONTROL_RADIO) : VIDEO_CONTROL_INACTIVITY;
             __atomic_store_n(&s->start_guard, 0, __ATOMIC_RELEASE);
         }
         if (!__atomic_load_n(&s->controller_reasons, __ATOMIC_ACQUIRE)) {
             video_control_give(ctx);
             video_controller_stack_sample();
             if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) {
+                video_radio_release(__atomic_load_n(&s->control_generation, __ATOMIC_ACQUIRE));
                 __atomic_store_n(&s->controller_failed, 1, __ATOMIC_RELEASE);
                 break;
             }
