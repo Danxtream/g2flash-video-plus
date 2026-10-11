@@ -6,6 +6,16 @@
 
 #pragma clang section text=".text.video"
 
+enum { VIDEO_DIAG_DISPLAY_KNOWN = 1u << 6, VIDEO_DIAG_DISPLAY_AWAKE = 1u << 7 };
+#ifndef VIDEO_DIAG_DISPLAY_STATE
+/* The donor UI state distinguishes sleep (0) from the awake dashboard (1).
+ * Keep the shared address read out of line to avoid ROPI MOVW/MOVT fixups. */
+__attribute__((noinline)) static uint32_t video_diag_display_state(void) {
+    return *(const volatile uint8_t *)0x20077298U;
+}
+#define VIDEO_DIAG_DISPLAY_STATE video_diag_display_state
+#endif
+
 static void video_diag_write32(uint8_t *p, uint32_t value) {
     for (uint32_t i = 0; i < 4; ++i) p[i] = value >> (8 * i);
 }
@@ -34,6 +44,7 @@ int video_diagnostics_snapshot(uint8_t out[VIDEO_DIAGNOSTICS_BYTES]) {
     video_diag_write32(out + 4, VIDEO_TICK);
     customCfwContext *ctx = peekCustomCfwContext();
     video_diag_write32(out + 8, ctx ? __atomic_load_n(&ctx->video.generation, __ATOMIC_ACQUIRE) : 0);
+    uint32_t display_before = VIDEO_DIAG_DISPLAY_STATE();
     const uint32_t heaps[3] = {VIDEO_HEAP_CACHED, VIDEO_HEAP_DISPLAY, VIDEO_HEAP_OTHER};
     for (uint32_t i = 0; i < 3; ++i) {
         video_heap_view view = {UINT32_MAX, UINT32_MAX};
@@ -46,6 +57,11 @@ int video_diagnostics_snapshot(uint8_t out[VIDEO_DIAGNOSTICS_BYTES]) {
         video_diag_write32(out + 20 + i * 12, valid ? view.max_alloc : UINT32_MAX);
         if (valid) out[3] |= 1u << i;
     }
+    uint32_t display_after = VIDEO_DIAG_DISPLAY_STATE();
+    /* Dashboard allocations are retained while awake; mixed-state heap deltas
+     * cannot establish a leak. A transition or unknown UI state is inconclusive. */
+    if (display_before <= 1 && display_before == display_after)
+        out[3] |= VIDEO_DIAG_DISPLAY_KNOWN | (display_before ? VIDEO_DIAG_DISPLAY_AWAKE : 0);
     video_worker_report report = {0};
     if (!video_worker_get_report(&report)) return 0;
     _Static_assert(sizeof(report) == 68, "worker diagnostics wire size");

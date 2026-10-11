@@ -100,10 +100,11 @@ def snapshot(raw):
 def diagnostics(raw):
     """Decode bounded approximate heaps and safe completed/lifetime reports."""
     raw = bytes(raw)
-    if len(raw) != DIAGNOSTICS_BYTES or raw[:2] != bytes([VERSION, DIAGNOSTICS]) or raw[3] & ~63:
+    if len(raw) != DIAGNOSTICS_BYTES or raw[:2] != bytes([VERSION, DIAGNOSTICS]) or raw[3] & 128 and not raw[3] & 64:
         raise ValueError('unsupported diagnostics snapshot')
     result = {'result': raw[2], 'flags': raw[3], 'tick': struct.unpack_from('<I', raw, 4)[0],
-              'generation': struct.unpack_from('<I', raw, 8)[0], 'heaps': {}}
+              'generation': struct.unpack_from('<I', raw, 8)[0], 'heaps': {},
+              'display_state': ('awake' if raw[3] & 128 else 'asleep') if raw[3] & 64 else 'unknown'}
     for index, heap in enumerate((20, 13, 27)):
         tick, free, largest = struct.unpack_from('<III', raw, 12 + index * 12)
         valid = bool(raw[3] & (1 << index))
@@ -124,20 +125,27 @@ def diagnostics(raw):
 def diagnostic_alerts(before, after):
     """Return evidence gaps, persistent heap loss and unsafe stack/guard findings.
 
-    Heap deltas are approximate and require a second quiet sample before they
-    establish a leak; the caller retains both raw snapshots for investigation.
+    Heap deltas require matching known display states and a second quiet sample.
+    Unknown or different states are an evidence gap, never proof of recovery;
+    stack, guard and cleanup checks remain independent of display state.
     """
     alerts = []
+    same_state = before.get('display_state') == after.get('display_state') and \
+        before.get('display_state') in ('awake', 'asleep')
+    if not same_state:
+        alerts.append('heap comparison unavailable: display states differ or are unknown')
     for heap in (20, 13, 27):
         old, new = before['heaps'][heap], after['heaps'][heap]
         if not old['valid'] or not new['valid']:
             alerts.append(f'heap {heap}: invalid snapshot')
-        elif new['free'] < old['free']:
+        elif same_state and new['free'] < old['free']:
             alerts.append(f"heap {heap}: {old['free'] - new['free']} bytes lost; repeat quiet sample")
     worker = after['worker']
     if not worker['valid']:
         alerts.append('completed worker report unavailable')
     else:
+        if worker['storage_left']:
+            alerts.append('worker storage not fully reclaimed')
         if not worker['guards_ok'] or worker['stack_used'] > worker['stack_bytes']:
             alerts.append('worker stack guard/accounting failure')
         elif worker['stack_bytes'] - worker['stack_used'] < 1024:

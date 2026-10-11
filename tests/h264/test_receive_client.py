@@ -33,7 +33,7 @@ def status_bytes(stream=0, state=0, capacity=0, accepted=0, error=0):
 
 def diagnostic_bytes():
     raw = bytearray(128)
-    raw[:4] = bytes([1, DIAGNOSTICS, 0, 23])
+    raw[:4] = bytes([1, DIAGNOSTICS, 0, 23 | 64 | 128])
     for index in range(3):
         struct.pack_into('<III', raw, 12 + index * 12, 500, 200000, 180000)
     struct.pack_into('<17I', raw, 48, 1, 4, 0, 0, 198000, 0, 144, 8, 7000, 16384, 1,
@@ -211,6 +211,24 @@ class ReceiveClientTests(unittest.TestCase):
         self.assertTrue(any('10000 bytes lost' in row for row in alerts))
         self.assertIn('worker stack guard/accounting failure', alerts)
         self.assertIn('pool-task stack spare below 512 bytes', alerts)
+
+    def test_heap_comparison_requires_matching_display_state_but_keeps_leak_checks(self):
+        awake = diagnostics(diagnostic_bytes())
+        raw = bytearray(diagnostic_bytes()); raw[3] &= ~128
+        asleep = diagnostics(raw)
+        struct.pack_into('<I', raw, 40, 161492)
+        struct.pack_into('<I', raw, 44, 150000)
+        struct.pack_into('<I', raw, 120, 3900)
+        changed = diagnostics(raw)
+        alerts = diagnostic_alerts(awake, changed)
+        self.assertTrue(any('comparison unavailable' in row for row in alerts))
+        self.assertFalse(any('bytes lost' in row for row in alerts))
+        self.assertIn('pool-task stack spare below 512 bytes', alerts)
+        self.assertTrue(any('38508 bytes lost' in row for row in diagnostic_alerts(asleep, changed)))
+        raw[3] &= ~192
+        unknown = diagnostics(raw)
+        self.assertEqual(unknown['display_state'], 'unknown')
+        self.assertTrue(any('comparison unavailable' in row for row in diagnostic_alerts(unknown, unknown)))
 
     def test_request_reservation_survives_restart_and_refuses_wrap(self):
         with tempfile.TemporaryDirectory() as directory:

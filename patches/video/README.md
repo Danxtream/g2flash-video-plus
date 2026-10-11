@@ -436,7 +436,12 @@ Diagnostics do not require a decoder owner or verification/playback mode.
 Bytes 0..3 are protocol version, opcode, control result and validity flags:
 bits 0..2 validate live cached/display/other heaps, bit 3 marks quarantine,
 bit 4 validates the pool-task stack, and bit 5 marks a lifecycle change during
-capture. LE32 tick/generation occupy 4/8. Three 12-byte heap records at 12 hold
+capture. Bit 6 means the local display/UI state was known and unchanged across
+heap sampling; bit 7 means awake (otherwise asleep). Bit 7 requires bit 6.
+A transition or other UI state leaves both clear, as do older firmware images.
+Heap comparisons require matching known display states: the awake dashboard
+retains memory that is released on sleep. Unknown state is an evidence gap,
+not a leak or proof of recovery. LE32 tick/generation occupy 4/8. Three 12-byte heap records at 12 hold
 tick, free bytes and largest allocation; an invalid heap uses UINT32_MAX.
 These bounded, lock-free TLSF views are approximate, not one atomic snapshot.
 Repeat quiet post-cleanup reads before interpreting a free-byte loss as a leak.

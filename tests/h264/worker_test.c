@@ -124,6 +124,9 @@ static int stack_sample(uint32_t *task, uint32_t *used, uint32_t *bytes) {
     *task = 3; *used = controller_used; *bytes = 4096; return 1;
 }
 #define VIDEO_PLATFORM_STACK_SAMPLE stack_sample
+static uint32_t diagnostic_display_state = 1;
+static uint32_t diagnostic_display(void) { return diagnostic_display_state; }
+#define VIDEO_DIAG_DISPLAY_STATE diagnostic_display
 static int pool_dispatch(const video_pool_item *item) {
     assert(!pthread_mutex_lock(&pool_mutex));
     ++pool_calls;
@@ -932,6 +935,7 @@ static void evict_diagnostics(void) {
         assert(!video_control_received(request, 8, &control_route));
     }
 }
+static void sleep_during_heap_sample(void) { diagnostic_display_state = 0; }
 static void diagnostics(void) {
     configure(); request_next = 0;
     for (uint32_t i = 0; i < VIDEO_POOL_TASKS; ++i) {
@@ -963,8 +967,16 @@ static void diagnostics(void) {
         frozen[i] = control_reply[8];
     }
     assert(frozen[0] == 1 && frozen[1] == VIDEO_CONTROL_DIAGNOSTICS && !frozen[2] &&
-           frozen[3] == 7 && video_read32(frozen + 16) == views[0].free_bytes &&
+           frozen[3] == (7 | 64 | 128) && video_read32(frozen + 16) == views[0].free_bytes &&
            !video_read32(frozen + 124));
+    uint8_t state_sample[VIDEO_DIAGNOSTICS_BYTES];
+    diagnostic_display_state = 0;
+    assert(video_diagnostics_snapshot(state_sample) && (state_sample[3] & 192) == 64);
+    diagnostic_display_state = 2;
+    assert(video_diagnostics_snapshot(state_sample) && !(state_sample[3] & 192));
+    diagnostic_display_state = 1; heap_sample_hook = sleep_during_heap_sample;
+    assert(video_diagnostics_snapshot(state_sample) && !(state_sample[3] & 192));
+    heap_sample_hook = 0; diagnostic_display_state = 1;
     views[0].free_bytes = views[0].max_alloc = 99999;
     assert(!video_control_received(request, 8, &control_route));
     page[8] = 16; assert(!video_control_received(page, sizeof(page), &control_route));
