@@ -26,7 +26,7 @@ static int video_control_wait(customCfwContext *ctx, uint32_t timeout) {
 static void video_control_give(customCfwContext *ctx) { (void)ctx; assert(locks); locks = 0; }
 void video_control_cancel_locked(void) { assert(locks); ++cancels; contexts[here].video_control.start_guard = 0; }
 int video_controller_request_locked(uint32_t reasons) {
-    assert(reasons == VIDEO_CONTROLLER_POWER); ++schedules; return 1;
+    assert(reasons == VIDEO_CONTROLLER_POWER || reasons == (VIDEO_CONTROLLER_POWER | VIDEO_CONTROLLER_RADIO)); ++schedules; return 1;
 }
 int video_worker_ensure_mutex(void) { assert(!service && !locks); bootstrap = 0; contexts[here].image_mutex = 1; return 1; }
 static void delay(uint32_t milliseconds) {
@@ -39,6 +39,7 @@ static int heap_view(void *argument, uint32_t heap, video_heap_view *view) {
     if (shortage) view->max_alloc = view->free_bytes;
     return 1;
 }
+int video_radio_maintenance(void) { return 0; }
 static uint32_t refresh(uint32_t app, uint32_t event, const void *data, uint32_t size) {
     assert(app == 1 && event == 4 && !data && !size); ++refreshes; return 0x1234;
 }

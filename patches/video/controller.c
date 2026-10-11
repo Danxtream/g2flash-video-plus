@@ -35,7 +35,7 @@ int video_controller_request_locked(uint32_t reasons) {
     customCfwContext *ctx = peekCustomCfwContext();
     if (!ctx || !reasons || reasons & ~(VIDEO_CONTROLLER_START |
         VIDEO_CONTROLLER_STOP | VIDEO_CONTROLLER_REAP | VIDEO_CONTROLLER_LEASE |
-        VIDEO_CONTROLLER_PRESENT | VIDEO_CONTROLLER_POWER)) return 0;
+        VIDEO_CONTROLLER_PRESENT | VIDEO_CONTROLLER_POWER | VIDEO_CONTROLLER_RADIO)) return 0;
     __atomic_fetch_or(&ctx->video_control.controller_reasons, reasons, __ATOMIC_ACQ_REL);
     return video_controller_schedule(ctx);
 }
@@ -72,6 +72,13 @@ void video_control_notify_lease(int released) {
     __atomic_fetch_or(&s->controller_reasons, VIDEO_CONTROLLER_LEASE, __ATOMIC_ACQ_REL);
     if (!video_controller_schedule(ctx))
         video_notify_generation(&s->notify_failed_generation, generation);
+}
+
+void video_control_notify_radio(void) {
+    customCfwContext *ctx = peekCustomCfwContext();
+    if (!ctx) return;
+    __atomic_fetch_or(&ctx->video_control.controller_reasons, VIDEO_CONTROLLER_RADIO, __ATOMIC_ACQ_REL);
+    video_controller_schedule(ctx);
 }
 
 void video_controller_parked(uint32_t token) {
@@ -111,6 +118,11 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
         }
         uint32_t reasons = __atomic_exchange_n(&s->controller_reasons, 0, __ATOMIC_ACQ_REL);
         uint32_t guard = s->start_guard;
+        if (guard && video_radio_generation_lost(guard)) {
+            video_control_cancel_locked();
+            reasons = (reasons & ~VIDEO_CONTROLLER_START) | VIDEO_CONTROLLER_STOP;
+            guard = 0;
+        }
         uint32_t release = __atomic_exchange_n(&s->notify_release_generation, 0, __ATOMIC_ACQ_REL);
         uint32_t renewal = __atomic_exchange_n(&s->notify_lease_generation, 0, __ATOMIC_ACQ_REL);
         if (release && release == s->control_generation && guard) {
@@ -162,6 +174,7 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
         /* Copy completions also maintain the lease during playback, when
          * ordinary UI input may postpone its periodic refresh callback. */
         video_power_step();
+        video_radio_step();
         if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) {
             __atomic_store_n(&s->controller_failed, 1, __ATOMIC_RELEASE);
             __atomic_store_n(&s->controller_reasons, 0, __ATOMIC_RELEASE);

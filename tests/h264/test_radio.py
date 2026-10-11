@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class RadioTests(unittest.TestCase):
-    def check_native(self, platform=False):
+    def check_native(self, platform=False, lifecycle=False):
         with tempfile.TemporaryDirectory() as temporary:
             executable = Path(temporary) / "radio-test"
             subprocess.run([
@@ -19,13 +19,16 @@ class RadioTests(unittest.TestCase):
                 "-Wno-unused-function", "-Wno-unused-variable", "-Wno-unknown-pragmas",
                 "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-D_GNU_SOURCE",
                 *(["-DVIDEO_RADIO_PLATFORM_TEST"] if platform else []),
-                str(ROOT / "tests/h264/radio_test.c"), "-o", str(executable)
+                str(ROOT / ("tests/h264/radio_lifecycle_test.c" if lifecycle else "tests/h264/radio_test.c")), "-o", str(executable)
             ], check=True)
             subprocess.run([str(executable)], check=True, timeout=30)
 
 
     def test_epochs_fixed_mailboxes_refusals_and_stock_callback_chaining(self):
         self.check_native()
+
+    def test_finite_owners_original_pair_restore_and_uncertain_completion(self):
+        self.check_native(lifecycle=True)
 
     def test_fixed_pool_classes_spares_and_command_credit_guards(self):
         self.check_native(True)

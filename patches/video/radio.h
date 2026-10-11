@@ -3,6 +3,15 @@
 #include <stdint.h>
 
 enum {
+    VIDEO_RADIO_OWNERS = 2,
+    VIDEO_RADIO_ACQUIRE_MS = 2000,
+    VIDEO_RADIO_RESTORE_MS = 6500,
+    VIDEO_RADIO_RETRY_MS = 10,
+    VIDEO_RADIO_RESTORE_ATTEMPTS = 3,
+    VIDEO_RADIO_OBSERVED = 0, VIDEO_RADIO_CAPTURE, VIDEO_RADIO_SELECT,
+    VIDEO_RADIO_ACTIVE, VIDEO_RADIO_FALLBACK, VIDEO_RADIO_RESTORE_WAIT,
+    VIDEO_RADIO_RESTORE_SET, VIDEO_RADIO_RESTORE_READ, VIDEO_RADIO_RESTORED,
+    VIDEO_RADIO_UNCERTAIN,
     VIDEO_RADIO_LINKS = 3, /* Donor DM connection-control blocks. */
     VIDEO_RADIO_PHY_1M = 1,
     VIDEO_RADIO_PHY_2M = 2,
@@ -34,12 +43,21 @@ typedef struct {
     uint8_t connected, bound, tx, rx, valid, status;
     video_radio_sample before, after;
     uint8_t phase, owners, changed, uncertain;
+    uint32_t deadline, retry_tick, restore_serial;
+    uint8_t attempts;
 } video_radio_link;
+
+typedef struct {
+    uint32_t generation, epoch;
+    uint8_t connection, changing, reserved[2];
+} video_radio_owner;
 
 /* One queued command is enough for bounded observation and restoration. The
  * context survives disconnects; copied messages carry both epoch and serial. */
 typedef struct {
     video_radio_link links[VIDEO_RADIO_LINKS];
+    video_radio_owner owners[VIDEO_RADIO_OWNERS];
+    uint32_t permission_serial;
     uint32_t serial, completed, epoch;
     uint32_t permission;
     uint8_t connection, operation, tx, rx;
@@ -61,3 +79,14 @@ int video_radio_request(uint8_t connection, uint32_t epoch, uint8_t operation,
 /* Freeze a bounded PHY-only DIAGNOSTICS selection, then request at most one
  * observational refresh. Unknown values remain explicit; this never SETs PHY. */
 int video_radio_snapshot(uint8_t out[VIDEO_RADIO_REPORT_BYTES]);
+
+/* Controller task only, outside image/display locks. Capture a fresh standard
+ * read before granting finite SET permission; Off issues no PHY request. */
+int video_radio_acquire(uint32_t generation, int off);
+/* Retire a generation without waiting. Last-owner restoration is serviced
+ * asynchronously; lost completion leaves explicit quarantine, not success. */
+void video_radio_release(uint32_t generation);
+void video_radio_step(void);
+/* Bounded fixed-state reads, also safe from notification contexts. */
+int video_radio_generation_lost(uint32_t generation);
+int video_radio_maintenance(void);

@@ -554,3 +554,20 @@ The tail reports command serial/completion at 108/112, pending/result/link at
 116..118, and its epoch at 120. Remaining bytes are zero. All pages and exact
 replays freeze one capture; only a new selection may post one bounded READ.
 This report never changes the PHY or enlarges normal STATUS traffic.
+
+PHY ownership uses two fixed generation records; it does not allocate a task,
+timer or heap buffer. A changing owner first obtains a fresh standard Read PHY
+completion for its exact EUS-bound peripheral epoch. Compatible owners share
+that original TX/RX pair, and the last one restores it. Already-2M links need
+no Set PHY, including on exit. Off grants no changing permission and issues
+no PHY request. A UART-only recipient does not invent a host connection.
+
+Acquisition is bounded to two seconds outside image/display locks. Release is
+asynchronous: stock completion and existing controller maintenance drive up to
+three restoration submissions within 6.5 seconds. An accepted Set PHY is never
+assumed drained because its timeout expired. Lost or unconfirmed restoration
+is explicit in diagnostics and blocks new changing owners until disconnect.
+An Off owner may still play without changing it. Callback paths only copy
+fixed state and post a zero-timeout controller reason. Disconnect retires the
+epoch and cancels its video generation in task context, never in the callback.
+The playback START contract does not call this lifecycle yet.

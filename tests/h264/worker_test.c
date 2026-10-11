@@ -264,6 +264,10 @@ static g2_h264_result worker_decode(void *, const uint8_t *, uint32_t);
 #include "../../patches/video/pack.c"
 #include "../../patches/video/present.c"
 #include "../../patches/video/evidence.c"
+static uint32_t radio_lost;
+int video_radio_generation_lost(uint32_t generation) { return radio_lost == generation; }
+void video_radio_step(void) { assert(!image_depth && !service_context); }
+int video_radio_maintenance(void) { return 0; }
 #include "../../patches/video/power.c"
 #include "../../patches/video/controller.c"
 #include "../../patches/video/diagnostics.c"
@@ -436,7 +440,7 @@ static void configure(void) {
     assert(!display_job && !display_gate && !owned_shadow);
     fail_gate = fail_queue = missing_fb = fail_shadow = copied_frames = overlay_calls = flush_calls = stock_copies = 0;
     handoff_queues = handoff_hold = fail_handoff = 0;
-    power_awake = 1; power_starts = 0;
+    power_awake = 1; power_starts = 0; radio_lost = 0;
     assert(!allocations_live && !task_live);
     memset(&context, 0, sizeof(context)); context.image_mutex = 1;
     context.direct_lease_deadline = tick() + 60000;
@@ -1924,6 +1928,23 @@ static void lease_notifications(void) {
     puts("service-only atomic signals, old-generation refusal and actual FB lease release/expiry PASS");
 }
 
+static void radio_disconnect(void) {
+    configure(); request_next = 0;
+    uint8_t request[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
+    control_command(request, VIDEO_CONTROL_START, 1);
+    assert(control_snapshot(request, 24, report) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); await_ready();
+    uint32_t generation = context.video_control.control_generation;
+    radio_lost = generation + 1; video_control_notify_radio(); pool_drain();
+    assert(state() == VIDEO_READY);
+    radio_lost = generation;
+    uint32_t frees = release_calls, stopped = terminates;
+    service_context = 1; video_control_notify_radio(); service_context = 0;
+    assert(release_calls == frees && terminates == stopped && state() == VIDEO_READY);
+    pool_drain(); finish();
+    assert(!context.video_control.start_guard);
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (!strcmp(argv[1], "normal")) normal();
@@ -1952,6 +1973,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "cleanup")) cleanup();
     else if (!strcmp(argv[1], "lease-notifications")) lease_notifications();
     else if (!strcmp(argv[1], "handback")) handback();
+    else if (!strcmp(argv[1], "radio-disconnect")) radio_disconnect();
     else assert(0);
     assert(!allocations_live && !task_live && !image_depth);
     printf("worker %s PASS\n", argv[1]);

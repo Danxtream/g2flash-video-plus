@@ -48,6 +48,7 @@
 #include "video/pack.c"
 #include "video/decode_timing.c"
 #include "video/worker.c"
+#include "video/radio_lifecycle.c"
 #include "video/present.c"
 #include "video/evidence.c"
 #include "video/power.c"

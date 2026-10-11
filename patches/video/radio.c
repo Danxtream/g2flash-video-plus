@@ -99,8 +99,13 @@ void video_radio_bind(uint8_t id) {
     VIDEO_RADIO_UNLOCK();
 }
 
+#ifndef VIDEO_RADIO_NOTIFY
+#define VIDEO_RADIO_NOTIFY video_control_notify_radio
+#endif
+
 void video_radio_dm_event(void *event) {
     const uint8_t *data = event;
+    int notify = 0;
     customCfwContext *ctx = VIDEO_RADIO_CONTEXT();
     if (ctx && data) {
         uint16_t id = video_radio_u16(data);
@@ -131,10 +136,14 @@ void video_radio_dm_event(void *event) {
                     s->completed = s->serial; s->pending = 0;
                 }
             }
+            notify = link->owners || link->permission || link->uncertain;
+            for (uint32_t i = 0; i < VIDEO_RADIO_OWNERS; ++i)
+                if (s->owners[i].connection == id) notify = 1;
             VIDEO_RADIO_UNLOCK();
         }
     }
     VIDEO_RADIO_STOCK_DM(event);
+    if (notify) VIDEO_RADIO_NOTIFY();
 }
 
 int video_radio_request(uint8_t id, uint32_t epoch, uint8_t operation,

@@ -50,6 +50,7 @@ enum {
     VIDEO_CONTROLLER_LEASE = 8,
     VIDEO_CONTROLLER_PRESENT = 16,
     VIDEO_CONTROLLER_POWER = 32,
+    VIDEO_CONTROLLER_RADIO = 64,
     VIDEO_CONTROL_ACCEPTED = 0,
     VIDEO_CONTROL_FORMAT,
     VIDEO_CONTROL_STALE,
@@ -122,3 +123,6 @@ void video_controller_stack_sample(void);
 /* Capture approximate live heaps and safely completed worker/stack reports
  * outside display/image locks into one bounded, versioned response. */
 int video_diagnostics_snapshot(uint8_t out[VIDEO_DIAGNOSTICS_BYTES]);
+
+/* Copy only a reason and post a zero-timeout pool job; no lock/heap waits. */
+void video_control_notify_radio(void);

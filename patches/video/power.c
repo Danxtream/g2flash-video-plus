@@ -334,10 +334,11 @@ uint32_t video_ui_refresh(uint32_t app, uint32_t event, const void *data, uint32
         video_power_state *p = &ctx->video_power;
         uint32_t now = VIDEO_TICK, last = __atomic_load_n(&p->signal_tick, __ATOMIC_ACQUIRE);
         if ((__atomic_load_n(&p->acquired, __ATOMIC_ACQUIRE) ||
-             video_power_live(__atomic_load_n(&p->peer.deadline, __ATOMIC_ACQUIRE))) &&
+             video_power_live(__atomic_load_n(&p->peer.deadline, __ATOMIC_ACQUIRE)) ||
+             video_radio_maintenance()) &&
             (uint32_t)(now - last) >= VIDEO_POWER_RENEW_MS &&
             __atomic_compare_exchange_n(&p->signal_tick, &last, now, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-            video_controller_request_locked(VIDEO_CONTROLLER_POWER);
+            video_controller_request_locked(VIDEO_CONTROLLER_POWER | VIDEO_CONTROLLER_RADIO);
     }
     return result;
 }

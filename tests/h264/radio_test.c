@@ -33,6 +33,9 @@ static void command_send(uint8_t *p) { assert(!depth && p == packet); ++reads; }
 static void set_phy(uint8_t id, uint8_t all, uint8_t tx, uint8_t rx, uint16_t options) {
     assert(!depth && id == 1 && !all && tx && rx && !options); ++sets;
 }
+static unsigned radio_notifications;
+static void radio_notify(void) { assert(!depth); ++radio_notifications; }
+#define VIDEO_RADIO_NOTIFY radio_notify
 #define VIDEO_RADIO_HERE() 1
 #define VIDEO_RADIO_CONTEXT mock_context
 #define VIDEO_RADIO_TICK tick
