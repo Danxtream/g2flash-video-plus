@@ -579,3 +579,30 @@ allocated while independent fixed-state radio restoration is attempted.
 Unconfirmed acquisition reports control error 18. STOP may reach IDLE before
 asynchronous restoration finishes; inspect the PHY diagnostics after it.
 Boot and non-video traffic do not request a PHY.
+
+The supplied-link PC client selects `radio="off"` or `radio="video"` on START;
+Video-only is the default. `stream_clip` checks the Off capability on every
+target before sending it. `phy()` reads the source-tagged PHY selection for
+one lens, forwarded paired delivery or two independent host links. No PC
+function exposes a raw controller command or changes the UART bridge.
+
+Capture PHY before START, at READY, after input drains and after STOP.
+The optional `on_finished` callback runs after the playback interval is
+recorded and before STOP, keeping observational paging out of timed input.
+Compare matching connection epochs, actual TX/RX and confirmed restoration
+of the saved pair. Classify symmetric 1M and 2M separately; Off can already
+be 2M. Exclude unknown, asymmetric/coded, fallback, changed-epoch or uncertain
+restoration evidence. Sparse snapshots do not prove uninterrupted RF state.
+
+For hardware comparisons, alternate Off and Video-only with the same clip,
+MTU, pacing, distance and radio environment: one warm-up and at least three
+repetitions on each lens, both forwarded ingress choices and both direct.
+First verify a short clip's Y CRCs, then use evidence-off playback and a
+parser-checked filler/SEI workload to separate transport from decode time.
+Count consumed NAL payload bytes and the fenced input interval independently
+of completed pictures. Retain credits/refusals, command/page round trips,
+device-copy FPS and per-lens aggregate decode timing. The peer path is UART;
+only indirect input/scheduling effects of host PHY can change its throughput.
+Check stock hand-back, same-state heaps, stacks and restoration after every
+exit. RF range, battery behavior and optical presentation sync need their
+own device evidence; a successful boot does not establish them.

@@ -93,8 +93,10 @@ class PlaybackWire(MockTransport):
                         else:
                             self.acked = ordinal; self.replays[request] = head
                     else:
-                        self.replays[request] = diagnostic_bytes() if op == 7 else status_bytes(
-                            self.state, self.stream, options=self.options, extended=op == STATUS)
+                        raw = bytearray(diagnostic_bytes() if op == 7 else status_bytes(
+                            self.state, self.stream, options=self.options, extended=op == STATUS))
+                        if op != 7: raw[71] = 131
+                        self.replays[request] = bytes(raw)
         super().write(*args)
         if self.lose_once and op is not None and (self.lose_op is None or op == self.lose_op):
             self.lose_once = False

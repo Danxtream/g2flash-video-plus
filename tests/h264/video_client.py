@@ -8,6 +8,7 @@ import struct
 import time
 
 from video_link import VideoLink, ACK_WINDOW, sources
+from phy_client import PHY_DIAGNOSTICS, phy_report
 from receive_client import (control, diagnostics, diagnostic_alerts,
                             MESSAGE, VERSION, START, STOP, STATUS, CAPABILITIES,
                             DIAGNOSTICS, PAGE, nal)
@@ -188,7 +189,9 @@ class VideoClient(VideoLink):
             raise ValueError('use source-tagged replies for paired commands')
         return next(iter(self.raw_replies(payload, length).values()))
 
-    def command(self, op, stream=0, *, native=False, verify=False, token=0, ordinal=0, lens=None):
+    def command(self, op, stream=0, *, native=False, verify=False, radio="video", token=0, ordinal=0, lens=None):
+        if radio not in ("off", "video"):
+            raise ValueError("radio mode must be off or video")
         request = self.counter.reserve()
         if op in (FRAME_READ, FRAME_ACK):
             target = self.targets if lens is None else lens
@@ -205,7 +208,7 @@ class VideoClient(VideoLink):
             return dict(result=raw[2], stream=astream, token=atoken, acked=cursor)
         payload = bytearray(control(op, request, stream))
         if op == START:
-            payload[18] = (NATIVE if native else 0) | (VERIFY_FRAMES if verify else 0)
+            payload[18] = (NATIVE if native else 0) | (VERIFY_FRAMES if verify else 0) | (RADIO_OFF if radio == "off" else 0)
         return paired_report({source: status(raw) for source, raw in
                               self.raw_replies(payload, STATUS_BYTES if op == STATUS else BASE_STATUS_BYTES).items()})
 
@@ -217,6 +220,15 @@ class VideoClient(VideoLink):
         reports = {lens: credit_snapshot(raw) for lens, raw in
                    self.raw_replies(payload, 6, result_offset=5).items()}
         return paired_report(reports)
+
+    def phy(self):
+        """Read frozen per-lens PHY evidence; never request a radio setting."""
+        request = self.counter.reserve()
+        payload = control(DIAGNOSTICS, request) + struct.pack('<I', PHY_DIAGNOSTICS)
+        replies = {lens: phy_report(raw) for lens, raw in self.raw_replies(payload, 128).items()}
+        if any(lens != row['lens'] for lens, row in replies.items()):
+            raise ValueError('PHY report source differs from its lens identity')
+        return next(iter(replies.values())) if len(replies) == 1 else dict(by_lens=replies)
 
     def diagnostic(self):
         request = self.counter.reserve()
@@ -249,6 +261,10 @@ class DirectPairClient:
         results = {side: client.send_window(payloads) for side, client in self.clients.items()}
         return [{side: results[side][index][side] for side in self.clients}
                 for index in range(len(payloads))]
+
+    def phy(self):
+        """Keep independent host-link epochs and samples for both lenses."""
+        return dict(by_lens={side: client.phy() for side, client in self.clients.items()})
 
     def diagnostic(self):
         return dict(by_lens={side: client.diagnostic() for side, client in self.clients.items()})
@@ -302,14 +318,16 @@ def presentation_rate(samples):
                 reason='observed copy intervals; excludes startup and reply delay')
 
 
-def stream_clip(client, nals, reference, *, verify=True, native=False, progress=lambda text: None,
-                renew=lambda: None, on_ready=lambda state: None, pace_fps=0, timeout=600,
+def stream_clip(client, nals, reference, *, verify=True, native=False, radio="video", progress=lambda text: None,
+                renew=lambda: None, on_ready=lambda state: None, on_finished=lambda state: None, pace_fps=0, timeout=600,
                 clock=time.monotonic, sleep=time.sleep):
     """Use owner-bound credit windows; a reconnect or refusal voids the run.
 
     Full status is read at startup, infrequently during input, and at EOF. Frame
     verification is optional and independent of receive credit acknowledgements.
     """
+    if radio not in ('off', 'video'):
+        raise ValueError('radio mode must be off or video')
     if (len(nals) != reference['nal_count'] or list(map(len, nals)) != reference['nal_sizes'] or
             reference['frame_count'] != len(reference['frames']) or not reference['frame_count'] or
             any(not data or len(data) > 4086 for data in nals)):
@@ -320,10 +338,12 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, progress=
     if any(r['state'] != 0 or r['result'] or not r.get('compact_credits')
            for r in per_lens(capabilities).values()):
         raise ValueError('playback requires idle owners with compact credits')
+    if radio == 'off' and any(not r.get('radio_supported') for r in per_lens(capabilities).values()):
+        raise ValueError('radio Off is not advertised by every targeted lens')
     stream = capabilities['stream_high'] + 1
     deadline = clock() + timeout
     try:
-        state = client.command(START, stream, native=native, verify=verify)
+        state = client.command(START, stream, native=native, verify=verify, radio=radio)
         if state['result']:
             raise ValueError(f'START refused: {state["result"]}')
         while state['state'] != 2:
@@ -426,6 +446,7 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, progress=
         if verify and any(r['acked'] != reference['frame_count'] or r['result_high'] != reference['frame_count']
                           for r in per_lens(final).values()):
             raise ValueError('EOF did not drain every recipient result')
+        on_finished(final)
         stopped = client.command(STOP, stream)
         if stopped['result']:
             raise RuntimeError('STOP refused')
