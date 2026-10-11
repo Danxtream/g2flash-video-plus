@@ -163,6 +163,15 @@ class FirmwareInclusionTests(unittest.TestCase):
                     ValueError, "video radio stock ABI mismatch"):
                 firmware.validate_video_radio_stock(bytes(damaged))
 
+    def test_empty_pool_fallback_branch_and_descriptor_stride_are_guarded(self):
+        firmware.validate_video_radio_stock(self.base)
+        for address in (0x546868, 0x54686a, 0x546882, 0x546886, 0x541824, 0x55101c, 0x4c687c):
+            damaged = bytearray(self.base)
+            damaged[firmware.g2f(address)] ^= 1
+            with self.subTest(address=hex(address)), self.assertRaisesRegex(
+                    ValueError, "video radio stock ABI mismatch"):
+                firmware.validate_video_radio_stock(bytes(damaged))
+
     def test_stock_byte_and_tlsf_tail_guards_remain_active(self):
         damaged = bytearray(self.base)
         site, old = firmware.MESSAGE_RX_BL_SITE

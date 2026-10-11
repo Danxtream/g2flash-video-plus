@@ -8,7 +8,7 @@ import struct
 import time
 
 from video_link import VideoLink, ACK_WINDOW, sources
-from phy_client import PHY_DIAGNOSTICS, phy_report
+from phy_client import PHY_DIAGNOSTICS, RADIO_REFUSAL_DIAGNOSTICS, phy_report, radio_refusal_report
 from receive_client import (control, diagnostics, diagnostic_alerts,
                             MESSAGE, VERSION, START, STOP, STATUS, CAPABILITIES,
                             DIAGNOSTICS, PAGE, nal)
@@ -230,6 +230,15 @@ class VideoClient(VideoLink):
             raise ValueError('PHY report source differs from its lens identity')
         return next(iter(replies.values())) if len(replies) == 1 else dict(by_lens=replies)
 
+    def radio_diagnostics(self):
+        """Read retained submission/refusal evidence only; never refresh PHY."""
+        request = self.counter.reserve()
+        payload = control(DIAGNOSTICS, request) + struct.pack('<I', RADIO_REFUSAL_DIAGNOSTICS)
+        replies = {lens: radio_refusal_report(raw) for lens, raw in self.raw_replies(payload, 128).items()}
+        if any(lens != row['lens'] for lens, row in replies.items()):
+            raise ValueError('radio refusal source differs from its lens identity')
+        return next(iter(replies.values())) if len(replies) == 1 else dict(by_lens=replies)
+
     def diagnostic(self):
         request = self.counter.reserve()
         replies = {lens: diagnostics(raw) for lens, raw in
@@ -265,6 +274,10 @@ class DirectPairClient:
     def phy(self):
         """Keep independent host-link epochs and samples for both lenses."""
         return dict(by_lens={side: client.phy() for side, client in self.clients.items()})
+
+    def radio_diagnostics(self):
+        """Keep each lens's refusal and pool evidence separate."""
+        return dict(by_lens={side: client.radio_diagnostics() for side, client in self.clients.items()})
 
     def diagnostic(self):
         return dict(by_lens={side: client.diagnostic() for side, client in self.clients.items()})

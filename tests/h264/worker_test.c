@@ -290,6 +290,15 @@ static int worker_radio_snapshot(uint8_t *out) {
     out[10] = VIDEO_RADIO_LINKS; return 1;
 }
 #define VIDEO_RADIO_SNAPSHOT worker_radio_snapshot
+static unsigned refusal_samples;
+static int worker_radio_refusal_snapshot(uint8_t *out) {
+    ++refusal_samples;
+    assert(!image_depth); memset(out, 0, VIDEO_RADIO_REPORT_BYTES);
+    out[0] = 1; out[1] = 7; out[3] = VIDEO_RADIO_REFUSAL_DIAGNOSTICS;
+    out[8] = 1; out[9] = VIDEO_RADIO_TRACE_BYTES; out[10] = 2;
+    return 1;
+}
+#define VIDEO_RADIO_REFUSAL_SNAPSHOT worker_radio_refusal_snapshot
 #include "../../patches/video/control.c"
 static uint32_t test_crc(const g2_h264_frame_info *frame) {
     __atomic_fetch_add(&crc_calls, 1, __ATOMIC_RELAXED); return video_frame_crc(frame);
@@ -1036,6 +1045,13 @@ static void diagnostics(void) {
            frozen[9] == VIDEO_RADIO_RECORD_BYTES && frozen[10] == VIDEO_RADIO_LINKS);
     assert(!video_control_received(request, 12, &control_route) && radio_samples == 1);
     request[8] = 2; assert(video_control_received(request, 12, &control_route) == -1);
+    control_command(request, VIDEO_CONTROL_DIAGNOSTICS, 0); request[8] = VIDEO_RADIO_REFUSAL_DIAGNOSTICS;
+    refusal_samples = 0;
+    assert(!control_response(request, 12, frozen, sizeof(frozen)));
+    assert(frozen[3] == 2 && frozen[9] == 32 && frozen[10] == 2 && refusal_samples == 1);
+    assert(!video_control_received(request, 12, &control_route) && refusal_samples == 1);
+    control_command(request, VIDEO_CONTROL_DIAGNOSTICS, 0); request[8] = 3;
+    assert(video_control_received(request, 12, &control_route) == -1);
     assert(radio_samples == 1 && !allocation_calls && !creates && !image_depth);
     puts("bounded stack scan, live invalid heaps, frozen MTU23 and concurrent replay eviction PASS");
 }

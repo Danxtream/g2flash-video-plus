@@ -5,7 +5,7 @@ SPDX-License-Identifier: GPL-3.0-only
 import struct
 import unittest
 
-from phy_client import phy_report, classify_phy
+from phy_client import phy_report, classify_phy, radio_refusal_report
 from receive_client import DIAGNOSTICS
 from test_receive_client import Counter, MockTransport
 from test_video_client import PlaybackWire, FakePlayback, FakeClock, synthetic_reference
@@ -22,6 +22,18 @@ def phy_bytes(lens=1, original=(1, 1), current=(2, 2), after=(1, 1), phase=3):
     raw[13:16] = bytes((31, phase, 0))
     struct.pack_into('<4I', raw, 16, 7, 90, 80, 95)
     raw[32:38] = bytes((*original, *current, *after))
+    return raw
+
+
+def refusal_bytes(lens=1, reason=10, first_free=0, selected_free=3):
+    raw = bytearray(128)
+    raw[:4] = bytes((1, 7, 0, 2)); raw[8:16] = bytes((1, 32, 2, lens, 1, 3, 1, 0))
+    struct.pack_into('<I', raw, 16, 7)
+    for offset in (40, 72):
+        struct.pack_into('<3I', raw, offset, 7, 90, 3)
+        raw[offset + 12:offset + 16] = bytes((1, 1, 1, reason))
+        struct.pack_into('<HBB', raw, offset + 16, 28, 1, 0)
+        struct.pack_into('<BBHBBH', raw, offset + 20, 1, first_free, 32, 2, selected_free, 64)
     return raw
 
 
@@ -45,11 +57,66 @@ class PhyWire(MockTransport):
             if payload[1] == DIAGNOSTICS:
                 self.requests.append(bytes(payload))
                 request = struct.unpack_from('<I', payload, 4)[0]
-                self.replays.setdefault(request, bytes(phy_bytes(lens=self.lens)))
+                kind = struct.unpack_from('<I', payload, 8)[0]
+                response = refusal_bytes(lens=self.lens) if kind == 2 else phy_bytes(lens=self.lens)
+                self.replays.setdefault(request, bytes(response))
         super().write(*args)
 
 
 class PhyClientTests(unittest.TestCase):
+    def test_refusal_pool_counts_and_allocator_null_are_distinct_without_a_serial(self):
+        for reason, name, selected_free in ((10, 'pool-reserve', 3), (11, 'mail-allocation-null', 4)):
+            row = radio_refusal_report(refusal_bytes(reason=reason, selected_free=selected_free))
+            self.assertEqual(row['serial'], 0)
+            self.assertEqual(row['last_refusal']['reason_name'], name)
+            self.assertEqual(row['last_refusal']['first']['free'], 0)
+            self.assertEqual(row['last_refusal']['selected']['free'], selected_free)
+            self.assertEqual(row['last_refusal']['selected']['capped'], selected_free == 4)
+
+    def test_refusal_context_absence_stale_trace_and_invalid_pool_are_explicit(self):
+        raw = refusal_bytes(); raw[12] = 0; raw[16:104] = bytes(88)
+        self.assertIsNone(radio_refusal_report(raw)['last_refusal'])
+        raw = refusal_bytes(); raw[55] = 0
+        struct.pack_into('<I', raw, 40, 6)
+        row = radio_refusal_report(raw)
+        self.assertEqual(row['last_attempt']['attempt'], 6)
+        self.assertEqual(row['last_refusal']['attempt'], 7)
+        raw = refusal_bytes(reason=7, selected_free=255)
+        self.assertIsNone(radio_refusal_report(raw)['last_refusal']['selected']['free'])
+
+    def test_refusal_version_length_reserved_counts_and_identity_bounds(self):
+        raw = refusal_bytes()
+        for offset, value in ((0, 2), (3, 1), (8, 2), (9, 31), (10, 3), (11, 3),
+                              (12, 2), (13, 2), (14, 0), (15, 1), (32, 3), (33, 3),
+                              (34, 4), (35, 3), (36, 1), (54, 3), (55, 15), (58, 17),
+                              (59, 1), (60, 16), (61, 5), (68, 1), (87, 0), (127, 1)):
+            broken = raw.copy(); broken[offset] = value
+            with self.subTest(offset=offset), self.assertRaises(ValueError): radio_refusal_report(broken)
+        for broken in (raw[:-1], raw + b'\0'):
+            with self.assertRaises(ValueError): radio_refusal_report(broken)
+        broken = raw.copy(); struct.pack_into('<I', broken, 40, 8)
+        with self.assertRaises(ValueError): radio_refusal_report(broken)
+        broken = raw.copy(); broken[60] = 255
+        with self.assertRaises(ValueError): radio_refusal_report(broken)
+
+    def test_explicit_refusal_selector_direct_pair_and_wrong_source(self):
+        clients = {}
+        for lens in (1, 2):
+            wire = PhyWire(lens=lens, page_bytes=14)
+            client = VideoClient(wire, lens, Counter(), timeout=.2)
+            self.assertEqual(client.radio_diagnostics()['lens'], lens)
+            self.assertEqual(len(wire.requests), 1)
+            self.assertEqual(wire.requests[0][8:], struct.pack('<I', 2))
+            clients[lens] = client
+        rows = DirectPairClient(clients[1], clients[2]).radio_diagnostics()['by_lens']
+        self.assertEqual({side: row['lens'] for side, row in rows.items()}, {1: 1, 2: 2})
+        class WrongClient(VideoClient):
+            def raw_replies(self, *args, **kwargs): return {1: refusal_bytes(lens=2)}
+        with self.assertRaises(ValueError): WrongClient(PhyWire(), 1, Counter()).radio_diagnostics()
+        class OldClient(VideoClient):
+            def raw_replies(self, *args, **kwargs): return {1: phy_bytes()}
+        with self.assertRaises(ValueError): OldClient(PhyWire(), 1, Counter()).radio_diagnostics()
+
     def test_version_bounds_reserved_fields_and_confirmed_direction_values(self):
         raw = phy_bytes(); report = phy_report(raw)
         self.assertEqual(report['links'][0]['current']['tx'], 2)

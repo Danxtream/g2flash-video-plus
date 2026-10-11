@@ -26,10 +26,47 @@ enum {
     VIDEO_RADIO_DM_READ = 68,
     VIDEO_RADIO_DM_UPDATE = 70,
     VIDEO_RADIO_DIAGNOSTICS = 1,
+    VIDEO_RADIO_REFUSAL_DIAGNOSTICS = 2,
     VIDEO_RADIO_REPORT_BYTES = 128,
     VIDEO_RADIO_RECORD_BYTES = 32,
-    VIDEO_RADIO_REPORT_VERSION = 1
+    VIDEO_RADIO_REPORT_VERSION = 1,
+    VIDEO_RADIO_TRACE_BYTES = 32,
+    VIDEO_RADIO_POOL_RESERVE = 3,
+    VIDEO_RADIO_REQUEST_SITE = 1,
+    VIDEO_RADIO_CONSUMER_SITE = 2,
+    VIDEO_RADIO_REFUSAL_NONE = 0,
+    VIDEO_RADIO_REFUSAL_ARGUMENT,
+    VIDEO_RADIO_REFUSAL_BUSY,
+    VIDEO_RADIO_REFUSAL_SERIAL,
+    VIDEO_RADIO_REFUSAL_LINK,
+    VIDEO_RADIO_REFUSAL_EPOCH,
+    VIDEO_RADIO_REFUSAL_PERMISSION,
+    VIDEO_RADIO_REFUSAL_POOL_METADATA,
+    VIDEO_RADIO_REFUSAL_POOL_ELIGIBLE,
+    VIDEO_RADIO_REFUSAL_POOL_EMPTY,
+    VIDEO_RADIO_REFUSAL_POOL_RESERVE,
+    VIDEO_RADIO_REFUSAL_ALLOC,
+    VIDEO_RADIO_REFUSAL_COMMAND_LINK,
+    VIDEO_RADIO_REFUSAL_COMMAND_CREDIT,
+    VIDEO_RADIO_REFUSAL_COMMAND_ALLOC
 };
+
+typedef struct {
+    uint8_t index, free;
+    uint16_t size;
+} video_radio_pool_sample;
+
+/* Counts stop at four safe nodes; UINT8_MAX means unavailable, not empty.
+ * Attempts have their own saturating identity because refused mail has no
+ * command serial. The last refusal remains visible after a later success. */
+typedef struct {
+    uint32_t attempt, tick, epoch;
+    uint8_t connection, operation, site, reason;
+    uint16_t required;
+    uint8_t skipped, reserved;
+    video_radio_pool_sample first, selected;
+    uint32_t reserved_tail;
+} video_radio_trace;
 
 typedef struct {
     uint32_t tick;
@@ -63,6 +100,8 @@ typedef struct {
     uint8_t connection, operation, tx, rx;
     volatile uint8_t pending, result;
     uint8_t observe_next, reserved;
+    uint32_t attempt_counter, copied_attempt;
+    video_radio_trace last_attempt, last_refusal;
 } video_radio_state;
 
 /* Bind only the actual peripheral connection supplied by the stock EUS write
@@ -79,6 +118,9 @@ int video_radio_request(uint8_t connection, uint32_t epoch, uint8_t operation,
 /* Freeze a bounded PHY-only DIAGNOSTICS selection, then request at most one
  * observational refresh. Unknown values remain explicit; this never SETs PHY. */
 int video_radio_snapshot(uint8_t out[VIDEO_RADIO_REPORT_BYTES]);
+/* Freeze refusal/pool evidence only: no READ, SET, heap walk or context
+ * creation. A separate kind keeps the original PHY report byte-compatible. */
+int video_radio_refusal_snapshot(uint8_t out[VIDEO_RADIO_REPORT_BYTES]);
 
 /* Controller task only, outside image/display locks. Capture a fresh standard
  * read before granting finite SET permission; Off issues no PHY request. */

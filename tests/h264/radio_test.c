@@ -19,19 +19,25 @@ static void lock(void) { ++depth; }
 static void unlock(void) { assert(depth); --depth; }
 static void stock_dm(void *p) { (void)p; assert(!depth); ++dm_calls; }
 static void stock_app(uint8_t mask, void *p) { (void)mask; (void)p; ++app_calls; }
-static int available(uint32_t bytes) { assert(bytes <= 20); return pool_room; }
+static int available(uint32_t bytes, video_radio_trace *trace) {
+    assert(depth && bytes <= 20);
+    trace->required = bytes + 8;
+    trace->first = trace->selected = (video_radio_pool_sample){0, pool_room ? 4 : 3, 32};
+    trace->reason = pool_room ? VIDEO_RADIO_REFUSAL_NONE : VIDEO_RADIO_REFUSAL_POOL_RESERVE;
+    return pool_room;
+}
 static void *allocate(uint16_t bytes) {
     ++allocations; assert(depth && !mail && bytes == 20);
     return allocation_ok ? calloc(1, bytes) : 0;
 }
 static void send(uint8_t id, void *p) { assert(depth && id == 7); mail = p; }
 static uint8_t *command_allocate(uint16_t opcode, uint8_t bytes) {
-    assert(!depth && opcode == 0x2030 && bytes == 2); memset(packet, 0, sizeof(packet));
+    assert(depth && opcode == 0x2030 && bytes == 2); memset(packet, 0, sizeof(packet));
     return allocation_ok ? packet : 0;
 }
 static void command_send(uint8_t *p) { assert(!depth && p == packet); ++reads; }
 static void set_phy(uint8_t id, uint8_t all, uint8_t tx, uint8_t rx, uint16_t options) {
-    assert(!depth && id == 1 && !all && tx && rx && !options); ++sets;
+    assert(depth && id == 1 && !all && tx && rx && !options); ++sets;
 }
 static unsigned radio_notifications;
 static void radio_notify(void) { assert(!depth); ++radio_notifications; }
@@ -89,6 +95,64 @@ static void check_donor_role_binding(void) {
     assert(allocations == old_allocations && reads == old_reads && sets == old_sets);
     assert(!mail && !depth);
 }
+static void check_refusal_evidence(void) {
+    memset(&context, 0, sizeof(context)); memset(ccbs, 0, sizeof(ccbs));
+    live(1, 0x123, 1); video_radio_bind(1); tick = 500;
+    video_radio_state *s = &context.video_radio;
+    uint8_t report[VIDEO_RADIO_REPORT_BYTES], frozen[VIDEO_RADIO_REPORT_BYTES];
+    unsigned old_allocations = allocations, old_reads = reads, old_sets = sets;
+    assert(video_radio_refusal_snapshot(report) && report[3] == 2 && report[12] == 1);
+    assert(report[9] == 32 && report[10] == 2 && report[13] == 3 && report[14] == 1);
+    assert(!s->attempt_counter && !mail && allocations == old_allocations);
+    pool_room = 0;
+    assert(!video_radio_request(1, 1, VIDEO_RADIO_READ, 0, 0, 0));
+    assert(s->attempt_counter == 1 && s->last_refusal.reason == VIDEO_RADIO_REFUSAL_POOL_RESERVE);
+    assert(!s->serial && !s->completed && !s->pending && allocations == old_allocations);
+    assert(video_radio_refusal_snapshot(report));
+    assert(report[72] == 1 && report[87] == VIDEO_RADIO_REFUSAL_POOL_RESERVE && report[93] == 3);
+    memcpy(frozen, report, sizeof(report));
+    pool_room = 1; allocation_ok = 0;
+    assert(!video_radio_request(1, 1, VIDEO_RADIO_READ, 0, 0, 0));
+    assert(s->attempt_counter == 2 && s->last_refusal.reason == VIDEO_RADIO_REFUSAL_ALLOC);
+    assert(!s->serial && !s->pending && allocations == old_allocations + 1);
+    assert(s->last_refusal.first.free == 4 && frozen[87] == VIDEO_RADIO_REFUSAL_POOL_RESERVE);
+    allocation_ok = 1;
+    assert(video_radio_request(1, 1, VIDEO_RADIO_READ, 0, 0, 0));
+    assert(s->last_attempt.attempt == 3 && !s->last_attempt.reason && s->last_refusal.attempt == 2);
+    assert(!video_radio_request(1, 1, VIDEO_RADIO_READ, 0, 0, 0));
+    assert(s->last_refusal.attempt == 4 && s->last_refusal.reason == VIDEO_RADIO_REFUSAL_BUSY);
+    dispatch();
+    assert(s->last_attempt.attempt == 3 && s->last_attempt.site == VIDEO_RADIO_CONSUMER_SITE);
+    assert(s->last_refusal.attempt == 4 && s->attempt_counter == 4);
+    event(VIDEO_RADIO_DM_READ, 1, 0x123, 0, 1, 1);
+    assert(!video_radio_request(1, 2, VIDEO_RADIO_READ, 0, 0, 0));
+    assert(s->last_refusal.reason == VIDEO_RADIO_REFUSAL_EPOCH);
+    assert(!video_radio_request(1, 1, VIDEO_RADIO_SET, 2, 2, 0));
+    assert(s->last_refusal.reason == VIDEO_RADIO_REFUSAL_PERMISSION);
+    assert(!video_radio_request(0, 1, VIDEO_RADIO_READ, 0, 0, 0));
+    assert(s->last_refusal.reason == VIDEO_RADIO_REFUSAL_ARGUMENT);
+    s->serial = UINT32_MAX; s->attempt_counter = UINT32_MAX;
+    assert(!video_radio_request(1, 1, VIDEO_RADIO_READ, 0, 0, 0));
+    assert(s->attempt_counter == UINT32_MAX && s->last_refusal.reason == VIDEO_RADIO_REFUSAL_SERIAL);
+    visible = 0;
+    assert(video_radio_refusal_snapshot(report) && !report[12]);
+    for (unsigned i = 16; i < sizeof(report); ++i) assert(!report[i]);
+    assert(!video_radio_request(1, 1, VIDEO_RADIO_READ, 0, 0, 0));
+    visible = 1;
+    assert(!mail && !depth && reads == old_reads + 1 && sets == old_sets);
+}
+#ifdef VIDEO_RADIO_PLATFORM_TEST
+static video_radio_trace platform_trace;
+static int check_pool(uint32_t bytes) {
+    platform_trace = video_radio_attempt(1, 1, 1, VIDEO_RADIO_READ, VIDEO_RADIO_REQUEST_SITE);
+    return video_radio_pool_room(bytes, &platform_trace);
+}
+static void pool_free(uint8_t *pool, uint32_t base, uint32_t count) {
+    *(uint32_t *)(pool + 8) = count ? base : 0;
+    for (uint32_t n = 0; n < count; ++n)
+        *(uint32_t *)(uintptr_t)(base + n * 16) = n + 1 < count ? base + (n + 1) * 16 : 0;
+}
+#endif
 int main(void) {
     visible = 0; live(1, 0x123, 1);
     video_radio_bind(1); event(VIDEO_RADIO_DM_OPEN, 1, 0x123, 0, 0, 0);
@@ -126,10 +190,12 @@ int main(void) {
     dispatch(); assert(reads == 1); /* Even handle reuse cannot inherit mail. */
     assert(video_radio_request(1, 2, VIDEO_RADIO_READ, 0, 0, 0));
     room = 0; dispatch(); room = 1; assert(reads == 1 && context.video_radio.result == 2);
+    assert(context.video_radio.last_refusal.reason == VIDEO_RADIO_REFUSAL_COMMAND_CREDIT);
     pool_room = 0; assert(!video_radio_request(1, 2, VIDEO_RADIO_READ, 0, 0, 0)); pool_room = 1;
     allocation_ok = 0; assert(!video_radio_request(1, 2, VIDEO_RADIO_READ, 0, 0, 0)); allocation_ok = 1;
     assert(video_radio_request(1, 2, VIDEO_RADIO_READ, 0, 0, 0));
     allocation_ok = 0; dispatch(); allocation_ok = 1; assert(!context.video_radio.pending);
+    assert(context.video_radio.last_refusal.reason == VIDEO_RADIO_REFUSAL_COMMAND_ALLOC);
     context.video_radio.serial = UINT32_MAX;
     assert(!video_radio_request(1, 2, VIDEO_RADIO_READ, 0, 0, 0));
     event(VIDEO_RADIO_DM_CLOSE, 1, 0x123, 0, 0, 0); link->epoch = UINT32_MAX;
@@ -149,6 +215,7 @@ int main(void) {
     event(VIDEO_RADIO_DM_CLOSE, 1, 0x123, 0, 0, 0);
     assert(video_radio_snapshot(report) && !report[13] && !sets && !mail);
     check_donor_role_binding();
+    check_refusal_evidence();
 #ifdef VIDEO_RADIO_PLATFORM_TEST
     void *mapped = mmap((void *)0x20000000U, 0x100000, PROT_READ | PROT_WRITE,
                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
@@ -163,14 +230,46 @@ int main(void) {
             *(uint32_t *)(uintptr_t)(0x2007e000U + i * 64 + n * 16) =
                 n < 3 ? 0x2007e000U + i * 64 + (n + 1) * 16 : 0;
     }
-    assert(video_radio_pool_room(20)); /* 20+8 = 28, selects the 32-byte pool. */
+    assert(check_pool(20)); /* 20+8 = 28, selects the 32-byte pool. */
     *(uint32_t *)(pools + 12 + 8) += 16;
-    assert(!video_radio_pool_room(20)); /* Three remaining: preserve them. */
-    assert(video_radio_pool_room(5)); /* 5+8 = 13, Read uses the 16-byte pool. */
-    assert(!video_radio_pool_room(10)); /* 10+8 = 18, Set uses the 32-byte pool. */
+    assert(!check_pool(20)); /* Three remaining: preserve them. */
+    assert(check_pool(5)); /* 5+8 = 13, Read uses the 16-byte pool. */
+    assert(!check_pool(10)); /* 10+8 = 18, Set uses the 32-byte pool. */
     *(uint32_t *)(pools + 12 + 8) -= 16;
-    assert(video_radio_pool_room(10));
-    *(uint8_t *)0x2007740aU = 17; assert(!video_radio_pool_room(20));
+    assert(check_pool(10));
+    for (uint32_t small = 0; small <= 6; ++small) {
+        for (uint32_t large = 0; large <= 6; ++large) {
+            pool_free(pools + 12, 0x2007e100U, small);
+            pool_free(pools + 24, 0x2007e200U, large);
+            /* Model the authenticated donor's first eligible nonempty class. */
+            uint32_t chosen = small ? 1 : large ? 2 : UINT8_MAX;
+            uint32_t free_count = small ? small : large;
+            assert(check_pool(20) == (free_count >= 4));
+            assert(platform_trace.first.index == 1 && platform_trace.first.free == (small < 4 ? small : 4));
+            assert(platform_trace.selected.index == chosen);
+            if (chosen != UINT8_MAX)
+                assert(platform_trace.selected.free == (free_count < 4 ? free_count : 4));
+            assert(platform_trace.skipped == (!small ? !large ? 2 : 1 : 0));
+            assert(platform_trace.reason == (free_count >= 4 ? VIDEO_RADIO_REFUSAL_NONE :
+                chosen == UINT8_MAX ? VIDEO_RADIO_REFUSAL_POOL_EMPTY : VIDEO_RADIO_REFUSAL_POOL_RESERVE));
+            assert(check_pool(10) == (free_count >= 4));
+        }
+    }
+    pool_free(pools, 0x2007e000U, 0); pool_free(pools + 12, 0x2007e100U, 0);
+    pool_free(pools + 24, 0x2007e200U, 4);
+    assert(check_pool(5) && platform_trace.first.index == 0 && platform_trace.selected.index == 2);
+    assert(platform_trace.skipped == 2 && platform_trace.selected.free == 4);
+    *(uint32_t *)(pools + 8) = 0x2007e001U;
+    assert(!check_pool(5) && platform_trace.reason == VIDEO_RADIO_REFUSAL_POOL_METADATA);
+    *(uint32_t *)(pools + 8) = 0x2007e000U;
+    *(uint32_t *)0x2007e000U = 0x2007e000U;
+    assert(!check_pool(5) && platform_trace.first.free == UINT8_MAX);
+    pool_free(pools, 0x2007e000U, 4);
+    assert(!check_pool(100) && platform_trace.reason == VIDEO_RADIO_REFUSAL_POOL_ELIGIBLE);
+    *(uint32_t *)0x20077238U = 0x2029fff0U;
+    assert(!check_pool(20) && platform_trace.reason == VIDEO_RADIO_REFUSAL_POOL_METADATA);
+    *(uint32_t *)0x20077238U = (uint32_t)(uintptr_t)pools;
+    *(uint8_t *)0x2007740aU = 17; assert(!check_pool(20));
     *(uint8_t *)0x2007740aU = 3;
     *(uint8_t *)0x20075b62U = 1; *(uint32_t *)0x20075c6cU = 4;
     assert(video_radio_command_room());

@@ -5,7 +5,11 @@ SPDX-License-Identifier: GPL-3.0-only
 import struct
 
 PHY_DIAGNOSTICS = 1
+RADIO_REFUSAL_DIAGNOSTICS = 2
 PHY_BYTES, PHY_RECORD_BYTES, PHY_LINKS = 128, 32, 3
+REFUSALS = ('none', 'argument', 'busy', 'serial-exhausted', 'link', 'epoch', 'permission',
+            'pool-metadata', 'no-eligible-pool', 'eligible-pools-empty', 'pool-reserve',
+            'mail-allocation-null', 'command-link', 'command-credit', 'command-allocation-null')
 PHASES = ('observed', 'capture', 'select', 'active', 'fallback', 'restore-wait',
           'restore-set', 'restore-read', 'restored', 'uncertain')
 
@@ -44,6 +48,50 @@ def phy_report(raw):
                 serial=struct.unpack_from('<I', raw, 108)[0], completed=struct.unpack_from('<I', raw, 112)[0],
                 pending=raw[116], result=raw[117], connection=raw[118],
                 command_epoch=struct.unpack_from('<I', raw, 120)[0])
+
+
+def radio_refusal_report(raw):
+    """Decode captured gate evidence without issuing PHY or allocation commands."""
+    raw = bytes(raw)
+    if (len(raw) != PHY_BYTES or raw[:4] != bytes((1, 7, 0, RADIO_REFUSAL_DIAGNOSTICS)) or
+            raw[8:11] != bytes((1, 32, 2)) or raw[11] not in (1, 2) or raw[12] > 1 or
+            raw[13:16] != bytes((3, 1, 0)) or raw[32] > 2 or raw[33] > 2 or
+            raw[34] > PHY_LINKS or raw[35] > 2 or any(raw[36:40]) or any(raw[104:])):
+        raise ValueError('unsupported radio refusal format')
+    counter, serial, completed, epoch = struct.unpack_from('<4I', raw, 16)
+    traces = {}
+    for name, offset in (('last_attempt', 40), ('last_refusal', 72)):
+        p = raw[offset:offset + 32]
+        attempt, tick, connection_epoch = struct.unpack_from('<3I', p)
+        if not attempt:
+            if any(p): raise ValueError('nonempty unobserved radio trace')
+            traces[name] = None
+            continue
+        if (attempt > counter or p[14] not in (1, 2) or p[15] >= len(REFUSALS) or
+                p[18] > 16 or p[19] or any(p[28:]) or name == 'last_refusal' and not p[15]):
+            raise ValueError('inconsistent radio refusal trace')
+        pools = {}
+        for pool, index in (('first', 20), ('selected', 24)):
+            identity, free = p[index:index + 2]
+            size = struct.unpack_from('<H', p, index + 2)[0]
+            if (identity != 255 and identity >= 16 or free not in (0, 1, 2, 3, 4, 255) or
+                    identity == 255 and (free != 255 or size)):
+                raise ValueError('inconsistent radio pool sample')
+            pools[pool] = dict(index=None if identity == 255 else identity,
+                               free=None if free == 255 else free, size=size,
+                               capped=free == 4)
+        traces[name] = dict(attempt=attempt, tick=tick, epoch=connection_epoch,
+                            connection=p[12], operation=p[13], site=p[14],
+                            reason=p[15], reason_name=REFUSALS[p[15]],
+                            required=struct.unpack_from('<H', p, 16)[0],
+                            skipped_empty=p[18], **pools)
+    if not raw[12] and any(raw[16:104]):
+        raise ValueError('radio trace without context')
+    return dict(lens=raw[11], tick=struct.unpack_from('<I', raw, 4)[0], result=0,
+                context=bool(raw[12]), reserve=raw[13], empty_only_fallback=bool(raw[14]),
+                attempts=counter, serial=serial, completed=completed, command_epoch=epoch,
+                pending=raw[32], command_result=raw[33], connection=raw[34], operation=raw[35],
+                **traces)
 
 
 def classify_phy(before, during, after, mode, *, ending=None):

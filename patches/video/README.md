@@ -534,7 +534,8 @@ and UART bridge behavior are unchanged. No generic HCI interface is exposed.
 
 The eight-byte DIAGNOSTICS request retains its heap/stack format. Adding a
 little-endian uint32 selection of 1 requests a separate 128-byte PHY report;
-other selections are refused. Header bytes 0..3 identify protocol, command,
+selection 2 requests retained refusal evidence below; other selections are
+refused. Header bytes 0..3 identify protocol, command,
 result and selection; bytes 4..7 hold the capture tick. Bytes 8..11 identify
 record version 1, record size 32, three connection slots and the source lens.
 Each record begins at 12 + 32 * index:
@@ -554,6 +555,39 @@ The tail reports command serial/completion at 108/112, pending/result/link at
 116..118, and its epoch at 120. Remaining bytes are zero. All pages and exact
 replays freeze one capture; only a new selection may post one bounded READ.
 This report never changes the PHY or enlarges normal STATUS traffic.
+
+Selection 2 is a distinct opt-in 128-byte report, not an extension of the
+selection-1 reserved bytes. It never requests a READ or SET. Header bytes
+0..3 are protocol 1, DIAGNOSTICS, result and selection 2; 4..7 are the
+capture tick. Bytes 8..11 are record version 1, trace size 32, two traces
+and source lens; 12 is context-present, 13 the three-buffer reserve, 14
+empty-only fallback support and 15 zero. LE32 fields at 16/20/24/28 hold
+the saturating attempt counter, accepted serial, completion and command
+epoch. Bytes 32..35 hold pending/result/connection/operation; 36..39 are zero.
+Trace records at 40 and 72 hold the last gate observation and last refusal;
+104..127 are zero. No context means zero counters/traces, not an allocation.
+
+Each trace has LE32 attempt/tick/epoch at 0/4/8, connection/operation/site/
+reason at 12..15, required allocator bytes LE16 at 16, skipped empty count
+at 18 and zero at 19. First eligible and donor-selected nonempty pool
+samples at 20 and 24 each hold index/free-count/LE16 size. Counts saturate
+at four safe nodes (four or more); index/count 255 means unavailable or
+invalid, never empty. Bytes 28..31 are zero. Sites are request 1 and consumer
+2; reasons 0..14 are none, argument, busy, serial exhaustion, link, epoch,
+permission, pool metadata, no eligible pool, all eligible pools empty,
+reserve, mailbox allocation NULL, consumer link, command credit and command
+allocation NULL. Counts are captured at the guard decision, not query time.
+The last refusal persists after success; consumer records retain the queued
+attempt identity, so the last observation may have an older ID than a busy
+refusal. Attempt IDs saturate rather than wrapping; use tick/site/epoch too.
+
+The pool guard follows the authenticated donor's empty-class fallback only:
+skip NULL free-list heads, then require four distinct safe nodes in the first
+eligible NONEMPTY class, leaving three after an allocation. Never bypass a
+nonempty class with one to three buffers. Invalid descriptors, pointers or
+cycles fail closed. This is a fixed WSF pool view, not a TLSF heap measurement;
+it never exposes pointers or changes pool ownership. Explicit selection-2
+version/format validation establishes support without altering STATUS bits.
 
 PHY ownership uses two fixed generation records; it does not allocate a task,
 timer or heap buffer. A changing owner first obtains a fresh standard Read PHY

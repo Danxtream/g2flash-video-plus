@@ -11,6 +11,7 @@ typedef struct {
     uint8_t connection, operation, tx, rx;
 } video_radio_command;
 _Static_assert(sizeof(video_radio_command) == 20, "copied PHY command ABI");
+_Static_assert(sizeof(video_radio_trace) == VIDEO_RADIO_TRACE_BYTES, "radio trace ABI");
 
 #ifndef VIDEO_RADIO_CONTEXT
 #define VIDEO_RADIO_CONTEXT peekCustomCfwContext
@@ -30,25 +31,49 @@ _Static_assert(sizeof(video_radio_command) == 20, "copied PHY command ABI");
 
 #if !defined(VIDEO_RADIO_POOL_ROOM) || defined(VIDEO_RADIO_PLATFORM_TEST)
 
-/* WSF uses fixed pools and short interrupt critical sections, not the stock
- * heap mutex. The stock message envelope is eight bytes. Leave at least
- * three free buffers in the allocator's first eligible pool. Keep
+/* WSF skips empty eligible pools, but consumes the first nonempty class.
+ * Preserve three buffers in that exact class, including the eight-byte
+ * message envelope. Called under the existing WSF critical section. Keep
  * these address readers out of line for the ARM ROPI relocation contract. */
-__attribute__((noinline)) static int video_radio_pool_room(uint32_t bytes) {
+__attribute__((noinline)) static int video_radio_pool_room(uint32_t bytes, video_radio_trace *trace) {
     const uint8_t *pools = (const void *)(uintptr_t)*(const volatile uint32_t *)0x20077238U;
     uint32_t count = *(const volatile uint8_t *)0x2007740aU;
-    if (!pools || !count || count > 16) return 0;
+    uintptr_t base = (uintptr_t)pools;
+    trace->reason = VIDEO_RADIO_REFUSAL_POOL_METADATA;
+    if (!count || count > 16 || base < 0x20000000U || base & 3 ||
+        base > 0x202a0000U - count * 12 || bytes > UINT16_MAX - 8) return 0;
+    trace->required = bytes + 8;
     for (uint32_t i = 0; i < count; ++i) {
         const uint8_t *pool = pools + i * 12;
-        if (*(const uint16_t *)pool < bytes + 8) continue;
+        uint16_t size = *(const uint16_t *)pool;
+        if (size < trace->required) continue;
         const uint32_t *free = (const void *)(uintptr_t)*(const uint32_t *)(pool + 8);
-        for (uint32_t n = 0; n < 4; ++n) {
+        if (trace->first.index == UINT8_MAX)
+            trace->first = (video_radio_pool_sample){i, 0, size};
+        if (!free) { ++trace->skipped; continue; }
+        trace->selected = (video_radio_pool_sample){i, 0, size};
+        uintptr_t seen[VIDEO_RADIO_POOL_RESERVE + 1];
+        for (uint32_t n = 0; n <= VIDEO_RADIO_POOL_RESERVE; ++n) {
             uintptr_t address = (uintptr_t)free;
-            if (address < 0x20000000U || address >= 0x202a0000U || address & 3) return 0;
-            free = (const void *)(uintptr_t)*free;
+            if (!address) { trace->reason = VIDEO_RADIO_REFUSAL_POOL_RESERVE; return 0; }
+            int valid = address >= 0x20000000U && address <= 0x202a0000U - 4 && !(address & 3);
+            for (uint32_t previous = 0; previous < n; ++previous)
+                if (seen[previous] == address) valid = 0;
+            if (!valid) {
+                trace->selected.free = UINT8_MAX;
+                if (trace->first.index == i) trace->first.free = UINT8_MAX;
+                return 0;
+            }
+            seen[n] = address;
+            trace->selected.free = n + 1;
+            if (trace->first.index == i) trace->first.free = n + 1;
+            if (n < VIDEO_RADIO_POOL_RESERVE) free = (const void *)(uintptr_t)*free;
         }
+        trace->reason = VIDEO_RADIO_REFUSAL_NONE;
         return 1;
     }
+    trace->reason = trace->first.index == UINT8_MAX ?
+        VIDEO_RADIO_REFUSAL_POOL_ELIGIBLE : VIDEO_RADIO_REFUSAL_POOL_EMPTY;
     return 0;
 }
 __attribute__((noinline)) static uint8_t video_radio_handler_id(void) {
@@ -147,30 +172,55 @@ void video_radio_dm_event(void *event) {
     if (notify) VIDEO_RADIO_NOTIFY();
 }
 
+static video_radio_trace video_radio_attempt(uint32_t attempt, uint8_t id,
+                                             uint32_t epoch, uint8_t operation, uint8_t site) {
+    return (video_radio_trace){.attempt = attempt, .tick = VIDEO_RADIO_TICK,
+        .epoch = epoch, .connection = id, .operation = operation, .site = site,
+        .first = {UINT8_MAX, UINT8_MAX, 0}, .selected = {UINT8_MAX, UINT8_MAX, 0}};
+}
+static void video_radio_record(video_radio_state *s, const video_radio_trace *trace) {
+    s->last_attempt = *trace;
+    if (trace->reason) s->last_refusal = *trace;
+}
+
 int video_radio_request(uint8_t id, uint32_t epoch, uint8_t operation,
                         uint8_t tx, uint8_t rx, uint32_t permission) {
     customCfwContext *ctx = VIDEO_RADIO_CONTEXT();
-    if (!ctx || !id || id > VIDEO_RADIO_LINKS || !epoch ||
-        (operation != VIDEO_RADIO_READ && operation != VIDEO_RADIO_SET)) return 0;
+    if (!ctx) return 0;
     VIDEO_RADIO_LOCK();
     video_radio_state *s = &ctx->video_radio;
-    video_radio_link *link = &s->links[id - 1];
-    if (s->pending || s->serial == UINT32_MAX || !link->connected || !link->bound ||
-        link->epoch != epoch || (operation == VIDEO_RADIO_SET &&
-        (!permission || permission != link->permission || !tx || tx > 3 || !rx || rx > 3)) ||
-        !VIDEO_RADIO_POOL_ROOM(sizeof(video_radio_command))) {
-        VIDEO_RADIO_UNLOCK(); return 0;
+    if (s->attempt_counter < UINT32_MAX) ++s->attempt_counter;
+    video_radio_trace trace = video_radio_attempt(s->attempt_counter, id, epoch,
+                                                  operation, VIDEO_RADIO_REQUEST_SITE);
+    if (!id || id > VIDEO_RADIO_LINKS || !epoch ||
+        (operation != VIDEO_RADIO_READ && operation != VIDEO_RADIO_SET)) {
+        trace.reason = VIDEO_RADIO_REFUSAL_ARGUMENT;
+        goto refused;
     }
+    video_radio_link *link = &s->links[id - 1];
+    if (s->pending) trace.reason = VIDEO_RADIO_REFUSAL_BUSY;
+    else if (s->serial == UINT32_MAX) trace.reason = VIDEO_RADIO_REFUSAL_SERIAL;
+    else if (!link->connected || !link->bound) trace.reason = VIDEO_RADIO_REFUSAL_LINK;
+    else if (link->epoch != epoch) trace.reason = VIDEO_RADIO_REFUSAL_EPOCH;
+    else if (operation == VIDEO_RADIO_SET && (!permission || permission != link->permission ||
+             !tx || tx > 3 || !rx || rx > 3)) trace.reason = VIDEO_RADIO_REFUSAL_PERMISSION;
+    if (trace.reason || !VIDEO_RADIO_POOL_ROOM(sizeof(video_radio_command), &trace)) goto refused;
     video_radio_command *command = VIDEO_RADIO_ALLOC(sizeof(*command));
-    if (!command) { VIDEO_RADIO_UNLOCK(); return 0; }
+    if (!command) { trace.reason = VIDEO_RADIO_REFUSAL_ALLOC; goto refused; }
     *command = (video_radio_command){VIDEO_RADIO_COMMAND_TAG, VIDEO_RADIO_COMMAND_EVENT, 0,
         epoch, ++s->serial, permission, id, operation, tx, rx};
     s->connection = id; s->epoch = epoch; s->permission = permission;
     s->operation = operation; s->tx = tx; s->rx = rx;
     s->result = 1; s->pending = 1;
+    s->copied_attempt = trace.attempt;
+    video_radio_record(s, &trace);
     VIDEO_RADIO_SEND(VIDEO_RADIO_HANDLER_ID(), command);
     VIDEO_RADIO_UNLOCK();
     return 1;
+refused:
+    video_radio_record(s, &trace);
+    VIDEO_RADIO_UNLOCK();
+    return 0;
 }
 
 void video_radio_app_handler(uint8_t events, void *message) {
@@ -188,26 +238,44 @@ void video_radio_app_handler(uint8_t events, void *message) {
     /* This consumer runs on the same WSF task as DM events. Revalidate after
      * queueing, before entering the stock HCI queue, to reject reused IDs. */
     if (s->pending != 1 || command->serial != s->serial) return;
+    /* Match the copied request's attempt identity, even if another caller
+     * recorded a busy refusal while this mail was queued. */
+    VIDEO_RADIO_LOCK();
+    video_radio_trace trace = video_radio_attempt(s->copied_attempt, command->connection,
+        command->epoch, command->operation, VIDEO_RADIO_CONSUMER_SITE);
     if (!ccb || !link->connected || !link->bound || command->epoch != link->epoch ||
         link->handle != video_radio_u16(ccb + 12) ||
-        (command->operation == VIDEO_RADIO_SET && (!command->permission ||
-         command->permission != link->permission)) ||
-        !VIDEO_RADIO_COMMAND_ROOM() ||
-        !VIDEO_RADIO_POOL_ROOM(command->operation == VIDEO_RADIO_SET ? 10 : 5)) {
-        s->result = 2; s->completed = s->serial; s->pending = 0; return;
+         (command->operation == VIDEO_RADIO_SET && (!command->permission ||
+          command->permission != link->permission))) trace.reason = VIDEO_RADIO_REFUSAL_COMMAND_LINK;
+    else if (!VIDEO_RADIO_COMMAND_ROOM()) trace.reason = VIDEO_RADIO_REFUSAL_COMMAND_CREDIT;
+    if (!trace.reason) VIDEO_RADIO_POOL_ROOM(command->operation == VIDEO_RADIO_SET ? 10 : 5, &trace);
+    video_radio_record(s, &trace);
+    if (trace.reason) {
+        s->result = 2; s->completed = s->serial; s->pending = 0;
+        VIDEO_RADIO_UNLOCK(); return;
     }
     s->pending = 2;
+    /* Keep selection and allocation indivisible with respect to WSF pool
+     * users. The retained SET wrapper only allocates/copies/posts bounded
+     * stock commands; its nested WSF sections have no heap mutex or wait. */
     if (command->operation == VIDEO_RADIO_SET) {
         /* A PHY value becomes a one-bit preference mask for Set PHY. */
         VIDEO_RADIO_SET_PHY(command->connection, 0, 1u << (command->tx - 1),
-                            1u << (command->rx - 1), 0);
+                             1u << (command->rx - 1), 0);
+        VIDEO_RADIO_UNLOCK();
     } else {
         /* Read PHY's public wrapper was stripped from this donor. Its standard
          * command-completion parser and DM event route remain present. Use the
          * same bounded allocator/queue as the retained Set PHY wrapper. */
         uint8_t *packet = VIDEO_RADIO_CMD_ALLOC(0x2030, 2);
-        if (!packet) { s->result = 2; s->completed = s->serial; s->pending = 0; return; }
+        if (!packet) {
+            trace.reason = VIDEO_RADIO_REFUSAL_COMMAND_ALLOC;
+            video_radio_record(s, &trace);
+            s->result = 2; s->completed = s->serial; s->pending = 0;
+            VIDEO_RADIO_UNLOCK(); return;
+        }
         packet[3] = link->handle; packet[4] = link->handle >> 8;
+        VIDEO_RADIO_UNLOCK();
         VIDEO_RADIO_CMD_SEND(packet);
     }
     /* The WSF dispatcher frees its copied message after this handler returns.
@@ -216,6 +284,42 @@ void video_radio_app_handler(uint8_t events, void *message) {
 
 static void video_radio_write32(uint8_t *p, uint32_t value) {
     for (uint32_t i = 0; i < 4; ++i) p[i] = value >> (8 * i);
+}
+static void video_radio_trace_encode(uint8_t *p, const video_radio_trace *trace) {
+    video_radio_write32(p, trace->attempt);
+    video_radio_write32(p + 4, trace->tick); video_radio_write32(p + 8, trace->epoch);
+    p[12] = trace->connection; p[13] = trace->operation;
+    p[14] = trace->site; p[15] = trace->reason;
+    p[16] = trace->required; p[17] = trace->required >> 8; p[18] = trace->skipped;
+    p[20] = trace->first.index; p[21] = trace->first.free;
+    p[22] = trace->first.size; p[23] = trace->first.size >> 8;
+    p[24] = trace->selected.index; p[25] = trace->selected.free;
+    p[26] = trace->selected.size; p[27] = trace->selected.size >> 8;
+}
+int video_radio_refusal_snapshot(uint8_t out[VIDEO_RADIO_REPORT_BYTES]) {
+    if (!out) return 0;
+    for (uint32_t i = 0; i < VIDEO_RADIO_REPORT_BYTES; ++i) out[i] = 0;
+    out[0] = VIDEO_PROTOCOL_VERSION; out[1] = VIDEO_CONTROL_DIAGNOSTICS;
+    out[3] = VIDEO_RADIO_REFUSAL_DIAGNOSTICS;
+    out[8] = VIDEO_RADIO_REPORT_VERSION; out[9] = VIDEO_RADIO_TRACE_BYTES;
+    out[10] = 2; out[11] = VIDEO_RADIO_HERE();
+    out[13] = VIDEO_RADIO_POOL_RESERVE; out[14] = 1; /* Empty-only donor fallback. */
+    VIDEO_RADIO_LOCK();
+    video_radio_write32(out + 4, VIDEO_RADIO_TICK);
+    customCfwContext *ctx = VIDEO_RADIO_CONTEXT();
+    if (ctx) {
+        video_radio_state *s = &ctx->video_radio;
+        out[12] = 1;
+        video_radio_write32(out + 16, s->attempt_counter);
+        video_radio_write32(out + 20, s->serial); video_radio_write32(out + 24, s->completed);
+        video_radio_write32(out + 28, s->epoch);
+        out[32] = s->pending; out[33] = s->result;
+        out[34] = s->connection; out[35] = s->operation;
+        video_radio_trace_encode(out + 40, &s->last_attempt);
+        video_radio_trace_encode(out + 72, &s->last_refusal);
+    }
+    VIDEO_RADIO_UNLOCK();
+    return 1;
 }
 int video_radio_snapshot(uint8_t out[VIDEO_RADIO_REPORT_BYTES]) {
     if (!out) return 0;
