@@ -14,7 +14,7 @@ from g2flash import CTRL
 from test_receive_client import Counter, MockTransport, frame, diagnostic_bytes
 from video_client import (VideoClient, status, frame_result, timing, summarize, stream_clip,
                           START, STOP, STATUS, CAPABILITIES, FRAME_READ, FRAME_ACK, VERIFY_FRAMES, NATIVE,
-                          POWER_STEPS)
+                          POWER_STEPS, presentation_rate)
 from reference_clip import read_nals, build_reference, make_reference, decoder_identity
 
 
@@ -166,6 +166,35 @@ def synthetic_reference(count=32):
 
 
 class VideoClientTests(unittest.TestCase):
+    def test_presentation_rate_uses_copy_ticks_and_exposes_short_or_missing_windows(self):
+        samples = [dict(presented=30, copy_tick=2100), dict(presented=32, copy_tick=2225)]
+        rate = presentation_rate(samples)
+        self.assertEqual((rate['fps'], rate['intervals'], rate['seconds']), (16, 2, .125))
+        self.assertEqual(presentation_rate([dict(presented=1, copy_tick=0xfffffff0),
+                                            dict(presented=3, copy_tick=109)])['fps'], 16)
+        for rows in ([], samples[:1], samples[:1]*2,
+                     [samples[1], samples[0]], [dict(presented=1, copy_tick=100), dict(presented=2, copy_tick=99)]):
+            self.assertIsNone(presentation_rate(rows)['fps'])
+
+    def test_slow_status_replies_do_not_enter_the_presentation_rate(self):
+        nals, reference = synthetic_reference(32)
+        clock = FakeClock()
+        class SlowStatusPlayback(FakePlayback):
+            def report(self, extended=False):
+                report = super().report(extended)
+                report['copy_tick'] = 100 + report['presented']*64
+                return report
+            def command(self, op, *args, **kwargs):
+                result = super().command(op, *args, **kwargs)
+                if op == STATUS:
+                    clock.sleep(1)
+                return result
+        result = stream_clip(SlowStatusPlayback(reference), nals, reference, verify=False,
+                             clock=clock.now, sleep=clock.sleep)
+        self.assertEqual(result['delivered_fps'], 1000/64)
+        self.assertGreater(result['presentation_by_lens'][1]['intervals'], 0)
+        self.assertLess(result['host_completion_fps'], result['delivered_fps'])
+
     def test_status_names_retained_power_step_without_changing_header_bits(self):
         for code, name in enumerate(POWER_STEPS):
             for headers in range(8):

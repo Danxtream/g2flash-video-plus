@@ -503,6 +503,12 @@ actual reference picture boundaries, never one NAL per picture.
 The caller wraps each session in ordinary lease cleanup and diagnostic reads
 before START, after READY and after fully reclaimed STOP. Compare repeated
 quiet heap samples and completed stack/guard reports before continuing a batch.
-Ordinary playback uses no frame reads or result ACKs. Diagnostic and transport
-waits do not belong in decode-only timing. Native mocks do not qualify optical
+Ordinary playback uses no frame reads or result ACKs. Presentation-rate reports
+use count differences and device copy ticks, with each lens's observed interval
+count shown. Verification covers its first-to-last frame; ordinary STATUS may
+cover only the tail. One endpoint yields no estimate. Host completion time is
+reported separately and includes paged reply delay; neither metric establishes
+optical synchronization. One early EOF snapshot can anchor the tail interval;
+upload still uses compact credits with no per-NAL STATUS polling.
+Diagnostic and transport waits do not belong in decode-only timing. Native mocks do not qualify optical
 orientation, hardware stack use or real Bluetooth throughput.

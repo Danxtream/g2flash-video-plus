@@ -278,6 +278,29 @@ def verify_row(row, expected, stream, token):
     return result
 
 
+def presentation_rate(samples):
+    """Measure copy-completion intervals, stating the count span and limitations.
+
+    A lone endpoint cannot establish a rate. Device ticks wrap modulo 2**32;
+    accept only forward spans shorter than half that range. Reply latency is
+    outside this interval; this does not measure optical left/right sync.
+    """
+    shown = [row for row in samples if row['presented'] > 0]
+    if len(shown) < 2 or shown[-1]['presented'] == shown[0]['presented']:
+        return dict(fps=None, intervals=0, seconds=None, reason='fewer than two distinct copy endpoints')
+    if any(b['presented'] < a['presented'] for a, b in zip(shown, shown[1:])):
+        return dict(fps=None, intervals=0, seconds=None, reason='presented counter regressed')
+    first, last = shown[0], shown[-1]
+    ticks = (last['copy_tick'] - first['copy_tick']) & 0xffffffff
+    count = last['presented'] - first['presented']
+    if not 0 < ticks < 0x80000000:
+        return dict(fps=None, intervals=count, seconds=None, reason='invalid copy tick span')
+    return dict(fps=1000*count/ticks, intervals=count, seconds=ticks/1000,
+                first_presented=first['presented'], last_presented=last['presented'],
+                first_copy_tick=first['copy_tick'], last_copy_tick=last['copy_tick'],
+                reason='observed copy intervals; excludes startup and reply delay')
+
+
 def stream_clip(client, nals, reference, *, verify=True, native=False, progress=lambda text: None,
                 renew=lambda: None, on_ready=lambda state: None, pace_fps=0, timeout=600,
                 clock=time.monotonic, sleep=time.sleep):
@@ -312,12 +335,14 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, progress=
             raise ValueError('READY did not identify every targeted owner')
         on_ready(state)
         progress(f'READY stream={stream} tokens={tokens}; verification={verify}; native={native}')
+        copy_samples = {lens: [] for lens in tokens}
         rows = {lens: [] for lens in tokens}
         acknowledged = {lens: 0 for lens in tokens}
         index, started = 0, clock()
         last_status = last_progress = started
         credit_waits = 0
         input_finished = None
+        eof_sampled = False
         finishing = {r['last_nal']: r['ordinal'] for r in reference['frames']}
         while True:
             if clock() > deadline:
@@ -328,7 +353,9 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, progress=
             if set(reports) != set(tokens) or any(r['result'] or r['error'] or r['state'] != 2 or
                     r['expected'] > index for r in reports.values()):
                 raise RuntimeError('owner or credit progress failed during playback')
-            if clock() - last_status >= 5 or index == len(nals) and credit['expected'] == index:
+            # One early EOF snapshot can anchor a tail-rate interval without
+            # adding STATUS polling to the upload path.
+            if clock() - last_status >= 5 or index == len(nals) and (not eof_sampled or credit['expected'] == index):
                 state = client.command(STATUS)
                 for lens, r in per_lens(state).items():
                     if (r['result'] or r['error'] or r['state'] != 2 or
@@ -336,7 +363,9 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, progress=
                             r['consumed'] > index or r['pictures'] > reference['frame_count'] or
                             r['presented'] > reference['frame_count']):
                         raise RuntimeError('decoder/session/count failed during playback')
+                    copy_samples[lens].append(dict(presented=r['presented'], copy_tick=r['copy_tick']))
                 last_status = clock()
+                eof_sampled |= index == len(nals)
             if verify:
                 # Consumption and copying are separate. A future row may refuse;
                 # retry with a fresh request after more work, never fabricate it.
@@ -405,13 +434,20 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, progress=
             sleep(.02); stopped = client.command(STATUS)
         if stopped['error'] or stopped['incomplete']:
             raise RuntimeError('verification or cleanup remained incomplete')
+        rates = {lens: presentation_rate(
+            [dict(presented=row['ordinal'], copy_tick=row['copy_tick']) for row in rows[lens]]
+            if verify else copy_samples[lens] + [dict(presented=report['presented'], copy_tick=report['copy_tick'])])
+            for lens, report in per_lens(final).items()}
+        progress(f'Presentation rates from device copy ticks: {rates}')
         primary = rows[client.lens]
         return dict(valid=True, stream=stream, token=tokens[client.lens], tokens=tokens, rows=primary,
                     rows_by_lens=rows, summary=summarize(primary) if verify else None,
                     summaries={lens: summarize(value) for lens, value in rows.items()} if verify else {},
                     status=final, elapsed_seconds=clock() - started, credit_waits=credit_waits,
                     input_refusals=0, verified=verify, playback_seconds=playback_seconds,
-                    delivered_fps=reference['frame_count']/playback_seconds,
+                    presentation_by_lens=rates,
+                    delivered_fps=min(r['fps'] for r in rates.values()) if all(r['fps'] is not None for r in rates.values()) else None,
+                    host_completion_fps=reference['frame_count']/playback_seconds,
                     input_seconds=input_finished-started,
                     nal_bytes_per_second=sum(map(len, nals))/(input_finished-started))
     except Exception:
