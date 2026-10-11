@@ -60,11 +60,34 @@ static void dispatch(void) {
 }
 static void live(uint8_t id, uint16_t handle, uint8_t role) {
     uint8_t *p = ccbs[id - 1]; memset(p, 0, 48);
-    p[12] = handle; p[13] = handle >> 8; p[16] = id; p[19] = role; p[22] = 1;
+    p[12] = handle; p[13] = handle >> 8; p[16] = id; p[22] = 1; p[25] = role;
 }
 static void event(uint8_t kind, uint8_t id, uint16_t handle, uint8_t status, uint8_t tx, uint8_t rx) {
     uint8_t data[10] = {id, 0, kind, status, status, 0, handle, handle >> 8, tx, rx};
     video_radio_dm_event(data);
+}
+static void check_donor_role_binding(void) {
+    static const uint8_t roles[] = {0, 1, 2, 0xff};
+    unsigned old_allocations = allocations, old_reads = reads, old_sets = sets;
+    for (unsigned r = 0; r < sizeof(roles); ++r) {
+        for (uint8_t address_type = 0; address_type < 2; ++address_type) {
+            memset(&context, 0, sizeof(context)); memset(ccbs, 0, sizeof(ccbs));
+            live(1, 0x123, roles[r]); ccbs[0][19] = address_type;
+            event(VIDEO_RADIO_DM_OPEN, 1, 0x123, 0, 0, 0);
+            video_radio_link *link = &context.video_radio.links[0];
+            assert(link->connected == (roles[r] == 1) && !link->bound);
+            video_radio_bind(1);
+            assert(link->connected == (roles[r] == 1));
+            assert(link->bound == (roles[r] == 1));
+            assert(!mail && !depth);
+        }
+    }
+    memset(&context, 0, sizeof(context)); memset(ccbs, 0, sizeof(ccbs));
+    live(1, 0x123, 1); ccbs[0][22] = 0;
+    event(VIDEO_RADIO_DM_OPEN, 1, 0x123, 0, 0, 0); video_radio_bind(1);
+    assert(!context.video_radio.links[0].connected && !context.video_radio.links[0].bound);
+    assert(allocations == old_allocations && reads == old_reads && sets == old_sets);
+    assert(!mail && !depth);
 }
 int main(void) {
     visible = 0; live(1, 0x123, 1);
@@ -125,6 +148,7 @@ int main(void) {
     assert(mail && !reads && !sets); dispatch(); assert(reads == 1 && !sets);
     event(VIDEO_RADIO_DM_CLOSE, 1, 0x123, 0, 0, 0);
     assert(video_radio_snapshot(report) && !report[13] && !sets && !mail);
+    check_donor_role_binding();
 #ifdef VIDEO_RADIO_PLATFORM_TEST
     void *mapped = mmap((void *)0x20000000U, 0x100000, PROT_READ | PROT_WRITE,
                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);

@@ -76,8 +76,9 @@ static const uint8_t *video_radio_live(uint8_t id) {
     if (!id || id > VIDEO_RADIO_LINKS) return 0;
     const uint8_t *ccb = VIDEO_RADIO_CCB(id);
     /* Connection ID, active flag and peripheral role are authenticated by the
-     * donor guard. An EUS write binds a host link, never the UART bridge. */
-    return ccb && ccb[16] == id && ccb[22] && ccb[19] == 1 ? ccb : 0;
+     * donor guard. Role is at +25; +19 is peer address type, not role.
+     * An EUS write binds a host link, never the UART bridge. */
+    return ccb && ccb[16] == id && ccb[22] && ccb[25] == 1 ? ccb : 0;
 }
 static int video_radio_attach(video_radio_link *link, const uint8_t *ccb) {
     uint16_t handle = video_radio_u16(ccb + 12);
