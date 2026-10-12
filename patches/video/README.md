@@ -647,6 +647,16 @@ exit. RF range, battery behavior and optical presentation sync need their
 own device evidence; a successful boot does not establish them.
 ## Picture Timeline Records
 
+The decoded-picture FIFO owns admitted source-size A4 or original Y8 storage
+provided by its session owner. Depth1 or2 is explicit; full queues apply
+backpressure rather than overwrite. Producer Y is copied before the next
+decode. A published head can only be claimed by its exact picture ordinal,
+and it stays unavailable until actual display completion releases it.
+Cancellation stops admission but does not invalidate an outstanding presenter
+pin. Serial/generation exhaustion refuses instead of reusing a stale token.
+This standalone ownership primitive is not yet advertised as playback mode;
+the task owner enables it only after full startup/teardown admission is wired.
+
 Optional ID31 operations11 and12 retain protocol version1 and the existing
 24-byte bounded replay format. TIMELINE11, while stopped, carries little-endian
 u32 stream/duration_ms/start_pts_ms and u16 fps numerator/denominator after

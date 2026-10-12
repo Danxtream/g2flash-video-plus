@@ -1,0 +1,62 @@
+/* SPDX-License-Identifier: GPL-3.0-only */
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "../../patches/video/decoded_queue.c"
+
+int main(void) {
+    uint8_t *y = malloc(VIDEO_DECODED_Y8_BYTES);
+    uint8_t *pixels = malloc(2 * VIDEO_DECODED_Y8_BYTES);
+    assert(y && pixels);
+    for (uint32_t format = VIDEO_SOURCE_Y8; format <= VIDEO_SOURCE_A4; ++format) {
+        for (uint32_t depth = 1; depth <= VIDEO_DECODED_DEPTH; ++depth) {
+            video_decoded_queue q = {0};
+            video_frame_descriptor frame;
+            video_frame_time media, first = {1, 3, 0}, second = {2, 7, 62};
+            assert(!video_decoded_init(&q, 1, 9, format, depth, pixels, 1));
+            assert(video_decoded_init(&q, 1, 9, format, depth, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
+            uint32_t serial = video_decoded_reserve(&q, 1, &first);
+            assert(serial && !video_decoded_publish(&q, 1, serial));
+            assert(!video_decoded_copy(&q, 1, serial, y, 319, VIDEO_DECODED_Y8_BYTES));
+            assert(!video_decoded_copy(&q, 1, serial, y, UINT32_MAX, VIDEO_DECODED_Y8_BYTES));
+            memset(y, 0xab, VIDEO_DECODED_Y8_BYTES);
+            assert(video_decoded_copy(&q, 1, serial, y, 320, VIDEO_DECODED_Y8_BYTES));
+            memset(y, 0, VIDEO_DECODED_Y8_BYTES);
+            assert(!video_decoded_publish(&q, 2, serial));
+            assert(video_decoded_publish(&q, 1, serial));
+            assert(!video_decoded_claim(&q, 1, 2, VIDEO_SCALE_NATIVE, &frame, &media));
+            assert(video_decoded_claim(&q, 1, 1, VIDEO_SCALE_DOUBLE, &frame, &media));
+            assert(frame.pixels[0] == (format == VIDEO_SOURCE_A4 ? 0xaa : 0xab));
+            assert(media.ordinal == 1 && media.nal_sequence == 3);
+            uint32_t next = video_decoded_reserve(&q, 1, &second);
+            assert((next != 0) == (depth == 2));
+            assert(!video_decoded_release(&q, 2, 1));
+            assert(!video_decoded_cancel(&q, 1));
+            assert(!video_decoded_reserve(&q, 1, &second));
+            assert(video_decoded_release(&q, 1, 1));
+            assert(video_decoded_cancel(&q, 1));
+            assert(!video_decoded_copy(&q, 1, next, y, 320, VIDEO_DECODED_Y8_BYTES));
+            assert(!video_decoded_claim(&q, 1, 2, VIDEO_SCALE_NATIVE, &frame, &media));
+        }
+    }
+    video_decoded_queue q = {0};
+    assert(video_decoded_init(&q, 7, 9, VIDEO_SOURCE_A4, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
+    for (uint32_t ordinal = 1; ordinal < 50; ++ordinal) {
+        video_frame_time media = {ordinal, ordinal * 3, ordinal * 62};
+        video_frame_descriptor frame;
+        memset(y, ordinal, VIDEO_DECODED_Y8_BYTES);
+        uint32_t serial = video_decoded_reserve(&q, 7, &media);
+        assert(serial && video_decoded_copy(&q, 7, serial, y, 320, VIDEO_DECODED_Y8_BYTES));
+        assert(video_decoded_publish(&q, 7, serial));
+        assert(video_decoded_claim(&q, 7, ordinal, VIDEO_SCALE_NATIVE, &frame, &media));
+        assert(video_decoded_release(&q, 7, ordinal));
+    }
+    q.serial = UINT32_MAX;
+    video_frame_time final = {50, 150, 3100};
+    assert(!video_decoded_reserve(&q, 7, &final));
+    free(y);
+    free(pixels);
+    puts("A4/Y8 ownership, poisoned producer, FIFO pins, cancel, depth and finite serials PASS");
+    return 0;
+}

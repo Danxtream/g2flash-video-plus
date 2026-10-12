@@ -57,3 +57,4 @@
 #include "video/diagnostics.c"
 #include "video/control.c"
 #include "video/timeline.c"
+#include "video/decoded_queue.c"
