@@ -519,7 +519,12 @@ and the donor DM peripheral control block. Connection epochs survive handle
 reuse. The original DM and application handlers still process their events
 once; observing them creates no context, task or boot-time radio request.
 
-Task-context READ/SET requests use one copied, epoch-tagged WSF mailbox. The
+Task-context READ/SET requests use one copied eight-byte, serial-tagged WSF
+mailbox. Its immutable command state retains the epoch and permission until
+completion; the full serial rejects stale mail before reading that state.
+The mailbox and standard Read PHY buffer fit the 16-byte pool class; Set PHY
+needs the 32-byte class. Empty classes can still fall through to larger pools,
+so compact mail does not guarantee that either command has room. The
 Cordio consumer revalidates the connection before submission. SET additionally
 requires a finite owner's permission. It refuses submission unless the stock
 HCI command queue is empty, a command credit is available, and the controller

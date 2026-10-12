@@ -90,7 +90,7 @@ typedef struct {
 } video_radio_owner;
 
 /* One queued command is enough for bounded observation and restoration. The
- * context survives disconnects; copied messages carry both epoch and serial. */
+ * context survives disconnects; copied serials identify epoch-tagged commands. */
 typedef struct {
     video_radio_link links[VIDEO_RADIO_LINKS];
     video_radio_owner owners[VIDEO_RADIO_OWNERS];

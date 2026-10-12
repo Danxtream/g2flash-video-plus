@@ -7,10 +7,9 @@
 typedef struct {
     uint16_t tag;
     uint8_t event, status;
-    uint32_t epoch, serial, permission;
-    uint8_t connection, operation, tx, rx;
+    uint32_t serial;
 } video_radio_command;
-_Static_assert(sizeof(video_radio_command) == 20, "copied PHY command ABI");
+_Static_assert(sizeof(video_radio_command) == 8, "copied PHY command ABI");
 _Static_assert(sizeof(video_radio_trace) == VIDEO_RADIO_TRACE_BYTES, "radio trace ABI");
 
 #ifndef VIDEO_RADIO_CONTEXT
@@ -208,7 +207,7 @@ int video_radio_request(uint8_t id, uint32_t epoch, uint8_t operation,
     video_radio_command *command = VIDEO_RADIO_ALLOC(sizeof(*command));
     if (!command) { trace.reason = VIDEO_RADIO_REFUSAL_ALLOC; goto refused; }
     *command = (video_radio_command){VIDEO_RADIO_COMMAND_TAG, VIDEO_RADIO_COMMAND_EVENT, 0,
-        epoch, ++s->serial, permission, id, operation, tx, rx};
+        ++s->serial};
     s->connection = id; s->epoch = epoch; s->permission = permission;
     s->operation = operation; s->tx = tx; s->rx = rx;
     s->result = 1; s->pending = 1;
@@ -232,23 +231,26 @@ void video_radio_app_handler(uint8_t events, void *message) {
     customCfwContext *ctx = VIDEO_RADIO_CONTEXT();
     if (!ctx) return;
     video_radio_state *s = &ctx->video_radio;
-    if (!command->connection || command->connection > VIDEO_RADIO_LINKS) return;
-    video_radio_link *link = &s->links[command->connection - 1];
-    const uint8_t *ccb = video_radio_live(command->connection);
-    /* This consumer runs on the same WSF task as DM events. Revalidate after
-     * queueing, before entering the stock HCI queue, to reject reused IDs. */
-    if (s->pending != 1 || command->serial != s->serial) return;
+    /* One pending record owns the immutable command fields. Match its full
+     * serial before reading them: stale mail cannot borrow a newer request,
+     * while eight-byte mail can use a smaller pool class than Set PHY. */
+    VIDEO_RADIO_LOCK();
+    if (s->pending != 1 || command->serial != s->serial ||
+        !s->connection || s->connection > VIDEO_RADIO_LINKS) {
+        VIDEO_RADIO_UNLOCK(); return;
+    }
+    video_radio_link *link = &s->links[s->connection - 1];
+    const uint8_t *ccb = video_radio_live(s->connection);
     /* Match the copied request's attempt identity, even if another caller
      * recorded a busy refusal while this mail was queued. */
-    VIDEO_RADIO_LOCK();
-    video_radio_trace trace = video_radio_attempt(s->copied_attempt, command->connection,
-        command->epoch, command->operation, VIDEO_RADIO_CONSUMER_SITE);
-    if (!ccb || !link->connected || !link->bound || command->epoch != link->epoch ||
+    video_radio_trace trace = video_radio_attempt(s->copied_attempt, s->connection,
+        s->epoch, s->operation, VIDEO_RADIO_CONSUMER_SITE);
+    if (!ccb || !link->connected || !link->bound || s->epoch != link->epoch ||
         link->handle != video_radio_u16(ccb + 12) ||
-         (command->operation == VIDEO_RADIO_SET && (!command->permission ||
-          command->permission != link->permission))) trace.reason = VIDEO_RADIO_REFUSAL_COMMAND_LINK;
+         (s->operation == VIDEO_RADIO_SET && (!s->permission ||
+          s->permission != link->permission))) trace.reason = VIDEO_RADIO_REFUSAL_COMMAND_LINK;
     else if (!VIDEO_RADIO_COMMAND_ROOM()) trace.reason = VIDEO_RADIO_REFUSAL_COMMAND_CREDIT;
-    if (!trace.reason) VIDEO_RADIO_POOL_ROOM(command->operation == VIDEO_RADIO_SET ? 10 : 5, &trace);
+    if (!trace.reason) VIDEO_RADIO_POOL_ROOM(s->operation == VIDEO_RADIO_SET ? 10 : 5, &trace);
     video_radio_record(s, &trace);
     if (trace.reason) {
         s->result = 2; s->completed = s->serial; s->pending = 0;
@@ -258,10 +260,10 @@ void video_radio_app_handler(uint8_t events, void *message) {
     /* Keep selection and allocation indivisible with respect to WSF pool
      * users. The retained SET wrapper only allocates/copies/posts bounded
      * stock commands; its nested WSF sections have no heap mutex or wait. */
-    if (command->operation == VIDEO_RADIO_SET) {
+    if (s->operation == VIDEO_RADIO_SET) {
         /* A PHY value becomes a one-bit preference mask for Set PHY. */
-        VIDEO_RADIO_SET_PHY(command->connection, 0, 1u << (command->tx - 1),
-                             1u << (command->rx - 1), 0);
+        VIDEO_RADIO_SET_PHY(s->connection, 0, 1u << (s->tx - 1),
+                             1u << (s->rx - 1), 0);
         VIDEO_RADIO_UNLOCK();
     } else {
         /* Read PHY's public wrapper was stripped from this donor. Its standard

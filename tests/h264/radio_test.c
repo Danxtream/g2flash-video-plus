@@ -20,14 +20,15 @@ static void unlock(void) { assert(depth); --depth; }
 static void stock_dm(void *p) { (void)p; assert(!depth); ++dm_calls; }
 static void stock_app(uint8_t mask, void *p) { (void)mask; (void)p; ++app_calls; }
 static int available(uint32_t bytes, video_radio_trace *trace) {
-    assert(depth && bytes <= 20);
+    assert(depth && (bytes == 8 || bytes == 5 || bytes == 10));
     trace->required = bytes + 8;
-    trace->first = trace->selected = (video_radio_pool_sample){0, pool_room ? 4 : 3, 32};
+    trace->first = trace->selected = (video_radio_pool_sample){bytes == 10, pool_room ? 4 : 3,
+                                                               bytes == 10 ? 32 : 16};
     trace->reason = pool_room ? VIDEO_RADIO_REFUSAL_NONE : VIDEO_RADIO_REFUSAL_POOL_RESERVE;
     return pool_room;
 }
 static void *allocate(uint16_t bytes) {
-    ++allocations; assert(depth && !mail && bytes == 20);
+    ++allocations; assert(depth && !mail && bytes == 8);
     return allocation_ok ? calloc(1, bytes) : 0;
 }
 static void send(uint8_t id, void *p) { assert(depth && id == 7); mail = p; }
@@ -71,6 +72,35 @@ static void live(uint8_t id, uint16_t handle, uint8_t role) {
 static void event(uint8_t kind, uint8_t id, uint16_t handle, uint8_t status, uint8_t tx, uint8_t rx) {
     uint8_t data[10] = {id, 0, kind, status, status, 0, handle, handle >> 8, tx, rx};
     video_radio_dm_event(data);
+}
+static void check_compact_mailbox(void) {
+    memset(&context, 0, sizeof(context)); memset(ccbs, 0, sizeof(ccbs));
+    live(1, 0x123, 1); video_radio_bind(1);
+    video_radio_state *s = &context.video_radio;
+    unsigned old_reads = reads, old_sets = sets;
+    assert(sizeof(video_radio_command) == 8);
+    assert(video_radio_request(1, 1, VIDEO_RADIO_READ, 0, 0, 0));
+    assert(s->last_attempt.required == 16 && s->last_attempt.first.size == 16);
+    video_radio_command *stale = mail; mail = 0;
+    uint32_t stale_serial = stale->serial;
+    event(VIDEO_RADIO_DM_CLOSE, 1, 0x123, 0, 0, 0);
+    live(1, 0x123, 1); video_radio_bind(1);
+    s->links[0].permission = 7;
+    s->serial = stale_serial + 0xffffU; /* A truncated serial would alias the old mail. */
+    assert(video_radio_request(1, 2, VIDEO_RADIO_SET, 2, 2, 7));
+    assert(((video_radio_command *)mail)->serial > stale_serial);
+    assert((uint16_t)((video_radio_command *)mail)->serial == (uint16_t)stale_serial);
+    assert(s->last_attempt.required == 16 && s->last_attempt.first.size == 16);
+    video_radio_app_handler(0, stale); free(stale);
+    assert(s->pending == 1 && reads == old_reads && sets == old_sets && !depth);
+    dispatch();
+    assert(s->pending == 2 && sets == old_sets + 1 && reads == old_reads);
+    assert(s->last_attempt.required == 18 && s->last_attempt.first.size == 32);
+    event(VIDEO_RADIO_DM_UPDATE, 1, 0x123, 0, 2, 2);
+    assert(!s->pending && s->completed == s->serial);
+    assert(video_radio_request(1, 2, VIDEO_RADIO_READ, 0, 0, 0));
+    dispatch(); event(VIDEO_RADIO_DM_READ, 1, 0x123, 0, 2, 2);
+    assert(reads == old_reads + 1 && sets == old_sets + 1 && !mail && !depth);
 }
 static void check_donor_role_binding(void) {
     static const uint8_t roles[] = {0, 1, 2, 0xff};
@@ -216,6 +246,7 @@ int main(void) {
     assert(video_radio_snapshot(report) && !report[13] && !sets && !mail);
     check_donor_role_binding();
     check_refusal_evidence();
+    check_compact_mailbox();
 #ifdef VIDEO_RADIO_PLATFORM_TEST
     void *mapped = mmap((void *)0x20000000U, 0x100000, PROT_READ | PROT_WRITE,
                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
@@ -233,6 +264,7 @@ int main(void) {
     assert(check_pool(20)); /* 20+8 = 28, selects the 32-byte pool. */
     *(uint32_t *)(pools + 12 + 8) += 16;
     assert(!check_pool(20)); /* Three remaining: preserve them. */
+    assert(check_pool(8) && platform_trace.selected.size == 16); /* Compact mail avoids this class. */
     assert(check_pool(5)); /* 5+8 = 13, Read uses the 16-byte pool. */
     assert(!check_pool(10)); /* 10+8 = 18, Set uses the 32-byte pool. */
     *(uint32_t *)(pools + 12 + 8) -= 16;
