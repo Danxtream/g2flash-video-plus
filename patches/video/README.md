@@ -3,10 +3,29 @@
 ## Queued Playback
 
 The optional control13 query returns16 bytes: version, operation, result,
-feature mask (bit0 owned queue), depth2, frame rate16, two reserved bytes,
+feature mask (bit0 owned queue, bit1 paired triggers, bit2 compact metadata), depth2, frame rate16, two reserved bytes,
 then LE32 A4 charged allowance77824 and presenter stack8192. START option4
-requires a configured TIMELINE and currently supports a single target only.
-Neither capability nor default START implies synchronized paired playback.
+requires a configured TIMELINE. BOTH-target queued START enables paired wire
+triggers; option8 explicitly pairs independently delivered host streams.
+Neither legacy capability nor default START implies synchronized playback.
+
+Compact FRAME_TIME operation14 retains the24-byte request and returns6 bytes:
+LE32 accepted picture ordinal, remaining metadata credits, result. Full mail
+returns BUSY without accepting a new row. The PC queues metadata for reference
+identified terminating NALs, never assuming every NAL produces a picture.
+
+RIGHT coordinates at16fps, regardless of compressed-payload ingress. Wire-only
+kind5 records carry source/version/operation, stream, picture ordinal, PTS,
+sender-local tick, ready depth and terminal flag in24 bytes. READY gates the
+matching heads; a common TRIGGER consumes an already-decoded frame. RIGHT
+waits for both actual copy completions before advancing. LEFT never runs its
+own cadence. Repeated READY/TRIGGER/DONE records are idempotent; a lost DONE
+is recovered by a repeated trigger, not another presentation. Unknown
+completion cancels within the display limit and preserves ordinary quarantine.
+No local tick values are compared across lenses; wire compensation defaults
+to zero pending loaded hardware measurements, not a claimed optical offset.
+Bridge callback only posts into a stable bounded mailbox; controller forwards
+wakes, and presenter processes records. Legacy input and stock hooks unchanged.
 
 The lazy presenter owns two30720-byte A4 snapshots and a guarded8KiB static
 task stack, with its own reserve-aware allocation ledger. Metadata names the

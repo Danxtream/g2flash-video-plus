@@ -1,6 +1,7 @@
 #include "message_transport.h"
 #include "memory.h"
 #include "video/power.h"
+#include "video/sync.h"
 
 #ifndef CFW_STOCK_RECEIVE
 #define CFW_STOCK_RECEIVE ((uint32_t (*)(uint8_t, const uint8_t *, uint16_t))0x004cf3e9u)
@@ -283,6 +284,7 @@ uint32_t cfw_message_bridge_received(uint32_t app_id, const uint8_t *data,
     uint8_t here = cfw_message_lens(), origin = data[1];
     if (!here || (origin != CFW_MESSAGE_LEFT && origin != CFW_MESSAGE_RIGHT)) return 0xau;
     if (data[0] == VIDEO_POWER_BRIDGE) return video_power_received(data, length);
+    if (data[0] == VIDEO_SYNC_BRIDGE) return here == origin ? 0 : video_sync_received(data, length);
     if (data[0] == CFW_BRIDGE_REQUEST) {
         if (here == origin) return 0;
         if (length > 265) return 0xbu;

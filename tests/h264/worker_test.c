@@ -307,6 +307,44 @@ static int worker_radio_refusal_snapshot(uint8_t *out) {
 #include "../../patches/video/timeline.c"
 #include "../../patches/video/decoded_queue.c"
 #include "../../patches/video/pacing.c"
+#include "../../patches/video/sync.c"
+static uint32_t paired_fixture, partner_anchor;
+static video_sync partner;
+static int test_sync_send(const uint8_t *body) {
+    assert(!image_depth && !service_context && body[0] == VIDEO_SYNC_BRIDGE);
+    if (!paired_fixture) return 1;
+    uint32_t source = body[1], operation = body[3], stream = video_read32(body + 4);
+    uint32_t ordinal = video_read32(body + 8), pts = video_read32(body + 12);
+    uint8_t reply[VIDEO_SYNC_BYTES]; memcpy(reply, body, sizeof(reply));
+    reply[1] ^= CFW_MESSAGE_BOTH;
+    if (operation == VIDEO_SYNC_READY) {
+        assert(video_sync_ready(&partner, ordinal, pts, body[20], body[21]));
+        if (source == CFW_MESSAGE_RIGHT) {
+            reply[3] = VIDEO_SYNC_READY;
+            assert(!video_sync_received(reply, sizeof(reply)));
+        } else {
+            assert(video_sync_receive(&partner, source, stream, operation, ordinal, pts, body[20], body[21]));
+            if (video_sync_trigger(&partner)) {
+                if (!partner_anchor) partner_anchor = tick();
+                uint32_t due = partner_anchor + (ordinal - 1) * 1000 / 16;
+                while ((int32_t)(due - tick()) > 0) delay(1);
+                reply[3] = VIDEO_SYNC_TRIGGER; reply[20] = reply[21] = 0;
+                assert(video_sync_complete(&partner, ordinal));
+                assert(!video_sync_received(reply, sizeof(reply)));
+            }
+        }
+    } else if (operation == VIDEO_SYNC_TRIGGER) {
+        assert(video_sync_receive(&partner, source, stream, operation, ordinal, pts, 0, 0));
+        assert(video_sync_complete(&partner, ordinal));
+        reply[3] = VIDEO_SYNC_DONE;
+        assert(!video_sync_received(reply, sizeof(reply)));
+    } else if (operation == VIDEO_SYNC_DONE) {
+        assert(video_sync_receive(&partner, source, stream, operation, ordinal, pts, 0, 0));
+    }
+    return 1;
+}
+#define VIDEO_SYNC_SEND test_sync_send
+#include "../../patches/video/sync_wire.c"
 #include "../../patches/video/presenter.c"
 static uint32_t test_crc(const g2_h264_frame_info *frame) {
     __atomic_fetch_add(&crc_calls, 1, __ATOMIC_RELAXED); return video_frame_crc(frame);
@@ -1320,15 +1358,19 @@ int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
     return 1;
 }
 
-static void queued_consumer(void) {
+static void queued_consumer_mode(uint32_t mode) {
     configure(); request_next = 0; consume_enabled = queued_upload = 1;
+    paired_fixture = mode; partner_anchor = 0;
+    uint32_t here = mode == 2 ? CFW_MESSAGE_RIGHT : CFW_MESSAGE_LEFT;
+    assert(video_sync_init(&partner, 1, here ^ CFW_MESSAGE_BOTH));
     context.framebuffer_shadow = 0;
     assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, 0, 16, 1));
     context.video_control.owner_origin = 1;
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
     control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_QUEUED_PRESENTATION;
-    cfw_message_route route = control_route; route.targets = CFW_MESSAGE_LEFT;
+    cfw_message_route route = control_route; route.targets = mode ? CFW_MESSAGE_BOTH : CFW_MESSAGE_LEFT;
     assert(!video_control_received(p, 24, &route));
+    context.video_control.owner_here = here;
     assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
     pool_drain(); await_ready();
     video_owner *owner = context.video_owner;
@@ -1350,6 +1392,7 @@ static void queued_consumer(void) {
     assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
     pool_drain(); finish(); assert(!presenter_live && terminates == 2);
     shadow_free(owned_shadow); context.framebuffer_shadow = 0;
+    paired_fixture = 0;
     for (uint32_t fail = 8; fail <= 10; ++fail) {
         configure(); request_next = 0; fail_at = fail;
         assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, 0, 16, 1));
@@ -1359,6 +1402,30 @@ static void queued_consumer(void) {
         pool_drain(); finish(); assert(!allocations_live && !presenter_live);
     }
     puts("independent guarded presenter, owned queue, fixed cadence and teardown PASS");
+}
+
+static void queued_consumer(void) { queued_consumer_mode(0); }
+static void paired_consumer(void) {
+    queued_consumer_mode(1); queued_consumer_mode(2);
+    puts("LEFT triggered follower and RIGHT coordinator with actual display copies PASS");
+}
+
+static void sync_posting(void) {
+    configure();
+    uint8_t body[VIDEO_SYNC_BYTES] = {VIDEO_SYNC_BRIDGE, 2, 1, VIDEO_SYNC_READY};
+    uint32_t allocations = allocation_calls, locks = mutex_calls, wakes = event_calls;
+    service_context = 1;
+    assert(video_sync_received(body, sizeof(body) - 1) == 6);
+    for (uint32_t i = 0; i < VIDEO_SYNC_MAIL_ROWS; ++i) assert(!video_sync_received(body, sizeof(body)));
+    assert(video_sync_received(body, sizeof(body)) == 6);
+    assert(context.video_control.sync_mail.overflow);
+    service_context = 0;
+    assert(allocation_calls == allocations && mutex_calls == locks && event_calls == wakes);
+    pool_drain();
+    context.video_control.sync_mail.high = context.video_control.sync_mail.low = UINT32_MAX;
+    assert(video_sync_received(body, sizeof(body)) == 6); pool_drain();
+    assert(!allocations_live && !task_live && !presenter_live);
+    puts("bounded ordered callback copying, overflow and finite-counter refusal without waits/heap PASS");
 }
 
 static void consumer(void) {
@@ -2055,7 +2122,7 @@ static void radio_contract(void) {
     configure(); request_next = 0;
     uint8_t p[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
     control_command(p, VIDEO_CONTROL_CAPABILITIES, 0);
-    assert(!control_snapshot(p, 8, report) && report[71] == 0x87 && !radio_acquires);
+    assert(!control_snapshot(p, 8, report) && report[71] == 0x8f && !radio_acquires);
     control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_RADIO_OFF;
     assert(!control_snapshot(p, 24, report));
     assert(!control_snapshot(p, 24, report) && !radio_acquires);
@@ -2100,6 +2167,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "recovery")) recovery();
     else if (!strcmp(argv[1], "consumer")) consumer();
     else if (!strcmp(argv[1], "queued-consumer")) queued_consumer();
+    else if (!strcmp(argv[1], "paired-consumer")) paired_consumer();
+    else if (!strcmp(argv[1], "sync-posting")) sync_posting();
     else if (!strcmp(argv[1], "evidence")) evidence();
     else if (!strcmp(argv[1], "evidence-replays")) evidence_replays();
     else if (!strcmp(argv[1], "presentation-failures")) presentation_failures();

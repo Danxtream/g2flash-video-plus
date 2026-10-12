@@ -54,6 +54,9 @@ static int test_bridge(uint16_t app, const uint8_t *p, uint16_t n, void *argumen
 uint32_t video_power_received(const uint8_t *data, uint32_t size) {
     (void)data; (void)size; return 6;
 }
+uint32_t video_sync_received(const uint8_t *data, uint32_t size) {
+    (void)data; (void)size; return 6;
+}
 #include "../../patches/message_transport.c"
 
 int cfw_message_received(const uint8_t *p, uint16_t n, uint16_t crc) {

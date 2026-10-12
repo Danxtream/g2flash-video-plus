@@ -108,6 +108,12 @@ class WorkerTests(unittest.TestCase):
     def test_owned_pictures_use_independent_fixed_clock_presenter_and_drain(self):
         self.check_case("queued-consumer")
 
+    def test_both_presenter_sides_process_posted_wire_records_and_copies(self):
+        self.check_case("paired-consumer")
+
+    def test_wire_callback_only_posts_and_refuses_overflow_without_heap_or_wait(self):
+        self.check_case("sync-posting")
+
     def test_optional_evidence_bounds_ack_waits_and_never_aborts_timing_anomalies(self):
         self.check_case("evidence")
 

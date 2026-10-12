@@ -47,6 +47,24 @@ class TimelineTests(unittest.TestCase):
                 client.frame_time(*args)
         self.assertFalse(self.sent)
 
+    def test_compact_metadata_has_independent_credits_and_pair_capability(self):
+        client = self.client()
+        captured = []
+        def replies(payload, length, **kwargs):
+            captured.append((payload, length, kwargs))
+            if payload[1] == video_client.PLAYBACK_CAPABILITIES:
+                raw = bytes((1, 13, 0, 7, 2, 16, 0, 0)) + struct.pack('<II', 77824, 8192)
+            else:
+                raw = struct.pack('<IBB', 3, 2, 0)
+            return {1: raw, 2: raw}
+        client.raw_replies = replies
+        self.assertTrue(client.playback_capabilities()[2]['paired'])
+        report = client.frame_time_fast(9, 3, 11, 125)
+        self.assertEqual(report['result'], 0)
+        self.assertEqual(report['by_lens'][1], dict(accepted=3, credits=2, result=0))
+        self.assertEqual(struct.unpack('<BBBBIIIII', captured[1][0]), (31, 14, 1, 0, 7, 9, 3, 11, 125))
+        self.assertEqual(captured[1][1:], (6, dict(result_offset=5)))
+
     def test_bounded_picture_metadata_under_fatal_sanitizers(self):
         with tempfile.TemporaryDirectory() as directory:
             exe = Path(directory) / 'timeline-test'

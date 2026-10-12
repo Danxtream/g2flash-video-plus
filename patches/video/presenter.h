@@ -6,9 +6,11 @@
 #include "storage.h"
 #include "evidence.h"
 #include "worker.h"
+#include "sync.h"
 
 enum {
     VIDEO_QUEUED_PRESENTATION = 4,
+    VIDEO_PAIRED_PRESENTATION = 8,
     VIDEO_PRESENTER_STACK_BYTES = 8192,
     /* Separate from the decoder cap: pixels, guarded stack, TCB/events/ledger
      * and room for the later bounded sync/report records, with charged headers. */
@@ -17,7 +19,8 @@ enum {
     VIDEO_PLAYBACK_CAPABILITIES = 13,
     VIDEO_PLAYBACK_CAPABILITIES_BYTES = 16,
     VIDEO_PLAYBACK_QUEUE = 1,
-    VIDEO_PLAYBACK_PAIRED = 2
+    VIDEO_PLAYBACK_PAIRED = 2,
+    VIDEO_PLAYBACK_METADATA = 4
 };
 
 struct video_owner;
@@ -29,6 +32,8 @@ typedef struct {
     uint32_t shown, holds, fault, stack_used, guards_ok;
     video_decoded_queue queue;
     video_pacing pacing;
+    video_sync sync;
+    uint32_t paired, sync_sent, sync_deadline, ready_sent, done_pts, trigger_tick, wire_capture;
     video_storage storage;
     video_frame_result evidence[VIDEO_DECODED_DEPTH];
     uint8_t tcb[VIDEO_THREAD_CONTROL_BYTES] __attribute__((aligned(8)));

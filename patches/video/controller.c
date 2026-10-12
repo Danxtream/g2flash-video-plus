@@ -35,7 +35,7 @@ int video_controller_request_locked(uint32_t reasons) {
     customCfwContext *ctx = peekCustomCfwContext();
     if (!ctx || !reasons || reasons & ~(VIDEO_CONTROLLER_START |
         VIDEO_CONTROLLER_STOP | VIDEO_CONTROLLER_REAP | VIDEO_CONTROLLER_LEASE |
-        VIDEO_CONTROLLER_PRESENT | VIDEO_CONTROLLER_POWER | VIDEO_CONTROLLER_RADIO)) return 0;
+        VIDEO_CONTROLLER_PRESENT | VIDEO_CONTROLLER_POWER | VIDEO_CONTROLLER_RADIO | VIDEO_CONTROLLER_SYNC)) return 0;
     __atomic_fetch_or(&ctx->video_control.controller_reasons, reasons, __ATOMIC_ACQ_REL);
     return video_controller_schedule(ctx);
 }
@@ -81,6 +81,15 @@ void video_control_notify_radio(void) {
     video_controller_schedule(ctx);
 }
 
+void video_control_notify_sync(void) {
+    customCfwContext *ctx = peekCustomCfwContext();
+    if (!ctx) return;
+    __atomic_fetch_or(&ctx->video_control.controller_reasons, VIDEO_CONTROLLER_SYNC, __ATOMIC_ACQ_REL);
+    if (!video_controller_schedule(ctx))
+        video_notify_generation(&ctx->video_control.notify_failed_generation,
+                                __atomic_load_n(&ctx->video_control.control_generation, __ATOMIC_ACQUIRE));
+}
+
 void video_controller_parked(uint32_t token) {
     customCfwContext *ctx = peekCustomCfwContext();
     if (!ctx || !token || token != __atomic_load_n(&ctx->video.token, __ATOMIC_ACQUIRE)) return;
@@ -119,6 +128,7 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
         }
         uint32_t reasons = __atomic_exchange_n(&s->controller_reasons, 0, __ATOMIC_ACQ_REL);
         uint32_t guard = s->start_guard;
+        if (reasons & VIDEO_CONTROLLER_SYNC) video_worker_wake_locked(ctx->video.token, VIDEO_WAKE_INPUT);
         if (guard && video_radio_generation_lost(guard)) {
             video_control_cancel_locked();
             reasons = (reasons & ~VIDEO_CONTROLLER_START) | VIDEO_CONTROLLER_STOP;

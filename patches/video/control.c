@@ -65,7 +65,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
         __ATOMIC_ACQUIRE) << VIDEO_POWER_STEP_SHIFT);
     p[70] = 7 | VIDEO_FEATURE_CREDITS | VIDEO_FEATURE_DECODE_TOTALS |
         (1u << VIDEO_STATUS_EXTENSION_SHIFT); /* Advertise one 64-byte STATUS extension. */
-    p[71] = VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES | VIDEO_QUEUED_PRESENTATION;
+    p[71] = VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES | VIDEO_QUEUED_PRESENTATION | VIDEO_PAIRED_PRESENTATION;
     video_write32(p + 72, queue.gap_deadline);
     video_write32(p + 76, queue.gap_sequence);
     video_write32(p + 80, ctx->video_presentation.presented);
@@ -108,11 +108,13 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         s->owner_origin = origin;
         return VIDEO_CONTROL_ACCEPTED;
     }
-    if (op == VIDEO_CONTROL_FRAME_TIME) {
+    if (op == VIDEO_CONTROL_FRAME_TIME || op == VIDEO_CONTROL_FRAME_TIME_FAST) {
         if (n != VIDEO_TIMELINE_BYTES) return VIDEO_CONTROL_FORMAT;
         if (!s->start_guard || origin != s->owner_origin ||
             !video_control_generation_valid(ctx, s->start_guard)) return VIDEO_CONTROL_STALE;
         video_frame_time frame = {video_read32(p + 12), video_read32(p + 16), video_read32(p + 20)};
+        if (op == VIDEO_CONTROL_FRAME_TIME_FAST && s->timeline.count == VIDEO_TIMELINE_RECORDS &&
+            frame.ordinal > s->timeline.accepted) return VIDEO_CONTROL_BUSY;
         return video_timeline_offer(&s->timeline, video_read32(p + 8),
             s->control_generation, &frame) ?
             (video_worker_wake_locked(ctx->video.token, VIDEO_WAKE_INPUT), VIDEO_CONTROL_ACCEPTED) : VIDEO_CONTROL_INPUT;
@@ -146,7 +148,7 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         if (n != VIDEO_START_BYTES || p[12] != (VIDEO_FRAME_WIDTH & 255) ||
             p[13] != VIDEO_FRAME_WIDTH >> 8 || p[14] != VIDEO_FRAME_HEIGHT || p[15] ||
             p[16] != VIDEO_FRAME_REFERENCES || p[17] != VIDEO_FRAME_DPB ||
-            p[18] & ~(VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES | VIDEO_QUEUED_PRESENTATION) || p[19])
+            p[18] & ~(VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES | VIDEO_QUEUED_PRESENTATION | VIDEO_PAIRED_PRESENTATION) || p[19])
             return VIDEO_CONTROL_FORMAT;
         uint32_t stream = video_read32(p + 8), interval = video_read32(p + 20);
         if (!stream || stream <= s->stream_high || interval < VIDEO_INTERVAL_MIN ||
@@ -159,7 +161,9 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         if (s->timeline.configured && (s->timeline.stream != stream || s->owner_origin != origin))
             return VIDEO_CONTROL_FORMAT;
         if ((p[18] & VIDEO_QUEUED_PRESENTATION) &&
-            (!s->timeline.configured || targets == CFW_MESSAGE_BOTH)) return VIDEO_CONTROL_FORMAT;
+            !s->timeline.configured) return VIDEO_CONTROL_FORMAT;
+        if ((p[18] & VIDEO_PAIRED_PRESENTATION) && !(p[18] & VIDEO_QUEUED_PRESENTATION))
+            return VIDEO_CONTROL_FORMAT;
         s->stream = s->stream_high = stream;
         s->interval = interval;
         s->options = p[18];
@@ -263,13 +267,19 @@ int video_control_received(const uint8_t *data, uint16_t size,
         memcpy(entry->command, data, size);
         entry->result = video_control_apply(ctx, data, size, route->here, route->origin, route->targets);
         video_snapshot(ctx, entry);
+        if (data[1] == VIDEO_CONTROL_FRAME_TIME_FAST) {
+            entry->snapshot_bytes = VIDEO_CREDITS_BYTES;
+            video_write32(entry->snapshot, s->timeline.accepted);
+            entry->snapshot[4] = VIDEO_TIMELINE_RECORDS - s->timeline.count;
+            entry->snapshot[5] = entry->result;
+        }
         if (data[1] == VIDEO_PLAYBACK_CAPABILITIES && size == VIDEO_CONTROL_HEADER_BYTES) {
             bzero(entry->snapshot, VIDEO_PLAYBACK_CAPABILITIES_BYTES);
             entry->snapshot_bytes = VIDEO_PLAYBACK_CAPABILITIES_BYTES;
             entry->result = VIDEO_CONTROL_ACCEPTED;
             entry->snapshot[0] = VIDEO_PROTOCOL_VERSION;
             entry->snapshot[1] = VIDEO_PLAYBACK_CAPABILITIES;
-            entry->snapshot[3] = VIDEO_PLAYBACK_QUEUE;
+            entry->snapshot[3] = VIDEO_PLAYBACK_QUEUE | VIDEO_PLAYBACK_PAIRED | VIDEO_PLAYBACK_METADATA;
             entry->snapshot[4] = VIDEO_DECODED_DEPTH;
             entry->snapshot[5] = VIDEO_TIMELINE_FPS;
             video_write32(entry->snapshot + 8, VIDEO_PRESENTER_A4_LIMIT);

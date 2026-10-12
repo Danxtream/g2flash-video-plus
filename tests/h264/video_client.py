@@ -16,6 +16,8 @@ from receive_client import (control, diagnostics, diagnostic_alerts,
 FRAME_READ, FRAME_ACK, CREDITS, VERIFY_FRAMES, NATIVE = 8, 9, 10, 128, 1
 TIMELINE, FRAME_TIME = 11, 12
 PLAYBACK_CAPABILITIES, QUEUED = 13, 4
+PAIRED = 8
+FRAME_TIME_FAST = 14
 RADIO_OFF = 2
 BASE_STATUS_BYTES, STATUS_BYTES, FRAME_BYTES, ACK_BYTES = 128, 192, 80, 16
 RESULT_FIELDS = ('ordinal', 'first_nal', 'last_nal', 'geometry', 'crc', 'cycles', 'ticks',
@@ -33,7 +35,8 @@ def status(raw):
             struct.unpack_from('<IIHHBB', raw, 32) != (4096, 4086, 320, 192, 1, 2) or
             raw[46:50] != bytes((1, 1, 4, 6)) or raw[50] not in (0, 4, 6) or raw[51] > raw[50] or
             raw[70] != 63 or raw[71] not in (VERIFY_FRAMES | NATIVE, VERIFY_FRAMES | NATIVE | RADIO_OFF,
-                                           VERIFY_FRAMES | NATIVE | RADIO_OFF | QUEUED) or raw[68] > 2 or raw[69] >> 3 >= len(POWER_STEPS)):
+                                           VERIFY_FRAMES | NATIVE | RADIO_OFF | QUEUED,
+                                           VERIFY_FRAMES | NATIVE | RADIO_OFF | QUEUED | PAIRED) or raw[68] > 2 or raw[69] >> 3 >= len(POWER_STEPS)):
         raise ValueError('unsupported or inconsistent playback contract')
     result = dict(version=raw[0], stage=raw[1], result=raw[2], state=raw[3], capacity=raw[50],
                   credits=raw[51], recovery=raw[68], headers=raw[69] & 7, compact_credits=bool(raw[70] & 8),
@@ -163,9 +166,9 @@ class VideoClient(VideoLink):
         payload = struct.pack('<BBBBI', MESSAGE, PLAYBACK_CAPABILITIES, VERSION, 0, request)
         replies = self.raw_replies(payload, 16)
         for raw in replies.values():
-            if raw[:4] != bytes((VERSION, PLAYBACK_CAPABILITIES, 0, 1)) or raw[4:8] != bytes((2, 16, 0, 0)):
+            if raw[:3] != bytes((VERSION, PLAYBACK_CAPABILITIES, 0)) or raw[3] not in (1, 3, 7) or raw[4:8] != bytes((2, 16, 0, 0)):
                 raise ValueError('unsupported queued playback capability')
-        return {lens: dict(depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
+        return {lens: dict(paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
                            stack_bytes=struct.unpack_from('<I', raw, 12)[0]) for lens, raw in replies.items()}
 
     def configure_timeline(self, stream, duration_ms, start_pts_ms=0):
@@ -188,6 +191,21 @@ class VideoClient(VideoLink):
                               request, stream, ordinal, nal_sequence, pts_ms)
         return paired_report({lens: status(raw) for lens, raw in
                               self.raw_replies(payload, BASE_STATUS_BYTES).items()})
+
+    def frame_time_fast(self, stream, ordinal, nal_sequence, pts_ms):
+        """Use advertised six-byte metadata replies rather than a paged STATUS."""
+        if (not 0 < stream <= 0xffffffff or not 0 < ordinal <= 0xffffffff or
+                not 0 <= nal_sequence <= 0xffffffff or not 0 <= pts_ms <= 0xffffffff):
+            raise ValueError('invalid completed-picture identity')
+        request = self.counter.reserve()
+        payload = struct.pack('<BBBBIIIII', MESSAGE, FRAME_TIME_FAST, VERSION, 0,
+                              request, stream, ordinal, nal_sequence, pts_ms)
+        replies = self.raw_replies(payload, 6, result_offset=5)
+        reports = {lens: dict(accepted=struct.unpack_from('<I', raw)[0], credits=raw[4],
+                              result=raw[5]) for lens, raw in replies.items()}
+        if any(r['credits'] > 4 for r in reports.values()):
+            raise ValueError('invalid metadata credits')
+        return dict(result=max(r['result'] for r in reports.values()), by_lens=reports)
 
     """Forwarded paired delivery and bounded frozen replies on a supplied link."""
     def raw_replies(self, payload, length, *, targets=None, result_offset=2):
@@ -224,9 +242,11 @@ class VideoClient(VideoLink):
             raise ValueError('use source-tagged replies for paired commands')
         return next(iter(self.raw_replies(payload, length).values()))
 
-    def command(self, op, stream=0, *, native=False, verify=False, radio="video", token=0, ordinal=0, lens=None):
+    def command(self, op, stream=0, *, native=False, verify=False, queued=False, paired=False, radio="video", token=0, ordinal=0, lens=None):
         if radio not in ("off", "video"):
             raise ValueError("radio mode must be off or video")
+        if paired and not queued:
+            raise ValueError('paired presentation requires queued playback')
         request = self.counter.reserve()
         if op in (FRAME_READ, FRAME_ACK):
             target = self.targets if lens is None else lens
@@ -243,7 +263,7 @@ class VideoClient(VideoLink):
             return dict(result=raw[2], stream=astream, token=atoken, acked=cursor)
         payload = bytearray(control(op, request, stream))
         if op == START:
-            payload[18] = (NATIVE if native else 0) | (VERIFY_FRAMES if verify else 0) | (RADIO_OFF if radio == "off" else 0)
+            payload[18] = (NATIVE if native else 0) | (VERIFY_FRAMES if verify else 0) | (RADIO_OFF if radio == "off" else 0) | (QUEUED if queued else 0) | (PAIRED if paired else 0)
         return paired_report({source: status(raw) for source, raw in
                               self.raw_replies(payload, STATUS_BYTES if op == STATUS else BASE_STATUS_BYTES).items()})
 
@@ -292,6 +312,8 @@ class DirectPairClient:
         self.clients = {1: left, 2: right}
 
     def command(self, op, stream=0, *, lens=None, **kwargs):
+        if op == START and kwargs.get('queued'):
+            kwargs['paired'] = True
         if lens is not None:
             return self.clients[lens].command(op, stream, **kwargs)
         return paired_report({side: client.command(op, stream, **kwargs)
@@ -300,6 +322,18 @@ class DirectPairClient:
     def credits(self, stream, tokens):
         return paired_report({side: client.credits(stream, tokens)
                               for side, client in self.clients.items()})
+
+    def playback_capabilities(self):
+        return {side: client.playback_capabilities()[side] for side, client in self.clients.items()}
+
+    def configure_timeline(self, stream, duration_ms, start_pts_ms=0):
+        return paired_report({side: client.configure_timeline(stream, duration_ms, start_pts_ms)
+                              for side, client in self.clients.items()})
+
+    def frame_time_fast(self, stream, ordinal, nal_sequence, pts_ms):
+        reports = {side: client.frame_time_fast(stream, ordinal, nal_sequence, pts_ms)['by_lens'][side]
+                   for side, client in self.clients.items()}
+        return dict(result=max(r['result'] for r in reports.values()), by_lens=reports)
 
     def send_window(self, payloads):
         results = {side: client.send_window(payloads) for side, client in self.clients.items()}
@@ -366,7 +400,7 @@ def presentation_rate(samples):
                 reason='observed copy intervals; excludes startup and reply delay')
 
 
-def stream_clip(client, nals, reference, *, verify=True, native=False, radio="video", progress=lambda text: None,
+def stream_clip(client, nals, reference, *, verify=True, native=False, queued=False, radio="video", progress=lambda text: None,
                 renew=lambda: None, on_ready=lambda state: None, on_finished=lambda state: None, pace_fps=0, timeout=600,
                 clock=time.monotonic, sleep=time.sleep):
     """Use owner-bound credit windows; a reconnect or refusal voids the run.
@@ -389,9 +423,18 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, radio="vi
     if radio == 'off' and any(not r.get('radio_supported') for r in per_lens(capabilities).values()):
         raise ValueError('radio Off is not advertised by every targeted lens')
     stream = capabilities['stream_high'] + 1
+    if queued:
+        playback = client.playback_capabilities()
+        if any(not r['compact_metadata'] or (client.targets == 3 and not r['paired']) for r in playback.values()):
+            raise ValueError('every recipient must advertise queued playback and compact metadata')
+        if client.configure_timeline(stream, (reference['frame_count'] * 1000 + 15) // 16)['result']:
+            raise ValueError('timeline configuration refused')
     deadline = clock() + timeout
     try:
-        state = client.command(START, stream, native=native, verify=verify, radio=radio)
+        start_options = dict(native=native, verify=verify, radio=radio)
+        if queued:
+            start_options['queued'] = True
+        state = client.command(START, stream, **start_options)
         if state['result']:
             raise ValueError(f'START refused: {state["result"]}')
         while state['state'] != 2:
@@ -474,6 +517,19 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, radio="vi
                         count = offset
                         break
             if count:
+                if queued:
+                    for offset in range(count):
+                        ordinal = finishing.get(index + offset)
+                        if ordinal:
+                            metadata = client.frame_time_fast(stream, ordinal, index + offset, (ordinal - 1) * 1000 // 16)
+                            if metadata['result'] == 3:
+                                count = offset
+                                break
+                            if metadata['result']:
+                                raise ValueError('completed-picture metadata refused')
+                if not count:
+                    sleep(.01)
+                    continue
                 result = client.send_window([nal(stream, index + offset, nals[index + offset])
                                              for offset in range(count)])
                 if (len(result) != count or any(set(row) != set(tokens) or

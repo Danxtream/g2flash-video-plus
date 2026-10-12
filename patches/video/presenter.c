@@ -24,7 +24,9 @@ static void video_presenter_fault(video_owner *owner, uint32_t fault) {
     video_presenter_park(owner->presenter);
 }
 
-static void video_presenter_entry(void *argument) {
+/* A separate callback section lets the linker resolve its ROPI address;
+ * same-section MOVW/MOVT folding overflows as the surrounding player grows. */
+__attribute__((section(".text.presenter"))) static void video_presenter_entry(void *argument) {
     video_presenter *p = argument;
     video_owner *owner = p->decoder;
     customCfwContext *ctx = owner->context;
@@ -34,19 +36,34 @@ static void video_presenter_entry(void *argument) {
         VIDEO_OS_EVENT_WAIT(p->wake, VIDEO_WAKE_ALL, 0, VIDEO_WAIT_FOREVER);
     }
     while (!video_lifecycle_cancelled(&ctx->video, p->token)) {
+        if (p->paired) video_presenter_sync_poll(p);
         if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS))
             video_presenter_fault(owner, VIDEO_FAULT_OWNERSHIP);
         video_decoded_queue *q = &p->queue;
         uint32_t now = VIDEO_TICK, ordinal = p->shown + 1, deadline = now;
         int available = q->count && q->slots[q->head].state == VIDEO_DECODED_READY;
+        uint32_t ready_depth = 0;
+        while (ready_depth < q->count &&
+               q->slots[(q->head + ready_depth) % q->depth].state == VIDEO_DECODED_READY) ++ready_depth;
         /* Prebuffer two pictures, except an explicitly timed terminal picture.
          * After starvation re-anchor, never run a catch-up presentation burst. */
         int terminal = available && q->slots[q->head].media.pts + 63 >= ctx->video_control.timeline.duration;
+        uint32_t ready_pts = available ? q->slots[q->head].media.pts : 0;
+        int advertise = 0;
+        if (p->paired && available) {
+            advertise = p->sync.local_ordinal != ordinal || p->sync.local_depth != ready_depth ||
+                        (int32_t)(now - p->ready_sent) >= 100;
+            if (!video_sync_ready(&p->sync, ordinal, ready_pts, ready_depth, terminal)) {
+                video_control_give(ctx); video_presenter_fault(owner, VIDEO_FAULT_SEQUENCE);
+            }
+        }
         if (!available) {
             if (!buffering) ++p->holds;
             buffering = 1;
         }
-        if (available && buffering && (q->count == q->depth || terminal)) {
+        if (available && buffering && (ready_depth == q->depth || terminal) &&
+            (!p->paired || p->sync.side == 1 ||
+             (p->sync.peer_ordinal == ordinal && (p->sync.peer_depth == q->depth || p->sync.peer_terminal)))) {
             video_pacing_anchor(&p->pacing, p->generation, ordinal, now);
             buffering = 0;
         }
@@ -57,12 +74,32 @@ static void video_presenter_entry(void *argument) {
         }
         video_frame_descriptor frame;
         video_frame_time media;
-        int claim = available && !buffering && (int32_t)(now - deadline) >= 0 &&
+        int trigger = 0;
+        int due = available && !buffering && (int32_t)(now - deadline) >= 0;
+        if (p->paired) {
+            if (p->sync.side == 2) {
+                trigger = due && video_sync_trigger(&p->sync);
+                due = trigger;
+                if (trigger) {
+                    p->trigger_tick = now; p->sync_sent = now;
+                    p->sync_deadline = now + VIDEO_DISPLAY_LIMIT_MS;
+                }
+            } else due = available && p->sync.triggered == ordinal && p->sync.completed < ordinal;
+        }
+        int claim = due &&
             video_decoded_claim(q, p->generation, ordinal,
                 ctx->video_control.options & VIDEO_PRESENT_NATIVE ? VIDEO_SCALE_NATIVE : VIDEO_SCALE_DOUBLE,
                 &frame, &media);
         uint32_t wait = available && !buffering && !claim ? deadline - now : 1000;
+        if (p->paired && !claim) wait = 50;
         video_control_give(ctx);
+        if (advertise) {
+            if (!video_presenter_sync_send(p, VIDEO_SYNC_READY, ordinal, ready_pts, ready_depth, terminal))
+                video_presenter_fault(owner, VIDEO_FAULT_DISPLAY);
+            p->ready_sent = now;
+        }
+        if (trigger && !video_presenter_sync_send(p, VIDEO_SYNC_TRIGGER, ordinal, ready_pts, 0, 0))
+            video_presenter_fault(owner, VIDEO_FAULT_DISPLAY);
         if (!claim) {
             uint32_t result = VIDEO_OS_EVENT_WAIT(p->wake, VIDEO_WAKE_ALL, 0, wait);
             if ((result & VIDEO_EVENT_ERROR) && result != VIDEO_EVENT_TIMEOUT)
@@ -88,6 +125,10 @@ static void video_presenter_entry(void *argument) {
         }
         int released = video_decoded_release(q, p->generation, ordinal);
         p->shown = ordinal;
+        if (p->paired && !video_sync_complete(&p->sync, ordinal)) {
+            video_control_give(ctx); video_presenter_fault(owner, VIDEO_FAULT_SEQUENCE);
+        }
+        p->done_pts = media.pts;
         /* Copy/decode overrun holds the cadence instead of showing overdue
          * pictures back-to-back. RIGHT paired coordination extends this later. */
         if ((int32_t)(VIDEO_TICK - deadline) >= 63) {
@@ -97,6 +138,9 @@ static void video_presenter_entry(void *argument) {
         VIDEO_OS_EVENT_SET(owner->wake, VIDEO_WAKE_INPUT);
         video_control_give(ctx);
         if (!released) video_presenter_fault(owner, VIDEO_FAULT_OWNERSHIP);
+        if (p->paired && p->sync.side == 1 &&
+            !video_presenter_sync_send(p, VIDEO_SYNC_DONE, ordinal, media.pts, 0, 0))
+            video_presenter_fault(owner, VIDEO_FAULT_DISPLAY);
     }
     video_presenter_park(p);
 }
@@ -110,6 +154,12 @@ static int video_presenter_prepare(video_owner *owner) {
                                  ~(uintptr_t)(VIDEO_ALLOC_ALIGNMENT - 1));
     bzero((uint8_t *)p, sizeof(*p));
     p->raw = raw; p->decoder = owner; p->generation = owner->control_generation; p->token = owner->token;
+    p->paired = owner->context->video_control.owner_targets == CFW_MESSAGE_BOTH ||
+                (owner->context->video_control.options & VIDEO_PAIRED_PRESENTATION);
+    if (!video_sync_init(&p->sync, owner->context->video_control.stream,
+                         owner->context->video_control.owner_here)) {
+        VIDEO_OWNER_FREE(raw); return 0;
+    }
     owner->presenter = p;
     video_heap_ops heap = {0, video_platform_allocate, video_platform_release, video_platform_heap_view};
     if (!video_storage_init(&p->storage, &heap, video_owner_charge(raw_bytes),

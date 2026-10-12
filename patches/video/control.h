@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include "../message_transport.h"
 #include "timeline.h"
+#include "sync.h"
 
 enum {
     VIDEO_MESSAGE_ID = 31,
@@ -20,6 +21,7 @@ enum {
     VIDEO_CONTROL_CREDITS = 10,
     VIDEO_CONTROL_TIMELINE = 11,
     VIDEO_CONTROL_FRAME_TIME = 12,
+    VIDEO_CONTROL_FRAME_TIME_FAST = 14,
     VIDEO_CREDITS_REQUEST_BYTES = 20,
     VIDEO_CREDITS_BYTES = 6,
     VIDEO_FEATURE_CREDITS = 8,
@@ -54,6 +56,7 @@ enum {
     VIDEO_CONTROLLER_PRESENT = 16,
     VIDEO_CONTROLLER_POWER = 32,
     VIDEO_CONTROLLER_RADIO = 64,
+    VIDEO_CONTROLLER_SYNC = 128,
     VIDEO_RADIO_OFF = 2,
     VIDEO_CONTROL_ACCEPTED = 0,
     VIDEO_CONTROL_FORMAT,
@@ -101,6 +104,7 @@ typedef struct {
     uint8_t replay_next[2];
     uint8_t owner_here, owner_targets; /* Reuse alignment padding before timeline. */
     video_timeline timeline;
+    video_sync_mail sync_mail;
     video_control_replay replay[2][VIDEO_CONTROL_REPLAYS];
 } video_control_state;
 
