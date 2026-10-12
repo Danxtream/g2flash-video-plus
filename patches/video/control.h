@@ -2,6 +2,7 @@
 #pragma once
 #include <stdint.h>
 #include "../message_transport.h"
+#include "timeline.h"
 
 enum {
     VIDEO_MESSAGE_ID = 31,
@@ -17,6 +18,8 @@ enum {
     VIDEO_CONTROL_FRAME_READ = 8,
     VIDEO_CONTROL_FRAME_ACK = 9,
     VIDEO_CONTROL_CREDITS = 10,
+    VIDEO_CONTROL_TIMELINE = 11,
+    VIDEO_CONTROL_FRAME_TIME = 12,
     VIDEO_CREDITS_REQUEST_BYTES = 20,
     VIDEO_CREDITS_BYTES = 6,
     VIDEO_FEATURE_CREDITS = 8,
@@ -96,6 +99,7 @@ typedef struct {
     volatile uint32_t notify_failed_generation;
     volatile uint32_t stack_sequence, stack_task, stack_used, stack_bytes;
     uint8_t replay_next[2];
+    video_timeline timeline;
     video_control_replay replay[2][VIDEO_CONTROL_REPLAYS];
 } video_control_state;
 

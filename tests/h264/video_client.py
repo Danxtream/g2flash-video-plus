@@ -14,6 +14,7 @@ from receive_client import (control, diagnostics, diagnostic_alerts,
                             DIAGNOSTICS, PAGE, nal)
 
 FRAME_READ, FRAME_ACK, CREDITS, VERIFY_FRAMES, NATIVE = 8, 9, 10, 128, 1
+TIMELINE, FRAME_TIME = 11, 12
 RADIO_OFF = 2
 BASE_STATUS_BYTES, STATUS_BYTES, FRAME_BYTES, ACK_BYTES = 128, 192, 80, 16
 RESULT_FIELDS = ('ordinal', 'first_nal', 'last_nal', 'geometry', 'crc', 'cycles', 'ticks',
@@ -154,6 +155,27 @@ def paired_report(reports):
 
 
 class VideoClient(VideoLink):
+    def configure_timeline(self, stream, duration_ms, start_pts_ms=0):
+        """Prepare optional picture metadata without enabling queued presentation."""
+        if not 0 < stream <= 0xffffffff or not 0 < duration_ms <= 0xffffffff or not 0 <= start_pts_ms <= duration_ms:
+            raise ValueError('invalid timeline stream, duration or position')
+        request = self.counter.reserve()
+        payload = struct.pack('<BBBBIIIIHH', MESSAGE, TIMELINE, VERSION, 0,
+                              request, stream, duration_ms, start_pts_ms, 16, 1)
+        return paired_report({lens: status(raw) for lens, raw in
+                              self.raw_replies(payload, BASE_STATUS_BYTES).items()})
+
+    def frame_time(self, stream, ordinal, nal_sequence, pts_ms):
+        """Associate a completed picture with its terminating slice, not every NAL."""
+        if (not 0 < stream <= 0xffffffff or not 0 < ordinal <= 0xffffffff or
+                not 0 <= nal_sequence <= 0xffffffff or not 0 <= pts_ms <= 0xffffffff):
+            raise ValueError('invalid completed-picture identity')
+        request = self.counter.reserve()
+        payload = struct.pack('<BBBBIIIII', MESSAGE, FRAME_TIME, VERSION, 0,
+                              request, stream, ordinal, nal_sequence, pts_ms)
+        return paired_report({lens: status(raw) for lens, raw in
+                              self.raw_replies(payload, BASE_STATUS_BYTES).items()})
+
     """Forwarded paired delivery and bounded frozen replies on a supplied link."""
     def raw_replies(self, payload, length, *, targets=None, result_offset=2):
         started = time.monotonic()

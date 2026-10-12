@@ -645,3 +645,16 @@ only indirect input/scheduling effects of host PHY can change its throughput.
 Check stock hand-back, same-state heaps, stacks and restoration after every
 exit. RF range, battery behavior and optical presentation sync need their
 own device evidence; a successful boot does not establish them.
+## Picture Timeline Records
+
+Optional ID31 operations11 and12 retain protocol version1 and the existing
+24-byte bounded replay format. TIMELINE11, while stopped, carries little-endian
+u32 stream/duration_ms/start_pts_ms and u16 fps numerator/denominator after
+the eight-byte control header. This contract currently accepts16/1 only.
+FRAME_TIME12 carries u32 stream/picture_ordinal/terminating_nal_sequence/pts_ms.
+Pictures are one-based; parameter sets and filler do not increment ordinals.
+Four metadata records have credits independent of compressed input slots.
+Exact duplicates are idempotent; conflicting, stale and overflowing records
+refuse without overwriting pending media identity. RESET retires the generation.
+These records do not themselves enable queued or synchronized presentation;
+legacy playback remains decode-ready until that capability is advertised.

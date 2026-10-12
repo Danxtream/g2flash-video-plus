@@ -56,3 +56,4 @@
 #include "video/controller.c"
 #include "video/diagnostics.c"
 #include "video/control.c"
+#include "video/timeline.c"

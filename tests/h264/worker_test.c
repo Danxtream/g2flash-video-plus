@@ -300,6 +300,7 @@ static int worker_radio_refusal_snapshot(uint8_t *out) {
 }
 #define VIDEO_RADIO_REFUSAL_SNAPSHOT worker_radio_refusal_snapshot
 #include "../../patches/video/control.c"
+#include "../../patches/video/timeline.c"
 static uint32_t test_crc(const g2_h264_frame_info *frame) {
     __atomic_fetch_add(&crc_calls, 1, __ATOMIC_RELAXED); return video_frame_crc(frame);
 }

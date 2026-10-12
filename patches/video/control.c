@@ -96,6 +96,26 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
                                uint32_t n, uint8_t here, uint8_t origin) {
     video_control_state *s = &ctx->video_control;
     uint8_t op = p[1];
+    if (op == VIDEO_CONTROL_TIMELINE) {
+        if (n != VIDEO_TIMELINE_BYTES) return VIDEO_CONTROL_FORMAT;
+        if (s->start_guard || s->stop_generation || s->controller_job ||
+            video_lifecycle_state(&ctx->video) != VIDEO_IDLE) return VIDEO_CONTROL_BUSY;
+        uint32_t stream = video_read32(p + 8);
+        if (stream <= s->stream_high || !video_timeline_configure(&s->timeline, stream,
+            video_read32(p + 12), video_read32(p + 16),
+            (uint16_t)p[20] | (uint16_t)p[21] << 8,
+            (uint16_t)p[22] | (uint16_t)p[23] << 8)) return VIDEO_CONTROL_FORMAT;
+        s->owner_origin = origin;
+        return VIDEO_CONTROL_ACCEPTED;
+    }
+    if (op == VIDEO_CONTROL_FRAME_TIME) {
+        if (n != VIDEO_TIMELINE_BYTES) return VIDEO_CONTROL_FORMAT;
+        if (!s->start_guard || origin != s->owner_origin ||
+            !video_control_generation_valid(ctx, s->start_guard)) return VIDEO_CONTROL_STALE;
+        video_frame_time frame = {video_read32(p + 12), video_read32(p + 16), video_read32(p + 20)};
+        return video_timeline_offer(&s->timeline, video_read32(p + 8),
+            s->control_generation, &frame) ? VIDEO_CONTROL_ACCEPTED : VIDEO_CONTROL_INPUT;
+    }
     if (op == VIDEO_CONTROL_CREDITS) {
         if (n != VIDEO_CREDITS_REQUEST_BYTES) return VIDEO_CONTROL_FORMAT;
         uint32_t token = video_read32(p + (here == CFW_MESSAGE_LEFT ? 12 : 16));
@@ -135,11 +155,16 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
             video_lifecycle_state(&ctx->video) != VIDEO_IDLE)
             return VIDEO_CONTROL_BUSY;
         if (s->control_generation == UINT32_MAX) return VIDEO_CONTROL_STALE;
+        if (s->timeline.configured && (s->timeline.stream != stream || s->owner_origin != origin))
+            return VIDEO_CONTROL_FORMAT;
         s->stream = s->stream_high = stream;
         s->interval = interval;
         s->options = p[18];
         s->owner_origin = origin;
         uint32_t generation = s->control_generation + 1;
+        if (s->timeline.configured) {
+            video_timeline_start(&s->timeline, stream, generation);
+        }
         __atomic_store_n(&s->control_generation, generation, __ATOMIC_RELEASE);
         __atomic_store_n(&s->start_guard, generation, __ATOMIC_RELEASE);
         uint32_t deadline = VIDEO_TICK + VIDEO_INACTIVITY_LIMIT_MS;
@@ -158,6 +183,7 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         if (!s->stream || video_read32(p + 8) != s->stream || origin != s->owner_origin)
             return VIDEO_CONTROL_STALE;
         __atomic_store_n(&s->start_guard, 0, __ATOMIC_RELEASE); /* Cancels even before a private owner is claimed. */
+        video_timeline_stop(&s->timeline, s->control_generation);
         s->stop_generation = s->control_generation;
         video_worker_request_stop_locked();
         if (!video_controller_request_locked(VIDEO_CONTROLLER_STOP)) {
