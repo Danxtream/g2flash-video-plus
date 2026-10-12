@@ -53,6 +53,10 @@ class RadioContractTests(unittest.TestCase):
         raw[71] = 129
         with self.assertRaises(ValueError): status(raw)
         raw[71] = 135
+        self.assertTrue(status(raw)['radio_supported'])
+        struct.pack_into('<I', raw, 92, 4)
+        self.assertEqual(status(raw)['options'], 4)
+        raw[71] = 139
         with self.assertRaises(ValueError): status(raw)
         raw[71] = 131; struct.pack_into('<I', raw, 92, 4)
         with self.assertRaises(ValueError): status(raw)

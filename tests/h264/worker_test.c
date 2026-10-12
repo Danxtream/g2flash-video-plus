@@ -19,6 +19,9 @@
 static customCfwContext context;
 static pthread_mutex_t image = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t worker;
+static pthread_t presenter_thread;
+static uint32_t presenter_live;
+static _Thread_local uint32_t picture_thread;
 static _Thread_local uint32_t image_depth, worker_thread, service_context;
 static uint32_t task_live, creates, terminates, allocation_calls, allocations_live;
 static uint32_t fail_at, fail_task, bad_tcb, fail_terminate, fail_view;
@@ -26,6 +29,7 @@ static uint32_t cancel_new, expire_new, fail_publication, defer_reclaimed;
 static uint32_t feed, fed, stream_ok, corrupt_guard, suppress_park;
 static uint32_t consume_enabled, decoded_calls, consumed_frames, decode_paused, refuse_extension;
 static uint32_t upload_limit;
+static uint32_t queued_upload;
 static uint32_t cycle_reads, clock_inits, calibrations, crc_calls, anomalous_clock;
 static uint32_t forced_cycles, force_cycles;
 static uint32_t evidence_drain, evidence_next, evidence_checked, evidence_was_full;
@@ -41,7 +45,7 @@ typedef struct {
     pthread_cond_t condition;
     uint32_t bits, waiters;
 } fake_event;
-static fake_event events[4];
+static fake_event events[8];
 static video_heap_view views[3] = {{382756, 376832}, {285680, 278528}, {133924, 131072}};
 static uint32_t cached_used, cached_peak;
 static video_pool_item pool_jobs[8];
@@ -65,7 +69,7 @@ static uint32_t display_allocated, fail_shadow, copied_frames, overlay_calls, fl
 static uint8_t physical_frame[VIDEO_PANEL_BYTES];
 static uint8_t *owned_shadow;
 static int display_take(void) {
-    assert(image_depth && !service_context);
+    assert((picture_thread ? !image_depth : image_depth) && !service_context);
     if (fail_gate) return 0;
     assert(!display_gate); display_gate = 1; return 1;
 }
@@ -116,7 +120,7 @@ static int give(uint32_t m) {
 }
 static uint32_t mutex_new(void *p) { assert(!p && !image_depth); ++mutex_calls; return 1; }
 static int mutex_delete(uint32_t m) { assert(m == 1 && !image_depth); return 0; }
-static uint32_t thread_id(void) { return worker_thread ? 2 : 3; }
+static uint32_t thread_id(void) { return worker_thread ? 2 : picture_thread ? 4 : 3; }
 static uint32_t controller_used = 512, controller_samples;
 static int stack_sample(uint32_t *task, uint32_t *used, uint32_t *bytes) {
     assert(!service_context && !image_depth && !worker_thread);
@@ -173,7 +177,7 @@ static void release(void *p) {
         assert(context.video_runtime); ++runtime_at_release;
     }
     uint32_t *raw = (uint32_t *)p - 2;
-    for (uint32_t i = 0; i < 4; ++i) {
+    for (uint32_t i = 0; i < 8; ++i) {
         uintptr_t control = (uintptr_t)events[i].control;
         if (control >= (uintptr_t)p && control < (uintptr_t)p + *raw) {
             assert(!events[i].waiters);
@@ -301,6 +305,9 @@ static int worker_radio_refusal_snapshot(uint8_t *out) {
 #define VIDEO_RADIO_REFUSAL_SNAPSHOT worker_radio_refusal_snapshot
 #include "../../patches/video/control.c"
 #include "../../patches/video/timeline.c"
+#include "../../patches/video/decoded_queue.c"
+#include "../../patches/video/pacing.c"
+#include "../../patches/video/presenter.c"
 static uint32_t test_crc(const g2_h264_frame_info *frame) {
     __atomic_fetch_add(&crc_calls, 1, __ATOMIC_RELAXED); return video_frame_crc(frame);
 }
@@ -310,14 +317,17 @@ void worker_finish_call(void) {
     video_owner *owner = video_current_owner(); assert(owner && worker_thread);
     video_storage_finish_call(&owner->storage);
 }
-struct Start { void (*fn)(void *); void *arg; };
+struct Start { void (*fn)(void *); void *arg; uint32_t picture; };
 static void *entry(void *p) {
-    struct Start start = *(struct Start *)p; free(p); worker_thread = 1;
+    struct Start start = *(struct Start *)p; free(p);
+    picture_thread = start.picture; worker_thread = !start.picture;
     start.fn(start.arg); assert(0); return 0;
 }
 static uint32_t new_thread(void (*fn)(void *), void *arg, const video_thread_attr *attr) {
-    assert(!image_depth && attr->stack_size == 16384 && attr->cb_size == 112 &&
-           attr->stack_mem && attr->cb_mem && attr->priority == 8 && !task_live);
+    int picture = attr->stack_size == VIDEO_PRESENTER_STACK_BYTES;
+    assert(!image_depth && (picture || attr->stack_size == 16384) && attr->cb_size == 112 &&
+           attr->stack_mem && attr->cb_mem && attr->priority == 8 &&
+           (picture ? !presenter_live : !task_live));
     ++creates;
     if (fail_task) return 0;
     ((uint8_t *)attr->cb_mem)[109] = bad_tcb ? 0 : 2;
@@ -329,7 +339,11 @@ static uint32_t new_thread(void (*fn)(void *), void *arg, const video_thread_att
     }
     if (expire_new) __atomic_store_n(&context.direct_lease_deadline, tick() - 1, __ATOMIC_RELEASE);
     struct Start *start = malloc(sizeof(*start)); assert(start);
-    *start = (struct Start){fn, arg};
+    *start = (struct Start){fn, arg, picture};
+    if (picture) {
+        presenter_live = 1;
+        assert(!pthread_create(&presenter_thread, 0, entry, start)); return 4;
+    }
     task_live = 1; assert(!pthread_create(&worker, 0, entry, start)); return 2;
 }
 static int delay(uint32_t ms) {
@@ -368,7 +382,7 @@ static g2_h264_result worker_decode(void *handle, const uint8_t *nal, uint32_t b
 static uint32_t event_new(const video_event_attr *attr) {
     assert(!image_depth && attr && attr->cb_mem && attr->cb_size == 32);
     if (++event_calls == fail_event) return 0;
-    for (uint32_t i = 0; i < 4; ++i) {
+    for (uint32_t i = 0; i < 8; ++i) {
         if (events[i].control) continue;
         events[i].control = attr->cb_mem;
         assert(!pthread_mutex_init(&events[i].mutex, 0));
@@ -378,7 +392,7 @@ static uint32_t event_new(const video_event_attr *attr) {
     assert(0); return 0;
 }
 static uint32_t event_set(uint32_t id, uint32_t bits) {
-    assert(!service_context && id && id <= 4 && events[id - 1].control && bits && !(bits & 0xff000000u));
+    assert(!service_context && id && id <= 8 && events[id - 1].control && bits && !(bits & 0xff000000u));
     fake_event *event = &events[id - 1];
     assert(!pthread_mutex_lock(&event->mutex));
     event->bits |= bits;
@@ -393,7 +407,7 @@ static void cancelled_wait(void *argument) {
     assert(!pthread_mutex_unlock(&event->mutex));
 }
 static uint32_t event_wait(uint32_t id, uint32_t mask, uint32_t options, uint32_t timeout) {
-    assert(!image_depth && id && id <= 4 && events[id - 1].control && !options);
+    assert(!image_depth && id && id <= 8 && events[id - 1].control && !options);
     if (worker_thread) {
         ++worker_waits;
         if (timeout != UINT32_MAX && timeout > longest_wait) longest_wait = timeout;
@@ -447,10 +461,17 @@ static uint32_t event_wait(uint32_t id, uint32_t mask, uint32_t options, uint32_
 }
 static int video_platform_event_quiescent(uint32_t id) {
     if (!id) return 1;
-    assert(id <= 4 && events[id - 1].control);
+    assert(id <= 8 && events[id - 1].control);
     return !events[id - 1].waiters;
 }
 static int terminate(uint32_t id) {
+    if (id == 4) {
+        assert(!image_depth && !worker_thread && !picture_thread && presenter_live);
+        assert(context.video_owner && ((video_owner *)context.video_owner)->presenter->parked);
+        if (fail_terminate) return -1;
+        assert(!pthread_cancel(presenter_thread)); assert(!pthread_join(presenter_thread, 0));
+        presenter_live = 0; ++terminates; return 0;
+    }
     assert(!image_depth && !worker_thread && id == 2 && task_live &&
            __atomic_load_n(&context.video.parked, __ATOMIC_ACQUIRE));
     ++terminates; if (fail_terminate) return -1;
@@ -463,7 +484,7 @@ static void configure(void) {
     assert(!radio_active);
     power_awake = 1; power_starts = 0; radio_lost = 0;
     radio_acquires = radio_releases = radio_off = deny_radio = 0;
-    assert(!allocations_live && !task_live);
+    assert(!allocations_live && !task_live && !presenter_live);
     memset(&context, 0, sizeof(context)); context.image_mutex = 1;
     context.direct_lease_deadline = tick() + 60000;
     if (shadow_present) context.framebuffer_shadow = (void *)(uintptr_t)1;
@@ -477,11 +498,11 @@ static void configure(void) {
     fail_pool = pool_calls = control_reply_size = 0;
     controller_used = 512; controller_samples = 0; heap_sample_hook = 0;
     consume_enabled = decoded_calls = consumed_frames = decode_paused = refuse_extension = 0;
-    upload_limit = 0;
+    upload_limit = queued_upload = 0;
     cycle_reads = clock_inits = calibrations = crc_calls = anomalous_clock = 0;
     forced_cycles = force_cycles = 0;
     evidence_drain = evidence_checked = evidence_was_full = 0; evidence_next = 1;
-    for (uint32_t i = 0; i < 4; ++i) assert(!events[i].control);
+    for (uint32_t i = 0; i < 8; ++i) assert(!events[i].control);
     views[0] = (video_heap_view){382756, 376832};
     views[1] = (video_heap_view){285680, 278528};
     views[2] = (video_heap_view){133924, 131072};
@@ -1272,6 +1293,21 @@ int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
     video_write32(record + 2, 1); video_write32(record + 6, sequence);
     memcpy(record + VIDEO_NAL_HEADER_BYTES, nal, bytes);
     uint32_t limit = tick() + 3000;
+    if (queued_upload && sequence >= 2) {
+        /* This fixture emits exactly one terminating slice per picture;
+         * production clients obtain these identities from decoded references. */
+        video_frame_time media = {sequence - 1, sequence, (sequence - 2) * 1000 / 16};
+        for (;;) {
+            assert(!take(1, 1000));
+            int offered = video_timeline_offer(&context.video_control.timeline, 1,
+                                               context.video_control.control_generation, &media);
+            if (offered) video_worker_wake_locked(context.video.token, VIDEO_WAKE_INPUT);
+            give(1);
+            if (offered) break;
+            display_pump(); pool_drain();
+            assert((int32_t)(limit - tick()) > 0); delay(1);
+        }
+    }
     for (;;) {
         display_pump(); pool_drain(); drain_frame_results();
         if (!video_control_received(record, VIDEO_NAL_HEADER_BYTES + bytes, &control_route)) break;
@@ -1282,6 +1318,47 @@ int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
     assert(!video_control_received(record, VIDEO_NAL_HEADER_BYTES + bytes, &control_route));
     memset(record + VIDEO_NAL_HEADER_BYTES, 0xee, bytes);
     return 1;
+}
+
+static void queued_consumer(void) {
+    configure(); request_next = 0; consume_enabled = queued_upload = 1;
+    context.framebuffer_shadow = 0;
+    assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, 0, 16, 1));
+    context.video_control.owner_origin = 1;
+    uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+    control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_QUEUED_PRESENTATION;
+    cfw_message_route route = control_route; route.targets = CFW_MESSAGE_LEFT;
+    assert(!video_control_received(p, 24, &route));
+    assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); await_ready();
+    video_owner *owner = context.video_owner;
+    assert(owner->presenter && creates == 2 && owner->presenter->storage.used <= VIDEO_PRESENTER_A4_LIMIT);
+    uint32_t started = tick();
+    assert(worker_enqueue_stream());
+    uint32_t limit = tick() + 4000;
+    for (;;) {
+        display_pump(); pool_drain();
+        assert(!take(1, 1000));
+        int done = copied_frames == 32 && owner->presenter->shown == 32;
+        give(1);
+        if (done) break;
+        assert((int32_t)(limit - tick()) > 0 && !context.video.fault); delay(1);
+    }
+    assert(tick() - started >= 1900 && consumed_frames == 32 && decoded_calls == 34);
+    assert(owner->presenter->queue.released == 32);
+    control_command(p, VIDEO_CONTROL_STOP, 1);
+    assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); finish(); assert(!presenter_live && terminates == 2);
+    shadow_free(owned_shadow); context.framebuffer_shadow = 0;
+    for (uint32_t fail = 8; fail <= 10; ++fail) {
+        configure(); request_next = 0; fail_at = fail;
+        assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, 0, 16, 1));
+        context.video_control.owner_origin = 1;
+        control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_QUEUED_PRESENTATION;
+        assert(!video_control_received(p, 24, &route));
+        pool_drain(); finish(); assert(!allocations_live && !presenter_live);
+    }
+    puts("independent guarded presenter, owned queue, fixed cadence and teardown PASS");
 }
 
 static void consumer(void) {
@@ -1978,7 +2055,7 @@ static void radio_contract(void) {
     configure(); request_next = 0;
     uint8_t p[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
     control_command(p, VIDEO_CONTROL_CAPABILITIES, 0);
-    assert(!control_snapshot(p, 8, report) && report[71] == 0x83 && !radio_acquires);
+    assert(!control_snapshot(p, 8, report) && report[71] == 0x87 && !radio_acquires);
     control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_RADIO_OFF;
     assert(!control_snapshot(p, 24, report));
     assert(!control_snapshot(p, 24, report) && !radio_acquires);
@@ -2022,6 +2099,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "queue-extension")) queue_extension();
     else if (!strcmp(argv[1], "recovery")) recovery();
     else if (!strcmp(argv[1], "consumer")) consumer();
+    else if (!strcmp(argv[1], "queued-consumer")) queued_consumer();
     else if (!strcmp(argv[1], "evidence")) evidence();
     else if (!strcmp(argv[1], "evidence-replays")) evidence_replays();
     else if (!strcmp(argv[1], "presentation-failures")) presentation_failures();

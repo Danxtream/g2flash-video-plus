@@ -99,6 +99,7 @@ typedef struct {
     volatile uint32_t notify_failed_generation;
     volatile uint32_t stack_sequence, stack_task, stack_used, stack_bytes;
     uint8_t replay_next[2];
+    uint8_t owner_here, owner_targets; /* Reuse alignment padding before timeline. */
     video_timeline timeline;
     video_control_replay replay[2][VIDEO_CONTROL_REPLAYS];
 } video_control_state;

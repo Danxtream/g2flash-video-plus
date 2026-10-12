@@ -1,5 +1,23 @@
 # Cached decoder ownership
 
+## Queued Playback
+
+The optional control13 query returns16 bytes: version, operation, result,
+feature mask (bit0 owned queue), depth2, frame rate16, two reserved bytes,
+then LE32 A4 charged allowance77824 and presenter stack8192. START option4
+requires a configured TIMELINE and currently supports a single target only.
+Neither capability nor default START implies synchronized paired playback.
+
+The lazy presenter owns two30720-byte A4 snapshots and a guarded8KiB static
+task stack, with its own reserve-aware allocation ledger. Metadata names the
+completed picture and terminating NAL independently. The decoder cannot reuse
+its borrowed Y until copying is complete; snapshots stay pinned through actual
+display-copy completion. Prebuffer two pictures, except the timed terminal
+picture. Absolute16fps deadlines use alternating62/63ms intervals; starvation
+holds/rebuffers rather than presenting overdue pictures in a burst. Controller
+completion work posts wakeups; pacing runs on the presenter task. Unknown
+completion, task ABI, stack guard or teardown failures retain quarantine.
+
 The internal worker API is inert until a caller explicitly starts it. No boot
 path creates a video allocation, task or timer. Start requires a live framebuffer
 lease and an absent texture cache. Release jim's previous lease normally before

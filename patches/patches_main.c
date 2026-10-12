@@ -58,3 +58,5 @@
 #include "video/control.c"
 #include "video/timeline.c"
 #include "video/decoded_queue.c"
+#include "video/pacing.c"
+#include "video/presenter.c"

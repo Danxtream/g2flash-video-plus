@@ -17,7 +17,8 @@ enum {
     VIDEO_DISPLAY_COPYING,
     VIDEO_DISPLAY_COMPLETE,
     VIDEO_DISPLAY_FAILED,
-    VIDEO_DISPLAY_LIMIT_MS = 2000
+    VIDEO_DISPLAY_LIMIT_MS = 2000,
+    VIDEO_DISPLAY_TAKE_LIMIT_MS = 1000
 };
 
 /* Packing consumes borrowed Y immediately. A later queued presenter can supply

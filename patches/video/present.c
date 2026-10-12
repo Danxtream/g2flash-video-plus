@@ -10,7 +10,7 @@
  * its authenticated underlying take and retain the actual ownership result. */
 static int video_platform_display_take(void) {
     uint32_t gate = *(const volatile uint32_t *)0x2007698cU;
-    return gate && ((int (*)(uint32_t, uint32_t))0x00442389U)(gate, 1000) == 1;
+    return gate && ((int (*)(uint32_t, uint32_t))0x00442389U)(gate, VIDEO_DISPLAY_TAKE_LIMIT_MS) == 1;
 }
 #define VIDEO_DISPLAY_TAKE video_platform_display_take
 #define VIDEO_DISPLAY_SIGNAL FW_DISPLAY_SIGNAL
@@ -109,11 +109,15 @@ int video_display_fold_locked(void) {
 
 int video_present_frame(const video_frame_descriptor *frame) {
     video_owner *owner = video_current_owner();
-    if (!owner || !frame || owner->thread != VIDEO_OS_THREAD_ID() ||
+    uint32_t task = VIDEO_OS_THREAD_ID();
+    int presenter = owner && owner->presenter && owner->presenter->thread == task;
+    if (!owner || !frame || (!presenter && owner->thread != task) ||
         frame->token != owner->token || frame->generation != owner->control_generation ||
         !video_prepare_shadow(owner)) return 0;
-    if (owner->control_generation && !video_power_deadline(owner->control_generation))
+    if (owner->control_generation && !video_power_deadline(owner->control_generation)) {
+        if (presenter) video_presenter_fault(owner, VIDEO_FAULT_POWER);
         video_runtime_fail(VIDEO_FAULT_POWER);
+    }
     customCfwContext *ctx = owner->context;
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) return 0;
     video_presentation_state *p = &ctx->video_presentation;
@@ -121,7 +125,23 @@ int video_present_frame(const video_frame_descriptor *frame) {
         video_lifecycle_cancelled(&ctx->video, frame->token)) {
         video_control_give(ctx); return 0;
     }
-    if (!VIDEO_DISPLAY_TAKE()) { video_control_give(ctx); return 0; }
+    if (presenter) {
+        /* The gate can block: do not hold publication protection while taking
+         * it. A nonblocking re-lock cannot deadlock a stock image owner. */
+        video_control_give(ctx);
+        uint32_t admission = VIDEO_TICK + VIDEO_DISPLAY_LIMIT_MS;
+        for (;;) {
+            if (video_lifecycle_cancelled(&ctx->video, frame->token) ||
+                (int32_t)(admission - VIDEO_TICK) < VIDEO_DISPLAY_TAKE_LIMIT_MS ||
+                !VIDEO_DISPLAY_TAKE()) return 0;
+            if (video_control_take(ctx)) break;
+            VIDEO_DISPLAY_SIGNAL();
+            if (VIDEO_OS_DELAY(1)) return 0;
+        }
+        if (p->pin || ctx->direct_pending || !ctx->framebuffer_shadow) {
+            VIDEO_DISPLAY_SIGNAL(); video_control_give(ctx); return 0;
+        }
+    } else if (!VIDEO_DISPLAY_TAKE()) { video_control_give(ctx); return 0; }
     if (!video_lease_valid(ctx) || video_lifecycle_cancelled(&ctx->video, frame->token) ||
         !video_pack_frame(ctx->framebuffer_shadow, VIDEO_PANEL_BYTES, frame) ||
         !video_lifecycle_pin(&ctx->video, frame->token, 0)) {
@@ -144,12 +164,14 @@ int video_present_frame(const video_frame_descriptor *frame) {
         if (done) return success;
         uint32_t now = VIDEO_TICK;
         if ((int32_t)(deadline - now) <= 0) break;
-        uint32_t wake = VIDEO_OS_EVENT_WAIT(owner->wake, VIDEO_WAKE_ALL, 0, deadline - now);
+        uint32_t wake = VIDEO_OS_EVENT_WAIT(presenter ? owner->presenter->wake : owner->wake,
+                                           VIDEO_WAKE_ALL, 0, deadline - now);
         if ((wake & VIDEO_EVENT_ERROR) && wake != VIDEO_EVENT_TIMEOUT) break;
     }
     /* A submitted pointer may still be live in the stock queue or copier.
      * Never clear it, release its gate or free storage after an unknown timeout. */
     __atomic_store_n(&ctx->video_quarantine_token, owner->token, __ATOMIC_RELEASE);
+    if (presenter) video_presenter_fault(owner, VIDEO_FAULT_DISPLAY);
     video_runtime_fail(VIDEO_FAULT_DISPLAY);
 }
 

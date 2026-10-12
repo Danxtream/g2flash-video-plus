@@ -105,6 +105,9 @@ class WorkerTests(unittest.TestCase):
     def test_ordered_real_decoder_consumes_owned_nals_and_counts_actual_pictures(self):
         self.check_case("consumer")
 
+    def test_owned_pictures_use_independent_fixed_clock_presenter_and_drain(self):
+        self.check_case("queued-consumer")
+
     def test_optional_evidence_bounds_ack_waits_and_never_aborts_timing_anomalies(self):
         self.check_case("evidence")
 

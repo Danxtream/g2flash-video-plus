@@ -15,6 +15,7 @@ from receive_client import (control, diagnostics, diagnostic_alerts,
 
 FRAME_READ, FRAME_ACK, CREDITS, VERIFY_FRAMES, NATIVE = 8, 9, 10, 128, 1
 TIMELINE, FRAME_TIME = 11, 12
+PLAYBACK_CAPABILITIES, QUEUED = 13, 4
 RADIO_OFF = 2
 BASE_STATUS_BYTES, STATUS_BYTES, FRAME_BYTES, ACK_BYTES = 128, 192, 80, 16
 RESULT_FIELDS = ('ordinal', 'first_nal', 'last_nal', 'geometry', 'crc', 'cycles', 'ticks',
@@ -31,7 +32,8 @@ def status(raw):
     if (len(raw) not in (BASE_STATUS_BYTES, STATUS_BYTES) or raw[:2] != bytes((VERSION, 7)) or raw[3] > 4 or
             struct.unpack_from('<IIHHBB', raw, 32) != (4096, 4086, 320, 192, 1, 2) or
             raw[46:50] != bytes((1, 1, 4, 6)) or raw[50] not in (0, 4, 6) or raw[51] > raw[50] or
-            raw[70] != 63 or raw[71] not in (VERIFY_FRAMES | NATIVE, VERIFY_FRAMES | NATIVE | RADIO_OFF) or raw[68] > 2 or raw[69] >> 3 >= len(POWER_STEPS)):
+            raw[70] != 63 or raw[71] not in (VERIFY_FRAMES | NATIVE, VERIFY_FRAMES | NATIVE | RADIO_OFF,
+                                           VERIFY_FRAMES | NATIVE | RADIO_OFF | QUEUED) or raw[68] > 2 or raw[69] >> 3 >= len(POWER_STEPS)):
         raise ValueError('unsupported or inconsistent playback contract')
     result = dict(version=raw[0], stage=raw[1], result=raw[2], state=raw[3], capacity=raw[50],
                   credits=raw[51], recovery=raw[68], headers=raw[69] & 7, compact_credits=bool(raw[70] & 8),
@@ -155,6 +157,17 @@ def paired_report(reports):
 
 
 class VideoClient(VideoLink):
+    def playback_capabilities(self):
+        """Query explicit queued support without enabling playback."""
+        request = self.counter.reserve()
+        payload = struct.pack('<BBBBI', MESSAGE, PLAYBACK_CAPABILITIES, VERSION, 0, request)
+        replies = self.raw_replies(payload, 16)
+        for raw in replies.values():
+            if raw[:4] != bytes((VERSION, PLAYBACK_CAPABILITIES, 0, 1)) or raw[4:8] != bytes((2, 16, 0, 0)):
+                raise ValueError('unsupported queued playback capability')
+        return {lens: dict(depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
+                           stack_bytes=struct.unpack_from('<I', raw, 12)[0]) for lens, raw in replies.items()}
+
     def configure_timeline(self, stream, duration_ms, start_pts_ms=0):
         """Prepare optional picture metadata without enabling queued presentation."""
         if not 0 < stream <= 0xffffffff or not 0 < duration_ms <= 0xffffffff or not 0 <= start_pts_ms <= duration_ms:

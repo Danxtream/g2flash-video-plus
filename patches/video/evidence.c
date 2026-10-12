@@ -66,7 +66,8 @@ uint32_t video_frame_crc(const g2_h264_frame_info *frame) {
 
 static int video_evidence_space(video_owner *owner) {
     video_evidence *w = owner->evidence;
-    if (!w || !owner->queue.count || w->high - w->acked < VIDEO_EVIDENCE_ROWS) return 1;
+    uint32_t queued = owner->presenter ? owner->presenter->queue.count : 0;
+    if (!w || !owner->queue.count || w->high - w->acked + queued < VIDEO_EVIDENCE_ROWS) return 1;
     if (!w->blocked) { ++w->stalls; w->blocked = 1; }
     return 0;
 }

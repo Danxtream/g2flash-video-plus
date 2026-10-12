@@ -1,0 +1,37 @@
+/* Lazy owned presenter task. SPDX-License-Identifier: GPL-3.0-only */
+#pragma once
+#include <stdint.h>
+#include "decoded_queue.h"
+#include "pacing.h"
+#include "storage.h"
+#include "evidence.h"
+#include "worker.h"
+
+enum {
+    VIDEO_QUEUED_PRESENTATION = 4,
+    VIDEO_PRESENTER_STACK_BYTES = 8192,
+    /* Separate from the decoder cap: pixels, guarded stack, TCB/events/ledger
+     * and room for the later bounded sync/report records, with charged headers. */
+    VIDEO_PRESENTER_A4_LIMIT = 77824,
+    VIDEO_PRESENTER_Y8_LIMIT = VIDEO_PRESENTER_A4_LIMIT + VIDEO_DECODED_Y8_BYTES,
+    VIDEO_PLAYBACK_CAPABILITIES = 13,
+    VIDEO_PLAYBACK_CAPABILITIES_BYTES = 16,
+    VIDEO_PLAYBACK_QUEUE = 1,
+    VIDEO_PLAYBACK_PAIRED = 2
+};
+
+struct video_owner;
+typedef struct {
+    struct video_owner *decoder;
+    void *raw, *stack_allocation, *pixels;
+    uint8_t *stack;
+    uint32_t thread, wake, complete, armed, parked, generation, token;
+    uint32_t shown, holds, fault, stack_used, guards_ok;
+    video_decoded_queue queue;
+    video_pacing pacing;
+    video_storage storage;
+    video_frame_result evidence[VIDEO_DECODED_DEPTH];
+    uint8_t tcb[VIDEO_THREAD_CONTROL_BYTES] __attribute__((aligned(8)));
+    uint8_t wake_control[VIDEO_EVENT_CONTROL_BYTES] __attribute__((aligned(8)));
+    uint8_t complete_control[VIDEO_EVENT_CONTROL_BYTES] __attribute__((aligned(8)));
+} video_presenter;

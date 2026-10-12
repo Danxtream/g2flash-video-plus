@@ -7,13 +7,14 @@
 #include "../h264/g2_h264.h"
 #include "platform.h"
 #include "evidence.h"
+#include "presenter.h"
 
 /* Keep the new worker out of the original C text section. Otherwise clang's
  * same-section MOVW address folding overflows for distant stock callbacks.
  * This preserves the C flags and lets the linker resolve cross-section PIC. */
 #pragma clang section text=".text.video"
 
-typedef struct {
+typedef struct video_owner {
     customCfwContext *context;
     uint32_t token, thread, ingress_allowance, shadow_missing;
     uint32_t wake, complete;
@@ -28,8 +29,17 @@ typedef struct {
     video_storage storage;
     video_evidence *evidence;
     video_decode_accumulator timing;
+    video_presenter *presenter;
     g2_h264_runtime runtime;
 } video_owner;
+
+static int video_presenter_prepare(video_owner *);
+static int video_presenter_produce(video_owner *, const video_frame_descriptor *, uint32_t);
+static int video_presenter_stop(video_owner *, uint32_t);
+static void video_presenter_destroy(video_owner *);
+static void video_presenter_wake_locked(video_owner *);
+static void video_presenter_fault(video_owner *, uint32_t) __attribute__((noreturn));
+static int video_prepare_shadow(video_owner *);
 
 static void video_decode_before(video_owner *, uint32_t, uint8_t);
 static void video_decode_after(video_owner *, g2_h264_result);
@@ -153,6 +163,11 @@ static int video_worker_consume(video_owner *owner) {
     }
     video_control_give(ctx);
     if (!claimed) return 0;
+    /* With an independent presenter, first-copy shadow allocation could race
+     * decoder heap admission and briefly count the future shadow twice.
+     * Admit it before the first decode, while no queued picture can trigger. */
+    if (owner->presenter && owner->shadow_missing && !video_prepare_shadow(owner))
+        video_runtime_fail(VIDEO_FAULT_DISPLAY);
     video_decode_before(owner, view.sequence, view.bytes[0] & 31);
     g2_h264_result decoded = g2_h264_decode(owner->decoder, view.bytes, view.length);
     video_decode_after(owner, decoded);
@@ -189,10 +204,11 @@ static int video_worker_consume(video_owner *owner) {
             frame.stride * frame.height, VIDEO_SOURCE_Y8,
             ctx->video_control.options & VIDEO_PRESENT_NATIVE ? VIDEO_SCALE_NATIVE : VIDEO_SCALE_DOUBLE,
             frame.y};
-        int presented = video_present_frame(&descriptor);
+        int presented = owner->presenter ? video_presenter_produce(owner, &descriptor, view.sequence) :
+                                          video_present_frame(&descriptor);
         if (!presented && !video_lifecycle_cancelled(&ctx->video, owner->token))
             video_runtime_fail(VIDEO_FAULT_DISPLAY);
-        if (presented && owner->evidence) {
+        if (presented && owner->evidence && !owner->presenter) {
             if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
             int recorded = video_evidence_publish_locked(owner, descriptor.ordinal);
             video_control_give(ctx);
@@ -364,6 +380,7 @@ static void video_fold_signals(customCfwContext *ctx) {
 }
 static void video_free_owner(video_owner *owner) {
     void *raw = owner->raw;
+    video_presenter_destroy(owner);
     video_storage_reclaim(&owner->storage);
     VIDEO_OWNER_FREE(raw);
 }
@@ -478,6 +495,8 @@ int video_worker_start_guarded(uint32_t ingress_allowance, uint32_t generation) 
             bzero((uint8_t *)owner->evidence, sizeof(*owner->evidence));
         }
     }
+    if (generation && ctx->video_control.options & VIDEO_QUEUED_PRESENTATION &&
+        !video_presenter_prepare(owner)) { video_abort_start(ctx, token); return 0; }
     video_fill_stack(owner);
     owner->runtime = (g2_h264_runtime){video_runtime_alloc, video_runtime_release,
                                       video_runtime_preflight, video_runtime_fail};
@@ -502,6 +521,10 @@ int video_worker_start_guarded(uint32_t ingress_allowance, uint32_t generation) 
     __atomic_store_n(&ctx->video_owner, owner, __ATOMIC_RELEASE);
     __atomic_store_n(&ctx->video_runtime, &owner->runtime, __ATOMIC_RELEASE);
     __atomic_store_n(&owner->armed, 1, __ATOMIC_RELEASE);
+    if (owner->presenter) {
+        __atomic_store_n(&owner->presenter->armed, 1, __ATOMIC_RELEASE);
+        video_presenter_wake_locked(owner);
+    }
     VIDEO_OS_EVENT_SET(owner->complete, VIDEO_COMPLETE_PREPARED);
     VIDEO_OS_EVENT_SET(owner->wake, VIDEO_WAKE_ARM);
     video_control_give(ctx);
@@ -608,6 +631,7 @@ int video_worker_wake_locked(uint32_t token, uint32_t bits) {
     customCfwContext *ctx = peekCustomCfwContext();
     video_owner *owner = ctx ? ctx->video_owner : 0;
     if (!owner || token != owner->token || !bits || (bits & ~VIDEO_WAKE_ALL)) return 0;
+    video_presenter_wake_locked(owner);
     return !(VIDEO_OS_EVENT_SET(owner->wake, bits) & VIDEO_EVENT_ERROR);
 }
 
@@ -667,6 +691,7 @@ static int video_stop_token(uint32_t token, uint32_t timeout_ms) {
             VIDEO_COMPLETE_PREPARED | VIDEO_COMPLETE_PARKED, 0, deadline - now);
         if (result & VIDEO_EVENT_ERROR) goto quarantine;
     }
+    if (owner && !video_presenter_stop(owner, timeout_ms)) goto quarantine;
     if (owner && owner->thread) {
         if (VIDEO_OS_THREAD_TERMINATE(owner->thread) != 0) goto quarantine;
         owner->thread = 0;
