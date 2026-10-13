@@ -183,6 +183,10 @@ public:
 
     /** @return Number of frames decoded so far. */
     uint32_t frameCount() const noexcept { return frameCount_; }
+    /** @return Full-range flag latched from the completed slice's active SPS. */
+    bool completedFullRange() const noexcept { return completedFullRange_; }
+    /** @return Whether that SPS explicitly supplied video_full_range_flag. */
+    bool completedRangeSignalled() const noexcept { return completedRangeSignalled_; }
     // TEMP H.264 firmware diagnostic.
     uint32_t diagStage() const noexcept { return diagStage_; }
     uint32_t diagMbEntered() const noexcept { return diagMbEntered_; }
@@ -235,6 +239,8 @@ private:
     Dpb dpb_;
     uint32_t frameCount_ = 0U;
     bool dpbInitialized_ = false;
+    bool completedFullRange_ = false;
+    bool completedRangeSignalled_ = false;
     AllocationFailure allocationFailure_{};
 
     // TEMP H.264 firmware diagnostic.
@@ -1175,6 +1181,8 @@ private:
             }
         }
         ++frameCount_;
+        completedFullRange_ = sps->videoFullRange_;
+        completedRangeSignalled_ = sps->videoSignalTypePresent_;
         if (profile_) ++profile_->frameCount;
         diagStage_ = 7U;
         return DecodeStatus::FrameDecoded;

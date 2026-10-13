@@ -103,3 +103,9 @@ Partition tests compare every Y byte from independent whole/partitioned native
 builds under ASan/UBSan. Optional G2_H264_TEST_CLIPS adds local clip paths separated
 by the platform path separator. A test-only entry admits the long G2 fixture's
 large NALs; the production 4086-byte admission limit remains unchanged.
+
+Completed frame information includes the active slice's SPS luma-range flags.
+The bounded VUI prefix handles aspect ratio, overscan and video signal type;
+absent range signalling means TV range. Metadata is latched only when a picture
+completes, so an inactive or subsequently replaced SPS cannot retag its output.
+This does not change reconstructed Y, chroma, entropy or deblocking settings.

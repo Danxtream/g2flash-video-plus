@@ -194,6 +194,8 @@ extern "C" g2_h264_result g2_h264_frame(const void *handle, g2_h264_frame_info *
     const auto *frame = state->decoder.currentFrame();
     if (!frame) return G2_H264_ERROR;
     *info = {frame->yData(), frame->width(), frame->height(), frame->yStride(),
-             state->decoder.frameCount()};
+             state->decoder.frameCount(),
+             (state->decoder.completedFullRange() ? G2_H264_RANGE_FULL : 0u) |
+             (state->decoder.completedRangeSignalled() ? G2_H264_RANGE_SIGNALLED : 0u)};
     return G2_H264_FRAME_READY;
 }

@@ -8,7 +8,9 @@ extern "C" {
 
 enum {
     G2_H264_RECORD_BYTES = 4096,
-    G2_H264_MAX_NAL_BYTES = 4086
+    G2_H264_MAX_NAL_BYTES = 4086,
+    G2_H264_RANGE_FULL = 1,
+    G2_H264_RANGE_SIGNALLED = 2
 };
 
 typedef enum {
@@ -20,6 +22,7 @@ typedef enum {
 typedef struct {
     const uint8_t *y;
     uint32_t width, height, stride, count;
+    uint32_t range_flags; /* Completed active SPS, not the latest received SPS. */
 } g2_h264_frame_info;
 
 typedef struct {

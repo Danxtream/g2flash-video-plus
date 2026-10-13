@@ -151,7 +151,7 @@ static void lifecycle() {
     CHECK(!allocations);
     std::free(memory);
     g2_h264_destroy(nullptr);
-    g2_h264_frame_info info = {reinterpret_cast<uint8_t *>(1), 1, 1, 1, 1};
+    g2_h264_frame_info info = {reinterpret_cast<uint8_t *>(1), 1, 1, 1, 1, 1};
     CHECK(g2_h264_frame(nullptr, &info) == G2_H264_ERROR);
     CHECK(!info.y && !info.count);
     CHECK(g2_h264_frame(nullptr, nullptr) == G2_H264_ERROR);
@@ -285,10 +285,72 @@ static void clip(const char *path) {
     std::printf("%s: %u NALs, %u pictures, all Y bytes identical\n", path, nals, frames);
 }
 
+static Bits range_sps(uint32_t identifier, int range, bool extended = false) {
+    Bits b(0x67);
+    b.bits(66, 8); b.bits(0, 8); b.bits(10, 8);
+    b.ue(identifier); b.ue(0); b.ue(2); b.ue(1);
+    b.bits(0, 1); b.ue(0); b.ue(0);
+    b.bits(1, 1); b.bits(1, 1); b.bits(0, 1); b.bits(range >= 0, 1);
+    if (range >= 0) {
+        b.bits(extended, 1);
+        if (extended) { b.bits(255, 8); b.bits(1, 16); b.bits(1, 16); }
+        b.bits(extended, 1); if (extended) b.bits(1, 1);
+        b.bits(range > 0, 1);
+        if (range > 0) {
+            b.bits(5, 3); b.bits(range == 2, 1); b.bits(extended, 1);
+            if (extended) { b.bits(1, 8); b.bits(1, 8); b.bits(1, 8); }
+        }
+        b.bits(0, 6); // Remaining optional VUI flags, then RBSP trailing bits.
+    }
+    return b;
+}
+
+static void luma_range_metadata() {
+    for (int range = -1; range <= 2; ++range) for (bool extended : {false, true}) {
+        Bits b = range_sps(0, range, extended);
+        uint32_t bytes = b.finish();
+        sub0h264::BitReader br(b.bytes + 1, bytes - 1);
+        sub0h264::Sps parsed;
+        CHECK(sub0h264::parseSps(br, parsed) == sub0h264::Result::Ok);
+        CHECK(parsed.videoSignalTypePresent_ == (range > 0));
+        CHECK(parsed.videoFullRange_ == (range == 2));
+    }
+    Bits complete = range_sps(0, 2, true);
+    uint32_t bytes = complete.finish();
+    for (uint32_t cut = 1; cut < bytes - 2; ++cut) {
+        sub0h264::BitReader br(complete.bytes + 1, cut);
+        sub0h264::Sps parsed;
+        CHECK(sub0h264::parseSps(br, parsed) != sub0h264::Result::Ok);
+    }
+    {
+        Handle h; g2_h264_frame_info info = {};
+        CHECK(feed(h.value, range_sps(0, -1)) == G2_H264_CONSUMED);
+        CHECK(feed(h.value, pps()) == G2_H264_CONSUMED);
+        CHECK(feed(h.value, idr()) == G2_H264_FRAME_READY);
+        CHECK(g2_h264_frame(h.value, &info) == G2_H264_FRAME_READY && !info.range_flags);
+        CHECK(feed(h.value, range_sps(1, 2)) ==
+              (SUB0H264_MAX_SPS_COUNT > 1 ? G2_H264_CONSUMED : G2_H264_ERROR));
+        CHECK(feed(h.value, predicted()) == G2_H264_FRAME_READY);
+        CHECK(g2_h264_frame(h.value, &info) == G2_H264_FRAME_READY && !info.range_flags);
+        CHECK(feed(h.value, range_sps(0, 2)) == G2_H264_CONSUMED);
+        CHECK(feed(h.value, idr()) == G2_H264_FRAME_READY);
+        CHECK(g2_h264_frame(h.value, &info) == G2_H264_FRAME_READY && info.range_flags == 3);
+        CHECK(feed(h.value, range_sps(1, 1)) ==
+              (SUB0H264_MAX_SPS_COUNT > 1 ? G2_H264_CONSUMED : G2_H264_ERROR));
+        CHECK(feed(h.value, predicted()) == G2_H264_FRAME_READY);
+        CHECK(g2_h264_frame(h.value, &info) == G2_H264_FRAME_READY && info.range_flags == 3);
+        for (uint32_t y = 0; y < info.height; ++y)
+            for (uint32_t x = 0; x < info.width; ++x) CHECK(info.y[y * info.stride + x] == 128);
+    }
+    CHECK(!live && allocations == released);
+    std::puts("Bounded VUI prefix, absent TV default, active SPS range and unchanged Y PASS");
+}
+
 int main(int argc, char **argv) {
 #ifdef G2_H264_CONTEXT_TEST
     context.video_runtime = &callbacks;
 #endif
+    if (argc == 2 && !std::strcmp(argv[1], "--range")) { luma_range_metadata(); return 0; }
     if (argc == 2 && !std::strcmp(argv[1], "--fatal")) {
         failAlloc = true;
         Handle h;

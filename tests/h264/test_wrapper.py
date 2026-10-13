@@ -120,6 +120,23 @@ class WrapperTests(unittest.TestCase):
         self.assertIn("C interface PASS", result.stdout)
         print(result.stdout, end="")
 
+    def test_completed_active_sps_luma_range_and_bounded_vui(self):
+        for executable in (self.smoke, self.context_smoke):
+            result = run([str(executable), "--range"])
+            self.assertIn("active SPS range and unchanged Y PASS", result.stdout)
+            print(result.stdout, end="")
+        # Native-only slot expansion verifies inactive SPS selection without
+        # changing the firmware's intentionally single-slot configuration.
+        override = self.directory / "range-multi.hpp"
+        override.write_text("#undef SUB0H264_MAX_SPS_COUNT\n"
+                            "#define SUB0H264_MAX_SPS_COUNT 2U\n", encoding="utf-8")
+        executable = self.directory / "range-multi"
+        run(["clang++", *self.native_flags, "-include", str(HERE / "config.hpp"),
+             "-include", str(override), str(HERE / "g2_h264.cpp"),
+             str(ROOT / "tests/h264/wrapper_smoke.cpp"), str(self.runtime),
+             "-o", str(executable)])
+        self.assertIn("unchanged Y PASS", run([str(executable), "--range"]).stdout)
+
     def test_fatal_allocation_calls_nonreturning_owner(self):
         result = subprocess.run([str(self.smoke), "--fatal"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 71, result.stderr)

@@ -131,6 +131,8 @@ struct Sps
 
     // VUI
     bool vuiPresent_ = false;
+    bool videoSignalTypePresent_ = false;
+    bool videoFullRange_ = false;         ///< Unsignalled video uses TV range.
 };
 
 /** Parse a scaling list from the bitstream.
@@ -328,7 +330,50 @@ inline Result parseSps(BitReader& br, Sps& sps) noexcept
 
     // vui_parameters_present_flag
     sps.vuiPresent_ = br.readBit() != 0U;
-    // VUI parsing deferred — not critical for decode correctness
+    if (sps.vuiPresent_)
+    {
+        // Exclude rbsp_trailing_bits: padded zeros must not complete a
+        // truncated VUI prefix. The remainder of VUI is still deferred.
+        uint32_t syntaxEnd = br.totalBits();
+        while (syntaxEnd > br.bitOffset())
+        {
+            --syntaxEnd;
+            if ((br.data()[syntaxEnd / 8U] & (0x80U >> (syntaxEnd % 8U))) != 0U)
+                break;
+        }
+        const auto hasVuiBits = [&](uint32_t count) noexcept {
+            return br.bitOffset() <= syntaxEnd && count <= syntaxEnd - br.bitOffset();
+        };
+        if (!hasVuiBits(1U)) return Result::ErrorInvalidParam;
+        if (br.readBit() != 0U) // aspect_ratio_info_present_flag
+        {
+            if (!hasVuiBits(8U)) return Result::ErrorInvalidParam;
+            if (br.readBits(8U) == 255U) // Extended_SAR
+            {
+                if (!hasVuiBits(32U)) return Result::ErrorInvalidParam;
+                br.skipBits(32U);
+            }
+        }
+        if (!hasVuiBits(1U)) return Result::ErrorInvalidParam;
+        if (br.readBit() != 0U) // overscan_info_present_flag
+        {
+            if (!hasVuiBits(1U)) return Result::ErrorInvalidParam;
+            br.skipBits(1U);
+        }
+        if (!hasVuiBits(1U)) return Result::ErrorInvalidParam;
+        sps.videoSignalTypePresent_ = br.readBit() != 0U;
+        if (sps.videoSignalTypePresent_)
+        {
+            if (!hasVuiBits(5U)) return Result::ErrorInvalidParam;
+            br.skipBits(3U); // video_format
+            sps.videoFullRange_ = br.readBit() != 0U;
+            if (br.readBit() != 0U) // colour_description_present_flag
+            {
+                if (!hasVuiBits(24U)) return Result::ErrorInvalidParam;
+                br.skipBits(24U);
+            }
+        }
+    }
 
     sps.valid_ = true;
     return Result::Ok;
