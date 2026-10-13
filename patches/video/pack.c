@@ -36,9 +36,19 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
     if (frame->bytes < needed || source > UINTPTR_MAX - needed ||
         destination > UINTPTR_MAX - VIDEO_PANEL_BYTES ||
         (source < destination + VIDEO_PANEL_BYTES && destination < source + needed)) return 0;
-    for (uint32_t i = 0; i < VIDEO_PANEL_BYTES; ++i) shadow[i] = 0;
     uint32_t x = (VIDEO_PANEL_WIDTH - frame->width * frame->scale) / 2;
     uint32_t y = (VIDEO_PANEL_HEIGHT - frame->height * frame->scale) / 2;
+    /* The entire byte-aligned picture is overwritten below. Only margins can
+     * retain the old scale, overlay or image, including odd-height centering. */
+    uint32_t first = y * VIDEO_PANEL_STRIDE;
+    uint32_t last = (y + frame->height * frame->scale) * VIDEO_PANEL_STRIDE;
+    uint32_t left = x / 2, right = left + frame->width * frame->scale / 2;
+    for (uint32_t i = 0; i < first; ++i) shadow[i] = 0;
+    for (uint32_t i = last; i < VIDEO_PANEL_BYTES; ++i) shadow[i] = 0;
+    for (uint32_t row = first; row < last; row += VIDEO_PANEL_STRIDE) {
+        for (uint32_t col = 0; col < left; ++col) shadow[row + col] = 0;
+        for (uint32_t col = right; col < VIDEO_PANEL_STRIDE; ++col) shadow[row + col] = 0;
+    }
     if (dither) {
         if (frame->scale == VIDEO_SCALE_DOUBLE) {
             /* Width is a multiple of four, so the centered x is always even.

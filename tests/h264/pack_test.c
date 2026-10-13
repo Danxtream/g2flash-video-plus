@@ -136,6 +136,47 @@ static void dither_cells(void) {
         }
 }
 
+static void mode_changes(void) {
+    uint8_t *source = malloc(640 * 384), *storage = malloc(VIDEO_PANEL_BYTES + 64);
+    assert(source && storage);
+    memset(storage, 0xa5, VIDEO_PANEL_BYTES + 64);
+    uint8_t *shadow = storage + 32;
+    const uint32_t geometry[6][3] = {{320,192,2},{320,192,1},{4,1,1},{4,2,2},{640,384,1},{320,191,2}};
+    for (uint32_t raw = 0; raw <= 1; ++raw)
+        for (uint32_t tv = 0; tv <= 1; ++tv) for (uint32_t type = 1; type <= 3; ++type)
+            for (uint32_t mode = 0; mode < 6; ++mode) {
+                uint32_t width = geometry[mode][0], height = geometry[mode][1], scale = geometry[mode][2];
+                uint32_t sample = (mode * 37 + type * 17) & 255;
+                uint32_t f = tv && !raw ? (sample <= 16 ? 0 : sample >= 235 ? 255 :
+                    ((sample - 16) * 255 + 109) / 219) : sample;
+                uint32_t level = raw ? (sample < 16 ? 1 : sample >> 4) : (16 + (f * 239 + 127) / 255) >> 4;
+                uint32_t format = (type == 2 ? VIDEO_SOURCE_A4 : VIDEO_SOURCE_Y8) |
+                    (tv ? VIDEO_SOURCE_TV : 0) | (raw ? VIDEO_SOURCE_RAW_GRAY : 0) |
+                    (type == 3 ? VIDEO_SOURCE_DITHER : 0);
+                uint32_t stride = type == 2 ? width / 2 : width;
+                memset(source, type == 2 ? level * 17 : sample, 640 * 384);
+                video_frame_descriptor frame = {1, 1, 1, width, height, stride, 640 * 384, format, scale, source};
+                /* A menu occupies bottom margins; the next complete media frame
+                 * must clear it without depending on a freshly zeroed shadow. */
+                memset(shadow + 432 * VIDEO_PANEL_STRIDE, 0xab, 48 * VIDEO_PANEL_STRIDE);
+                assert(video_pack_frame(shadow, VIDEO_PANEL_BYTES, &frame));
+                uint32_t ox = (640 - width * scale) / 2, oy = (480 - height * scale) / 2;
+                const uint32_t thresholds[2][2] = {{0,2},{3,1}};
+                uint32_t t = 4 + (f * 56 + 127) / 255;
+                for (uint32_t y = 0; y < 480; ++y) for (uint32_t x = 0; x < 640; ++x) {
+                    uint32_t expected = 0;
+                    if (x >= ox && x < ox + width * scale && y >= oy && y < oy + height * scale)
+                        expected = type == 3 ? (t >> 2) + ((t & 3) > thresholds[y & 1][x & 1]) : level;
+                    uint32_t actual = shadow[y * VIDEO_PANEL_STRIDE + x / 2];
+                    actual = x & 1 ? actual & 15 : actual >> 4;
+                    assert(actual == expected);
+                }
+                for (uint32_t i = 0; i < 32; ++i)
+                    assert(storage[i] == 0xa5 && storage[VIDEO_PANEL_BYTES + 32 + i] == 0xa5);
+            }
+    free(source); free(storage);
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (!strcmp(argv[1], "pixels")) {
@@ -164,7 +205,8 @@ int main(int argc, char **argv) {
         for (uint32_t y = 0; y < 256; ++y)
             printf("%u %u %u %u %u\n", y, video_gray_curve(y, 0, 0), video_gray_curve(y, 1, 0),
                    video_gray_curve(y, 0, 1), video_gray_curve(y, 1, 1));
-    } else if (!strcmp(argv[1], "cells")) dither_cells();
+    } else if (!strcmp(argv[1], "margins")) mode_changes();
+    else if (!strcmp(argv[1], "cells")) dither_cells();
     else if (!strcmp(argv[1], "dither")) dithered();
     else if (!strcmp(argv[1], "reject")) rejected();
     else if (!strcmp(argv[1], "sides")) {

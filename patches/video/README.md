@@ -156,8 +156,10 @@ across visible panel levels 1 through 15. The selectable decoded-luma curve
 keeps max(1, Y >> 4) without range normalization. Picture margins stay off.
 Native 320x192 is centered at (160,144); doubling produces 640x384 at (0,48),
 with identical nearest-neighbor pixels and black 48-row top/bottom margins.
-Every preparation clears the shared shadow before packing, so mode changes
-cannot leave stale pixels. Input padding is never read as picture content.
+Every preparation clears only margins before completely overwriting the
+picture rectangle. Mode changes and old menu pixels cannot survive outside
+it. Width alignment makes both side margins byte-aligned; odd-height top
+and bottom centering are preserved. Input padding is never picture content.
 
 The descriptor carries ownership generation, picture ordinal, geometry,
 stride, storage extent and scale. It also accepts owned A4 for a later queued
