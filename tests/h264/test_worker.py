@@ -138,6 +138,9 @@ class WorkerTests(unittest.TestCase):
     def test_status_keeps_completed_copy_tuple_during_next_admission_and_timer_wrap(self):
         self.check_case("status-copy")
 
+    def test_profile_bounded_posts_wrap_loss_stale_generation_and_frozen_pages(self):
+        self.check_case("profile")
+
     def test_ordinary_image_overlay_lease_and_stock_fallback_remain_unchanged(self):
         self.check_case("original-display")
 

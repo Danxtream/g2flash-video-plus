@@ -46,6 +46,8 @@ static void video_decode_after(video_owner *owner, g2_h264_result result) {
     video_decode_accumulator *a = &owner->timing;
     uint32_t cycles = VIDEO_CYCLES - a->start_cycles;
     uint32_t now = VIDEO_TICK, ticks = now - a->start_tick;
+    video_profile_end((video_profile_capture){owner->control_generation, a->start_tick, a->start_cycles},
+                      VIDEO_PROFILE_DECODE, 0);
     video_decode_add(a, cycles, ticks, result == G2_H264_FRAME_READY);
     if (owner->evidence) video_evidence_after(owner, result, cycles, ticks, now);
 }

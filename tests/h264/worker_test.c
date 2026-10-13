@@ -275,6 +275,7 @@ static g2_h264_result worker_decode(void *, const uint8_t *, uint32_t);
 #include "../../patches/video/pack.c"
 #include "../../patches/video/present.c"
 #include "../../patches/video/evidence.c"
+#include "../../patches/video/profile.c"
 static uint32_t radio_lost, radio_active, radio_acquires, radio_releases, radio_off, deny_radio;
 int video_radio_acquire(uint32_t generation, int off) {
     assert(!image_depth && !service_context && context.video_control.start_guard == generation);
@@ -1884,6 +1885,67 @@ static void status_copy_tuple(void) {
     puts("STATUS before first copy, pending/callback/fold, genuine zero wrap and menu tuple PASS");
 }
 
+static void profile_mailboxes(void) {
+    configure();
+    video_owner owner = {.context = &context, .token = 3};
+    video_presenter presenter = {.decoder = &owner, .token = 3, .generation = 7};
+    presenter.sync.stream = 11;
+    context.video_control.start_guard = context.video_control.control_generation = 7;
+    context.video_control.owner_origin = context.video_control.owner_here = CFW_MESSAGE_LEFT;
+    video_profile_start_locked(&presenter);
+    video_profile_state *s = &context.video_profile;
+    force_cycles = 1; forced_cycles = 4;
+    video_profile_capture captured = video_profile_begin();
+    captured.cycles = UINT32_MAX - 5;
+    for (uint32_t i = 0; i < VIDEO_PROFILE_SLOTS + 1; ++i)
+        video_profile_end(captured, VIDEO_PROFILE_PACK, 17);
+    assert(!s->rows[VIDEO_PROFILE_PACK].count && s->dropped == 1);
+    assert(s->flags & VIDEO_PROFILE_DROPPED);
+    video_profile_fold_locked(s);
+    assert(s->rows[VIDEO_PROFILE_PACK].count == 4 && s->rows[VIDEO_PROFILE_PACK].bytes == 68);
+    assert(s->rows[VIDEO_PROFILE_PACK].cycles_lo == 40 && !s->rows[VIDEO_PROFILE_PACK].cycles_hi);
+    s->rows[VIDEO_PROFILE_DECODE].cycles_lo = UINT32_MAX - 5;
+    video_profile_end(captured, VIDEO_PROFILE_DECODE, 0); video_profile_fold_locked(s);
+    assert(s->rows[VIDEO_PROFILE_DECODE].cycles_lo == 4 && s->rows[VIDEO_PROFILE_DECODE].cycles_hi == 1);
+    captured.tick = VIDEO_TICK - 1002;
+    video_profile_end(captured, VIDEO_PROFILE_QUEUE_WAIT, 0); video_profile_fold_locked(s);
+    assert(s->flags & VIDEO_PROFILE_SPAN);
+    assert(!s->rows[VIDEO_PROFILE_QUEUE_WAIT].cycles_lo && s->rows[VIDEO_PROFILE_QUEUE_WAIT].ticks >= 1002);
+    s->rows[VIDEO_PROFILE_PACK].bytes = UINT32_MAX;
+    video_profile_end(captured, VIDEO_PROFILE_PACK, 1); video_profile_fold_locked(s);
+    assert(s->rows[VIDEO_PROFILE_PACK].bytes == UINT32_MAX && (s->flags & VIDEO_PROFILE_SATURATED));
+    uint8_t out[VIDEO_DIAGNOSTICS_BYTES] = {0}, again[VIDEO_DIAGNOSTICS_BYTES] = {0};
+    assert(!video_profile_snapshot_locked(&context, 0, CFW_MESSAGE_LEFT, out));
+    assert(out[3] == 3 && out[5] == 1 && video_read32(out + 8) == 7 && video_read32(out + 16) == 3);
+    video_profile_state before = *s;
+    assert(!video_profile_snapshot_locked(&context, 0, CFW_MESSAGE_LEFT, again));
+    assert(!memcmp(out, again, sizeof(out)) && !memcmp(s, &before, sizeof(before)));
+    assert(video_profile_snapshot_locked(&context, 2, CFW_MESSAGE_LEFT, out) == VIDEO_CONTROL_FORMAT);
+    assert(video_profile_snapshot_locked(&context, 0, CFW_MESSAGE_RIGHT, out) == VIDEO_CONTROL_STALE);
+    uint8_t command[VIDEO_START_BYTES], frozen[VIDEO_STATUS_BYTES], replayed[VIDEO_STATUS_BYTES];
+    request_next = 0;
+    control_command(command, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_PROFILE_DIAGNOSTICS);
+    assert(!control_response(command, 12, frozen, VIDEO_DIAGNOSTICS_BYTES));
+    assert(frozen[3] == 3 && video_read32(frozen + 8) == 7);
+    s->rows[VIDEO_PROFILE_DECODE].count += 1;
+    assert(!control_response(command, 12, replayed, VIDEO_DIAGNOSTICS_BYTES));
+    assert(!memcmp(frozen, replayed, VIDEO_DIAGNOSTICS_BYTES));
+    control_command(command, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_PROFILE_DIAGNOSTICS);
+    command[9] = 1;
+    assert(!control_response(command, 12, replayed, VIDEO_DIAGNOSTICS_BYTES) && replayed[4] == 1);
+    s->mail[0][0].phase = 1; /* A producer owns this slot across a generation transition. */
+    presenter.generation = context.video_control.start_guard = context.video_control.control_generation = 8;
+    video_profile_start_locked(&presenter);
+    assert(s->mail[0][0].phase == 1);
+    s->mail[0][0].generation = 7; s->mail[0][0].phase = 2;
+    video_profile_fold_locked(s);
+    assert(!s->rows[0].count && !s->mail[0][0].phase);
+    video_profile_end(captured, 0, 1); assert(!s->mail[0][0].phase);
+    context.video_control.start_guard = 0;
+    assert(!video_profile_begin().generation);
+    puts("bounded profile posts, cycle carry, long-span uncertainty, saturation, stale mail and read-only pages PASS");
+}
+
 static void recovery(void) {
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
     for (uint32_t mode = 0; mode < 5; ++mode) {
@@ -2475,6 +2537,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "evidence-replays")) evidence_replays();
     else if (!strcmp(argv[1], "presentation-failures")) presentation_failures();
     else if (!strcmp(argv[1], "status-copy")) status_copy_tuple();
+    else if (!strcmp(argv[1], "profile")) profile_mailboxes();
     else if (!strcmp(argv[1], "original-display")) original_display();
     else if (!strcmp(argv[1], "inactivity")) inactivity();
     else if (!strcmp(argv[1], "cleanup")) cleanup();

@@ -10,6 +10,7 @@
 #include "video/power.h"
 #include "video/handoff.h"
 #include "video/radio.h"
+#include "video/profile.h"
 
 /* Persistent CFW-owned state, independent of EvenHub image containers. The
  * full-panel shadow is an owned heap allocation. This context is anchored in
@@ -141,6 +142,7 @@ typedef struct {
     video_worker_report video_last_report;
     video_control_state video_control;
     video_presentation_state video_presentation;
+    video_profile_state video_profile;
     video_decode_totals video_decode_last;
     video_power_state video_power;
     volatile uint32_t video_output_epoch;

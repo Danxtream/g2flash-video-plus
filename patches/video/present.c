@@ -71,6 +71,8 @@ void video_display_complete(uint32_t token, int success) {
     if (!ctx || !token || token != ctx->video_presentation.token ||
         __atomic_load_n(&ctx->video_presentation.phase, __ATOMIC_ACQUIRE) != VIDEO_DISPLAY_COPYING) return;
     if (ctx->video_presentation.ordinal) ctx->video_presentation.copy_tick = VIDEO_TICK;
+    if (ctx->video_presentation.ordinal)
+        video_profile_end(ctx->video_profile.display_capture, VIDEO_PROFILE_DISPLAY, success != 0);
     __atomic_store_n(&ctx->video_presentation.phase,
         success ? VIDEO_DISPLAY_COMPLETE : VIDEO_DISPLAY_FAILED, __ATOMIC_RELEASE);
     video_controller_presented(token);
@@ -153,7 +155,7 @@ int video_present_frame(const video_frame_descriptor *frame) {
     if (!video_lease_valid(ctx) || video_lifecycle_cancelled(&ctx->video, frame->token) ||
         !(overlay ? video_menu_draw(ctx->framebuffer_shadow, owner->presenter->menu_actual,
              owner->presenter->done_pts, ctx->video_control.timeline.duration) :
-             video_pack_frame(ctx->framebuffer_shadow, VIDEO_PANEL_BYTES, frame)) ||
+             video_profile_pack(ctx->framebuffer_shadow, VIDEO_PANEL_BYTES, frame)) ||
         !video_lifecycle_pin(&ctx->video, frame->token, 0)) {
         VIDEO_DISPLAY_SIGNAL(); video_control_give(ctx); return 0;
     }
@@ -161,6 +163,7 @@ int video_present_frame(const video_frame_descriptor *frame) {
     p->ordinal = frame->ordinal; if (!overlay) p->copy_tick = 0; p->pin = 1;
     if (presenter && !overlay) owner->presenter->submit_tick = VIDEO_TICK;
     __atomic_store_n(&p->queue_failed, 0, __ATOMIC_RELEASE);
+    ctx->video_profile.display_capture = overlay ? (video_profile_capture){0} : video_profile_begin();
     __atomic_store_n(&p->phase, VIDEO_DISPLAY_QUEUED, __ATOMIC_RELEASE);
     cfw_rectlist rectangles = {0};
     present_shadow(VIDEO_PANEL_WIDTH, VIDEO_PANEL_HEIGHT, &rectangles);

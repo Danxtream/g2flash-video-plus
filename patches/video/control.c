@@ -362,7 +362,7 @@ int video_control_received(const uint8_t *data, uint16_t size,
             entry->snapshot[4] = VIDEO_DECODED_DEPTH;
             entry->snapshot[5] = VIDEO_TIMELINE_FPS;
             entry->snapshot[6] = 255; /* Maximum explicit decoded seek prefix. */
-            entry->snapshot[7] = 15; /* Seek v1, owned Y8, copy/trigger reports, development gray field. */
+            entry->snapshot[7] = 31; /* Seek, Y8, copy/trigger, gray and bounded profiling. */
             video_write32(entry->snapshot + 8, VIDEO_PRESENTER_A4_LIMIT);
             video_write32(entry->snapshot + 12, VIDEO_PRESENTER_STACK_BYTES);
         }
@@ -375,6 +375,15 @@ int video_control_received(const uint8_t *data, uint16_t size,
                 video_evidence_ack_locked(ctx, data, route->origin, entry->snapshot);
             entry->snapshot[0] = VIDEO_PROTOCOL_VERSION;
             entry->snapshot[1] = data[1];
+            entry->snapshot[2] = entry->result;
+        }
+        int profile = size == VIDEO_CONTROL_HEADER_BYTES + 4 && data[8] == VIDEO_PROFILE_DIAGNOSTICS &&
+            data[9] < 2 && !data[10] && !data[11];
+        if (data[1] == VIDEO_CONTROL_DIAGNOSTICS && profile) {
+            bzero(entry->snapshot, VIDEO_DIAGNOSTICS_BYTES);
+            entry->snapshot_bytes = VIDEO_DIAGNOSTICS_BYTES;
+            entry->result = video_profile_snapshot_locked(ctx, data[9], route->origin, entry->snapshot);
+            entry->snapshot[0] = VIDEO_PROTOCOL_VERSION; entry->snapshot[1] = VIDEO_CONTROL_DIAGNOSTICS;
             entry->snapshot[2] = entry->result;
         }
         int radio = size == VIDEO_CONTROL_HEADER_BYTES + 4 &&

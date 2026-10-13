@@ -150,6 +150,37 @@ Run the sanitized worker, storage and lifecycle checks with the existing suite:
 
 ## Shared-shadow packing
 
+### Bounded elapsed profiling
+
+Playback capability byte 7 bit 4 advertises DIAGNOSTICS kind 3. Its 12-byte
+request appends kind, page (0 or 1) and two zero bytes to the control header.
+Each frozen 128-byte page has kind at byte 3, page/schema/lens at bytes 4-6,
+zero at byte 7, generation/stream/token/dropped/flags at offsets 8-24 and
+zero at offset 28. Four 24-byte stage rows begin at offset 32: count, bytes,
+elapsed ticks, cycle sum low/high, maximum ticks, all LE32.
+
+Stage order is decode calls, queue-space wait, decoded-picture copy, panel
+clear/pack, display submit-to-callback, bridge envelope/copy/enqueue, sync
+enqueue and custom ingress processing. Display bytes counts successful
+callbacks; the other byte fields count input bytes, not radio throughput.
+Bridge ingress brackets reconstruction; host ingress also includes bridge
+enqueue. Nested brackets are not additive CPU costs and include preemption.
+No task-runtime accounting, frequency calibration or optical timing claim
+is made. Brackets over 1,000 ticks retain ticks but omit ambiguous cycles.
+
+Eight stages each have four fixed raw mailboxes. Producers only capture
+and post, never log, allocate, wait or aggregate. The presenter starts and
+folds counters under existing publication protection. Mailboxes survive
+generation transitions so old writers cannot corrupt a reset queue; old
+generation records are discarded. Startup before presenter activation is
+not sampled. Saturated sums, dropped samples and long spans have flags
+4, 1 and 2 respectively; dropped count wrap also flags saturation. These
+are bounded samples, not guaranteed exhaustive transport accounting.
+Snapshots are read-only, owner-origin checked, generation tagged and kept
+after STOP until the next presenter starts. The private runner checks
+coverage/loss and retains raw pages rather than inventing exclusive CPU
+percentages. No new stock hooks or scheduling/transport settings change.
+
 STATUS reports the last completed media count and its matching completion
 tick. An in-flight copy or menu refresh cannot clear or advance only half
 of that tuple. The display callback captures a pending tick; the existing

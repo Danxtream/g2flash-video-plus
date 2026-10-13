@@ -42,7 +42,10 @@ static int video_presenter_sync_send(video_presenter *p, uint32_t op, uint32_t o
         uint32_t encoded = copy <= 65534 ? copy : 65535;
         body[20] = encoded; body[21] = encoded >> 8;
     }
-    return VIDEO_SYNC_SEND(body);
+    video_profile_capture captured = video_profile_begin();
+    int result = VIDEO_SYNC_SEND(body);
+    video_profile_end(captured, VIDEO_PROFILE_SYNC, sizeof(body));
+    return result;
 }
 
 static void video_presenter_sync_poll(video_presenter *p) {
