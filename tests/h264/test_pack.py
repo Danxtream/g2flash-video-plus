@@ -32,6 +32,9 @@ class PackTests(unittest.TestCase):
     def test_tv_table_exhaustive_and_full_range_identity_with_both_scales(self):
         subprocess.run([str(self.exe), "range"], check=True)
 
+    def test_dither_quarter_levels_and_final_panel_phase_native_and_double(self):
+        subprocess.run([str(self.exe), "dither"], check=True)
+
 
 if __name__ == "__main__":
     unittest.main()

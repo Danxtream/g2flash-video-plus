@@ -33,6 +33,7 @@ static int video_presenter_sync_send(video_presenter *p, uint32_t op, uint32_t o
     video_write32(body + 4, p->sync.stream); video_write32(body + 8, ordinal);
     video_write32(body + 12, pts); video_write32(body + 16, VIDEO_TICK);
     body[20] = depth; body[21] = terminal;
+    if (op <= VIDEO_SYNC_DONE) body[22] = (p->queue.format & VIDEO_SOURCE_DITHER) != 0;
     return VIDEO_SYNC_SEND(body);
 }
 
@@ -79,7 +80,7 @@ static void video_presenter_sync_poll(video_presenter *p) {
             } else video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
             continue;
         }
-        if (body[22] || body[23] || body[21] > 1 ||
+        if (body[22] != ((p->queue.format & VIDEO_SOURCE_DITHER) != 0) || body[23] || body[21] > 1 ||
             !video_sync_receive(&p->sync, body[1], video_read32(body + 4), body[3],
                                 ordinal, pts, body[20], body[21]))
             video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);

@@ -1,4 +1,4 @@
-/* Brightness packing without dithering. SPDX-License-Identifier: GPL-3.0-only */
+/* Brightness packing in final panel coordinates. SPDX-License-Identifier: GPL-3.0-only */
 #include "present.h"
 #include "brightness.h"
 #include <stddef.h>
@@ -16,11 +16,13 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
     frame = &descriptor;
     uint32_t type = frame->format & VIDEO_SOURCE_TYPE_MASK;
     int tv = (frame->format & VIDEO_SOURCE_TV) != 0;
+    int dither = (frame->format & VIDEO_SOURCE_DITHER) != 0;
     if (!shadow || bytes < VIDEO_PANEL_BYTES || !frame->pixels ||
         !frame->width || !frame->height || frame->width % 4 ||
         (frame->scale != VIDEO_SCALE_NATIVE && frame->scale != VIDEO_SCALE_DOUBLE) ||
         (type != VIDEO_SOURCE_Y8 && type != VIDEO_SOURCE_A4) ||
-        (frame->format & ~(VIDEO_SOURCE_TYPE_MASK | VIDEO_SOURCE_TV | VIDEO_SOURCE_UNSIGNALLED)) ||
+        (frame->format & ~(VIDEO_SOURCE_TYPE_MASK | VIDEO_SOURCE_TV | VIDEO_SOURCE_UNSIGNALLED | VIDEO_SOURCE_DITHER)) ||
+        (dither && type != VIDEO_SOURCE_Y8) ||
         ((frame->format & VIDEO_SOURCE_UNSIGNALLED) && !tv) ||
         frame->width > VIDEO_PANEL_WIDTH / frame->scale ||
         frame->height > VIDEO_PANEL_HEIGHT / frame->scale) return 0;
@@ -35,6 +37,16 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
     for (uint32_t i = 0; i < VIDEO_PANEL_BYTES; ++i) shadow[i] = 0;
     uint32_t x = (VIDEO_PANEL_WIDTH - frame->width * frame->scale) / 2;
     uint32_t y = (VIDEO_PANEL_HEIGHT - frame->height * frame->scale) / 2;
+    if (dither) {
+        for (uint32_t row = 0; row < frame->height * frame->scale; ++row) {
+            const uint8_t *in = frame->pixels + (row / frame->scale) * frame->stride;
+            uint8_t *out = shadow + (y + row) * VIDEO_PANEL_STRIDE + x / 2;
+            for (uint32_t col = 0; col < frame->width * frame->scale; col += 2)
+                out[col / 2] = (video_dither_level(in[col / frame->scale], tv, x + col, y + row) << 4) |
+                    video_dither_level(in[(col + 1) / frame->scale], tv, x + col + 1, y + row);
+        }
+        return 1;
+    }
     for (uint32_t row = 0; row < frame->height; ++row) {
         const uint8_t *in = frame->pixels + row * frame->stride;
         uint8_t *out = shadow + (y + row * frame->scale) * VIDEO_PANEL_STRIDE + x / 2;

@@ -4,7 +4,7 @@
 enum {
     VIDEO_SHOWN_ROWS = 16, VIDEO_SHOWN_BYTES = 64, VIDEO_CONTROL_SHOWN = 15,
     VIDEO_SHOWN_PAIRED = 1, VIDEO_SHOWN_UNCERTAIN = 2, VIDEO_SHOWN_RECOVERED = 4,
-    VIDEO_SHOWN_TV = 8, VIDEO_SHOWN_UNSIGNALLED = 16
+    VIDEO_SHOWN_TV = 8, VIDEO_SHOWN_UNSIGNALLED = 16, VIDEO_SHOWN_DITHER = 32
 };
 typedef struct {
     uint32_t ordinal, pts, copy_tick, trigger_tick, queued_tick, flags;

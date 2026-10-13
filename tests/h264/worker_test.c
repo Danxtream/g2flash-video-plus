@@ -29,7 +29,7 @@ static uint32_t cancel_new, expire_new, fail_publication, defer_reclaimed;
 static uint32_t feed, fed, stream_ok, corrupt_guard, suppress_park;
 static uint32_t consume_enabled, decoded_calls, consumed_frames, decode_paused, refuse_extension;
 static uint32_t upload_limit;
-static uint32_t queued_upload;
+static uint32_t queued_upload, dither_fixture;
 static uint32_t cycle_reads, clock_inits, calibrations, crc_calls, anomalous_clock;
 static uint32_t forced_cycles, force_cycles;
 static uint32_t evidence_drain, evidence_next, evidence_checked, evidence_was_full;
@@ -1475,6 +1475,7 @@ static void exercise_pause(void) {
 
 static void queued_consumer_mode(uint32_t mode, int with_pause) {
     configure(); request_next = 0; consume_enabled = queued_upload = 1;
+    if (dither_fixture) views[0] = (video_heap_view){410024, 400000}; /* Admission model, not a hardware claim. */
     paired_fixture = mode == 3 ? 1 : mode; partner_anchor = 0; partner_native = mode == 3;
     uint32_t here = mode == 2 ? CFW_MESSAGE_RIGHT : CFW_MESSAGE_LEFT;
     assert(video_sync_init(&partner, 1, here ^ CFW_MESSAGE_BOTH));
@@ -1485,6 +1486,7 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
     context.video_control.owner_origin = 1;
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
     control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_QUEUED_PRESENTATION;
+    if (dither_fixture) p[18] |= VIDEO_DITHER_PRESENTATION;
     if (partner_native) p[18] |= VIDEO_PRESENT_NATIVE;
     if (prefix) { p[18] |= VIDEO_START_PAUSED; p[19] = prefix; }
     cfw_message_route route = control_route; route.targets = mode ? CFW_MESSAGE_BOTH : CFW_MESSAGE_LEFT;
@@ -1493,7 +1495,9 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
     assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
     pool_drain(); await_ready();
     video_owner *owner = context.video_owner;
-    assert(owner->presenter && creates == 2 && owner->presenter->storage.used <= VIDEO_PRESENTER_A4_LIMIT);
+    assert(owner->presenter && creates == 2 && owner->presenter->storage.used <=
+           (dither_fixture ? VIDEO_PRESENTER_Y8_LIMIT : VIDEO_PRESENTER_A4_LIMIT));
+    assert(owner->presenter->queue.format == (dither_fixture ? VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER : VIDEO_SOURCE_A4));
     picture_relock_refusals = 3;
     playback_pause_fixture = with_pause; playback_pause_count = 0;
     uint32_t started = tick();
@@ -1519,6 +1523,7 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
     assert(video_shown_snapshot_locked(&context, request, 1, shown_report) == VIDEO_CONTROL_ACCEPTED);
     assert(video_read32(shown_report + 12) == visible - 15 && video_read32(shown_report + 16) == 17 &&
            (video_read32(shown_report + 36) & 4) && video_read32(shown_report + 48) == visible - 16);
+    assert((video_read32(shown_report + 36) & VIDEO_SHOWN_DITHER) == (dither_fixture ? VIDEO_SHOWN_DITHER : 0));
     request[12] ^= 1;
     assert(video_shown_snapshot_locked(&context, request, 1, shown_report) == VIDEO_CONTROL_STALE);
     give(1);
@@ -1539,6 +1544,24 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
 }
 
 static void queued_consumer(void) { queued_consumer_mode(0, 0); }
+static void dither_consumer(void) {
+    dither_fixture = 1;
+    queued_consumer_mode(0, 0); queued_consumer_mode(1, 0);
+    queued_consumer_mode(2, 0); queued_consumer_mode(3, 0);
+    dither_fixture = 0;
+    queued_consumer_mode(0, 0); /* Fresh default generation returns to A4. */
+    configure(); request_next = 0; views[0].max_alloc = 100000;
+    assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, 0, 16, 1));
+    context.video_control.owner_origin = 1;
+    uint8_t p[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
+    control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_DITHER_PRESENTATION;
+    assert(control_snapshot(p, 24, report) == VIDEO_CONTROL_FORMAT);
+    control_command(p, VIDEO_CONTROL_START, 1);
+    p[18] = VIDEO_DITHER_PRESENTATION | VIDEO_QUEUED_PRESENTATION;
+    assert(!control_snapshot(p, 24, report)); pool_drain(); finish();
+    assert(!allocations_live && !presenter_live && !radio_active && !context.video.published);
+    puts("owned Y8 dither both roles/scales, default-off restart and fragmented admission refusal PASS");
+}
 static void paired_consumer(void) {
     queued_consumer_mode(1, 0); queued_consumer_mode(2, 0);
     puts("LEFT triggered follower and RIGHT coordinator with actual display copies PASS");
@@ -2036,9 +2059,18 @@ static void display_pump(void) {
         int native = context.video_control.options & VIDEO_PRESENT_NATIVE;
         for (uint32_t y = 0; y < VIDEO_PANEL_HEIGHT; ++y)
             for (uint32_t x = 0; x < VIDEO_PANEL_STRIDE; ++x)
-                if (context.video_presentation.ordinal || y < 432)
+                if (context.video_presentation.ordinal || y < 432) {
+                    uint32_t gray = 0x88;
+                    if (context.video_control.options & VIDEO_DITHER_PRESENTATION) {
+                        /* Synthetic Y128 is unsignalled TV: normalized130 gives
+                         * quarter-level31, with three Bayer promotions. */
+                        const uint32_t threshold[2][2] = {{0, 2}, {3, 1}};
+                        gray = ((7 + (3 > threshold[y & 1][(x * 2) & 1])) << 4) |
+                               (7 + (3 > threshold[y & 1][(x * 2 + 1) & 1]));
+                    }
                     assert(physical_frame[y * VIDEO_PANEL_STRIDE + x] ==
-                        ((native ? y >= 144 && y < 336 && x >= 80 && x < 240 : y >= 48 && y < 432) ? 0x88 : 0));
+                        ((native ? y >= 144 && y < 336 && x >= 80 && x < 240 : y >= 48 && y < 432) ? gray : 0));
+                }
         if (context.video_presentation.ordinal) ++copied_frames;
     }
     display_signal();
@@ -2310,7 +2342,7 @@ static void radio_contract(void) {
     configure(); request_next = 0;
     uint8_t p[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
     control_command(p, VIDEO_CONTROL_CAPABILITIES, 0);
-    assert(!control_snapshot(p, 8, report) && report[71] == 0xaf && !radio_acquires);
+    assert(!control_snapshot(p, 8, report) && report[71] == 0xbf && !radio_acquires);
     control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_RADIO_OFF;
     assert(!control_snapshot(p, 24, report));
     assert(!control_snapshot(p, 24, report) && !radio_acquires);
@@ -2355,6 +2387,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "recovery")) recovery();
     else if (!strcmp(argv[1], "consumer")) consumer();
     else if (!strcmp(argv[1], "queued-consumer")) queued_consumer();
+    else if (!strcmp(argv[1], "dither-consumer")) dither_consumer();
     else if (!strcmp(argv[1], "paired-consumer")) paired_consumer();
     else if (!strcmp(argv[1], "playback-controls")) playback_controls();
     else if (!strcmp(argv[1], "seek-controls")) seek_controls();

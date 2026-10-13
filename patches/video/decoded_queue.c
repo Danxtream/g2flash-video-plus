@@ -6,10 +6,13 @@
 
 int video_decoded_init(video_decoded_queue *q, uint32_t generation, uint32_t token,
                        uint32_t format, uint32_t depth, uint8_t *pixels, uint32_t bytes) {
-    uint32_t slot = format == VIDEO_SOURCE_A4 ? VIDEO_DECODED_A4_BYTES :
-                    format == VIDEO_SOURCE_Y8 ? VIDEO_DECODED_Y8_BYTES : 0;
+    uint32_t type = format & VIDEO_SOURCE_TYPE_MASK;
+    uint32_t slot = type == VIDEO_SOURCE_A4 ? VIDEO_DECODED_A4_BYTES :
+                    type == VIDEO_SOURCE_Y8 ? VIDEO_DECODED_Y8_BYTES : 0;
     if (!q || !generation || !token || !pixels || !slot || !depth ||
-        depth > VIDEO_DECODED_DEPTH || bytes < depth * slot) return 0;
+        depth > VIDEO_DECODED_DEPTH || bytes < depth * slot ||
+        (format & ~(VIDEO_SOURCE_TYPE_MASK | VIDEO_SOURCE_DITHER)) ||
+        ((format & VIDEO_SOURCE_DITHER) && type != VIDEO_SOURCE_Y8)) return 0;
     *q = (video_decoded_queue){.generation = generation, .token = token,
                                 .format = format, .depth = depth, .slot_bytes = slot};
     for (uint32_t i = 0; i < depth; ++i) q->slots[i].pixels = pixels + i * slot;
@@ -66,8 +69,8 @@ int video_decoded_copy_range(video_decoded_queue *q, uint32_t generation, uint32
         (a < b + q->slot_bytes && b < a + bytes)) return 0;
     for (uint32_t row = 0; row < 192; ++row) {
         const uint8_t *src = y + row * stride;
-        uint8_t *dst = slot->pixels + row * (q->format == VIDEO_SOURCE_A4 ? 160 : 320);
-        if (q->format == VIDEO_SOURCE_A4) {
+        uint8_t *dst = slot->pixels + row * ((q->format & VIDEO_SOURCE_TYPE_MASK) == VIDEO_SOURCE_A4 ? 160 : 320);
+        if ((q->format & VIDEO_SOURCE_TYPE_MASK) == VIDEO_SOURCE_A4) {
             for (uint32_t col = 0; col < 160; ++col)
                 dst[col] = (video_gray_level(src[2 * col], range & VIDEO_SOURCE_TV) << 4) |
                             video_gray_level(src[2 * col + 1], range & VIDEO_SOURCE_TV);
@@ -94,7 +97,8 @@ int video_decoded_claim(video_decoded_queue *q, uint32_t generation, uint32_t or
     video_decoded_slot *slot = &q->slots[q->head];
     if (slot->state != VIDEO_DECODED_READY || slot->media.ordinal != ordinal) return 0;
     *frame = (video_frame_descriptor){q->token, generation, ordinal, 320, 192,
-        q->format == VIDEO_SOURCE_A4 ? 160 : 320, q->slot_bytes, q->format | slot->range, scale, slot->pixels};
+        (q->format & VIDEO_SOURCE_TYPE_MASK) == VIDEO_SOURCE_A4 ? 160 : 320,
+        q->slot_bytes, q->format | slot->range, scale, slot->pixels};
     *media = slot->media;
     slot->state = VIDEO_DECODED_PRESENTING;
     return 1;

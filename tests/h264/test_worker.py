@@ -108,6 +108,9 @@ class WorkerTests(unittest.TestCase):
     def test_owned_pictures_use_independent_fixed_clock_presenter_and_drain(self):
         self.check_case("queued-consumer")
 
+    def test_dither_y8_admission_paired_modes_default_restart_and_refusal(self):
+        self.check_case("dither-consumer")
+
     def test_both_presenter_sides_process_posted_wire_records_and_copies(self):
         self.check_case("paired-consumer")
 

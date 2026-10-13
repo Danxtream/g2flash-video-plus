@@ -47,7 +47,7 @@ static void rejected(void) {
     assert(shadow && source); memset(shadow, 0xaa, VIDEO_PANEL_BYTES);
     video_frame_descriptor valid = {1, 1, 1, 320, 192, 320, 320 * 192,
                                     VIDEO_SOURCE_Y8, VIDEO_SCALE_DOUBLE, source};
-    for (uint32_t variant = 0; variant < 14; ++variant) {
+    for (uint32_t variant = 0; variant < 15; ++variant) {
         video_frame_descriptor f = valid;
         switch (variant) {
             case 0: f.width = 0; break;
@@ -64,6 +64,7 @@ static void rejected(void) {
             case 11: f.format |= 128; break;
             case 12: f.format |= VIDEO_SOURCE_UNSIGNALLED; break;
             case 13: f.format = VIDEO_SOURCE_MENU; break;
+            case 14: f.format = VIDEO_SOURCE_A4 | VIDEO_SOURCE_DITHER; break;
         }
         assert(!video_pack_frame(shadow, VIDEO_PANEL_BYTES, &f));
     }
@@ -72,6 +73,41 @@ static void rejected(void) {
     assert(!video_pack_frame(shadow, VIDEO_PANEL_BYTES, 0));
     for (uint32_t i = 0; i < VIDEO_PANEL_BYTES; ++i) assert(shadow[i] == 0xaa);
     free(source); free(shadow);
+}
+static void dithered(void) {
+    uint8_t source[320 * 192], shadow[VIDEO_PANEL_BYTES];
+    const uint32_t threshold[2][2] = {{0, 2}, {3, 1}};
+    for (uint32_t sample = 0; sample < 256; ++sample) {
+        assert(video_quarter[sample] == (sample * 60 + 127) / 255);
+        for (uint32_t tv = 0; tv <= 1; ++tv) {
+            uint32_t full = tv ? video_tv_full[sample] : sample;
+            uint32_t t = (full * 60 + 127) / 255, sum = 0;
+            for (uint32_t y = 0; y < 2; ++y) for (uint32_t x = 0; x < 2; ++x) {
+                uint32_t expected = (t >> 2) + ((t & 3) > threshold[y][x]);
+                assert(video_dither_level(sample, tv, x, y) == expected);
+                sum += expected;
+            }
+            assert(sum == t);
+        }
+    }
+    for (uint32_t scale = 1; scale <= 2; ++scale) for (uint32_t tv = 0; tv <= 1; ++tv) {
+        for (uint32_t i = 0; i < sizeof(source); ++i) source[i] = i;
+        video_frame_descriptor f = {1, 1, 1, 320, 192, 320, sizeof(source),
+            VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER | (tv ? VIDEO_SOURCE_TV : 0), scale, source};
+        assert(video_pack_frame(shadow, sizeof(shadow), &f));
+        uint32_t ox = (640 - 320 * scale) / 2, oy = (480 - 192 * scale) / 2;
+        for (uint32_t y = 0; y < 480; ++y) for (uint32_t x = 0; x < 640; ++x) {
+            uint32_t actual = x & 1 ? shadow[y * 320 + x / 2] & 15 : shadow[y * 320 + x / 2] >> 4;
+            uint32_t expected = 0;
+            if (x >= ox && x < ox + 320 * scale && y >= oy && y < oy + 192 * scale) {
+                uint32_t full = source[((y - oy) / scale) * 320 + (x - ox) / scale];
+                if (tv) full = video_tv_full[full];
+                uint32_t t = (full * 60 + 127) / 255;
+                expected = (t >> 2) + ((t & 3) > threshold[y & 1][x & 1]);
+            }
+            assert(actual == expected);
+        }
+    }
 }
 int main(int argc, char **argv) {
     assert(argc == 2);
@@ -93,7 +129,8 @@ int main(int argc, char **argv) {
                 check_pixels(type | VIDEO_SOURCE_TV, scale, 320, 192);
                 check_pixels(type | VIDEO_SOURCE_TV | VIDEO_SOURCE_UNSIGNALLED, scale, 320, 192);
             }
-    } else if (!strcmp(argv[1], "reject")) rejected();
+    } else if (!strcmp(argv[1], "dither")) dithered();
+    else if (!strcmp(argv[1], "reject")) rejected();
     else if (!strcmp(argv[1], "sides")) {
         assert(video_source_from_side(2) == 1 && video_source_from_side(1) == 2);
         assert(!video_source_from_side(0) && !video_source_from_side(3));

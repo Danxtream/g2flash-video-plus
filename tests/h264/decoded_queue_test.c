@@ -41,6 +41,19 @@ int main(void) {
         }
     }
     video_decoded_queue q = {0};
+    assert(!video_decoded_init(&q, 7, 9, VIDEO_SOURCE_A4 | VIDEO_SOURCE_DITHER, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
+    assert(!video_decoded_init(&q, 7, 9, VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER, 2, pixels, 2 * VIDEO_DECODED_A4_BYTES));
+    assert(video_decoded_init(&q, 7, 9, VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
+    video_frame_time dither_time = {1, 1, 0};
+    uint32_t dither_serial = video_decoded_reserve(&q, 7, &dither_time);
+    memset(y, 14, VIDEO_DECODED_Y8_BYTES);
+    assert(video_decoded_copy_range(&q, 7, dither_serial, y, 320, VIDEO_DECODED_Y8_BYTES, 0));
+    memset(y, 0, VIDEO_DECODED_Y8_BYTES);
+    assert(video_decoded_publish(&q, 7, dither_serial));
+    video_frame_descriptor dither_frame;
+    assert(video_decoded_claim(&q, 7, 1, VIDEO_SCALE_DOUBLE, &dither_frame, &dither_time));
+    assert(dither_frame.format == (VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER) && dither_frame.pixels[0] == 14);
+    assert(video_decoded_release(&q, 7, 1));
     assert(video_decoded_init(&q, 7, 9, VIDEO_SOURCE_A4, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
     for (uint32_t ordinal = 1; ordinal < 50; ++ordinal) {
         video_frame_time media = {ordinal, ordinal * 3, ordinal * 62};

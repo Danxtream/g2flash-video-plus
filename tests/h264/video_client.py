@@ -18,6 +18,7 @@ TIMELINE, FRAME_TIME = 11, 12
 PLAYBACK_CAPABILITIES, QUEUED = 13, 4
 PAIRED = 8
 START_PAUSED = 32
+DITHER = 16
 FRAME_TIME_FAST = 14
 SHOWN = 15
 PAUSE, RESUME, PLAYBACK = 16, 17, 18
@@ -50,7 +51,8 @@ def status(raw):
             raw[70] != 63 or raw[71] not in (VERIFY_FRAMES | NATIVE, VERIFY_FRAMES | NATIVE | RADIO_OFF,
                                            VERIFY_FRAMES | NATIVE | RADIO_OFF | QUEUED,
                                            VERIFY_FRAMES | NATIVE | RADIO_OFF | QUEUED | PAIRED,
-                                           VERIFY_FRAMES | NATIVE | RADIO_OFF | QUEUED | PAIRED | START_PAUSED) or raw[68] > 2 or raw[69] >> 3 >= len(POWER_STEPS)):
+                                           VERIFY_FRAMES | NATIVE | RADIO_OFF | QUEUED | PAIRED | START_PAUSED,
+                                           VERIFY_FRAMES | NATIVE | RADIO_OFF | QUEUED | PAIRED | START_PAUSED | DITHER) or raw[68] > 2 or raw[69] >> 3 >= len(POWER_STEPS)):
         raise ValueError('unsupported or inconsistent playback contract')
     result = dict(version=raw[0], stage=raw[1], result=raw[2], state=raw[3], capacity=raw[50],
                   credits=raw[51], recovery=raw[68], headers=raw[69] & 7, compact_credits=bool(raw[70] & 8),
@@ -62,6 +64,8 @@ def status(raw):
                          ('result_stalls', 108), ('no_output_cycles', 112), ('no_output_ticks', 116),
                          ('no_output_calls', 120), ('incomplete', 124)):
         result[name] = struct.unpack_from('<I', raw, offset)[0]
+    if result['options'] & DITHER and not result['options'] & QUEUED:
+        raise ValueError('dither status lacks owned queued playback')
     if (result['consumed'] > result['accepted'] or (result['state'] == 2 and result['presented'] > result['pictures']) or
             result['options'] & ~raw[71] or result['acked'] > result['result_high'] or
             result['result_high'] > result['presented'] or result['result_capacity'] not in (0, 16) or
@@ -220,9 +224,11 @@ class VideoClient(VideoLink):
         replies = self.raw_replies(payload, 16)
         for raw in replies.values():
             if (raw[:3] != bytes((VERSION, PLAYBACK_CAPABILITIES, 0)) or raw[3] not in (1, 3, 7, 15, 31, 63, 127, 255) or
-                    raw[4:6] != bytes((2, 16)) or raw[6:8] != (bytes((255, 1)) if raw[3] & 32 else bytes((0, 0)))):
+                    raw[4:6] != bytes((2, 16)) or
+                    (raw[3] & 32 and (raw[6] != 255 or raw[7] not in (1, 3))) or
+                    (not raw[3] & 32 and raw[6:8] != bytes((0, 0)))):
                 raise ValueError('unsupported queued playback capability')
-        return {lens: dict(policy=bool(raw[3] & 128), menu=bool(raw[3] & 64), seek=bool(raw[3] & 32), max_preroll=raw[6], controls=bool(raw[3] & 16), shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
+        return {lens: dict(dither=bool(raw[7] & 2), policy=bool(raw[3] & 128), menu=bool(raw[3] & 64), seek=bool(raw[3] & 32), max_preroll=raw[6], controls=bool(raw[3] & 16), shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
                            stack_bytes=struct.unpack_from('<I', raw, 12)[0]) for lens, raw in replies.items()}
 
     def configure_timeline(self, stream, duration_ms, start_pts_ms=0):
@@ -346,11 +352,13 @@ class VideoClient(VideoLink):
             raise ValueError('use source-tagged replies for paired commands')
         return next(iter(self.raw_replies(payload, length).values()))
 
-    def command(self, op, stream=0, *, native=False, verify=False, queued=False, paired=False, paused=False, preroll=0, radio="video", token=0, ordinal=0, lens=None):
+    def command(self, op, stream=0, *, native=False, verify=False, queued=False, paired=False, paused=False, dither=False, preroll=0, radio="video", token=0, ordinal=0, lens=None):
         if radio not in ("off", "video"):
             raise ValueError("radio mode must be off or video")
         if paired and not queued:
             raise ValueError('paired presentation requires queued playback')
+        if dither and not queued:
+            raise ValueError('dithering requires owned queued Y8 playback')
         if not 0 <= preroll <= 255 or ((preroll or paused) and not queued):
             raise ValueError('seek prefix and paused preview require queued playback')
         request = self.counter.reserve()
@@ -369,7 +377,7 @@ class VideoClient(VideoLink):
             return dict(result=raw[2], stream=astream, token=atoken, acked=cursor)
         payload = bytearray(control(op, request, stream))
         if op == START:
-            payload[18] = (NATIVE if native else 0) | (VERIFY_FRAMES if verify else 0) | (RADIO_OFF if radio == "off" else 0) | (QUEUED if queued else 0) | (PAIRED if paired else 0) | (START_PAUSED if paused else 0)
+            payload[18] = (NATIVE if native else 0) | (VERIFY_FRAMES if verify else 0) | (RADIO_OFF if radio == "off" else 0) | (QUEUED if queued else 0) | (PAIRED if paired else 0) | (START_PAUSED if paused else 0) | (DITHER if dither else 0)
             payload[19] = preroll
         return paired_report({source: status(raw) for source, raw in
                               self.raw_replies(payload, STATUS_BYTES if op == STATUS else BASE_STATUS_BYTES).items()})
@@ -494,7 +502,7 @@ def shown_report(raw):
     result = dict(zip(names, struct.unpack_from('<15I', raw, 4)), result=raw[2], lens=raw[3])
     if not raw[2] and (not result['stream'] or not result['token'] or not result['ordinal'] or
                       not 0 < result['first'] <= result['serial'] <= result['high'] or
-                      result['lost'] != result['first'] - 1 or result['flags'] & ~31):
+                      result['lost'] != result['first'] - 1 or result['flags'] & ~63):
         raise ValueError('inconsistent shown-frame identity or ring')
     result['trigger_to_copy_ms'] = (result['copy_tick'] - result['trigger_tick']) & 0xffffffff
     result['uncertainty_ms'] = None if result['uncertainty_ms'] == 0xffffffff else result['uncertainty_ms']
@@ -625,7 +633,7 @@ def seek_clip(client, nals, reference, target_ms, *, paused=False, renew=lambda:
     return dict(result, seek_target=prepared['start_pts_ms'], target_shown=reached)
 
 
-def stream_clip(client, nals, reference, *, verify=True, native=False, queued=False, paused=False, radio="video", progress=lambda text: None,
+def stream_clip(client, nals, reference, *, verify=True, native=False, queued=False, paused=False, dither=False, radio="video", progress=lambda text: None,
                 renew=lambda: None, on_ready=lambda state: None, on_finished=lambda state: None, pace_fps=0, timeout=600,
                 on_control=lambda client, stream, tokens: None, clock=time.monotonic, sleep=time.sleep):
     """Use owner-bound credit windows; a reconnect or refusal voids the run.
@@ -635,6 +643,8 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, queued=Fa
     """
     if radio not in ('off', 'video'):
         raise ValueError('radio mode must be off or video')
+    if dither and not queued:
+        raise ValueError('dithering requires queued playback')
     if (len(nals) != reference['nal_count'] or list(map(len, nals)) != reference['nal_sizes'] or
             reference['frame_count'] != len(reference['frames']) or not reference['frame_count'] or
             any(not data or len(data) > 4086 for data in nals)):
@@ -653,6 +663,8 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, queued=Fa
     controls_available = False
     if queued:
         playback = client.playback_capabilities()
+        if dither and any(not r.get('dither') for r in playback.values()):
+            raise ValueError('owned Y8 dithering is not advertised by every recipient')
         controls_available = all(r.get('controls', False) for r in playback.values())
         if any(not r['compact_metadata'] or (client.targets == 3 and not r['paired']) for r in playback.values()):
             raise ValueError('every recipient must advertise queued playback and compact metadata')
@@ -666,6 +678,7 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, queued=Fa
         start_options = dict(native=native, verify=verify, radio=radio)
         if queued:
             start_options['queued'] = True
+            if dither: start_options['dither'] = True
             if preroll or paused:
                 start_options.update(preroll=preroll, paused=paused)
         state = client.command(START, stream, **start_options)

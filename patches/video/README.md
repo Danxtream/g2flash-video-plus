@@ -807,3 +807,20 @@ Full-range off-mode remains exactly Y >> 4 for all256 values. TV conversion uses
 v=clamp(Y-16,0,219), full=(v*255+109)/219, then full >> 4. The immutable256-entry
 normalization table clamps Y<=16 to black and Y>=235 to white. No gamma, encoder,
 deblocking or full-range threshold change is involved.
+
+## Optional Dithering
+
+Advanced capability byte7 bit1 advertises owned Y8 dithering; bit0 remains the
+seek contract version1. START bit16 selects it for the whole generation and
+requires queued presentation. Default off keeps two30720-byte A4 snapshots;
+on admits two61440-byte original Y8 snapshots under a separate139264-byte
+presenter cap (A4 cap77824). Heap reserves, decoder cap and cache ownership
+are unchanged. Refusal is explicit; no automatic depth or representation change.
+
+The immutable quarter-level table uses t=(full*60+127)/255. Final physical
+panel coordinates choose the2x2 thresholds [0,2;3,1], base=t>>2 and exactly
+t&3 one-level promotions, capped15. TV normalizes first. Both physical rows
+of doubled video are evaluated separately; native uses the same panel phase.
+No low bits are reconstructed from A4. SHOWN flag32 records on-mode. Picture
+wire records use byte22 for the generation's mode; mixed paired modes refuse.
+The supplied PC seek/controller retains the choice in a fresh generation.

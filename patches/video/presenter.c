@@ -254,6 +254,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
             p->queued_ticks[q->head], p->paired ? VIDEO_SHOWN_PAIRED | VIDEO_SHOWN_UNCERTAIN : 0u};
         if (frame.format & VIDEO_SOURCE_TV) shown.flags |= VIDEO_SHOWN_TV;
         if (frame.format & VIDEO_SOURCE_UNSIGNALLED) shown.flags |= VIDEO_SHOWN_UNSIGNALLED;
+        if (frame.format & VIDEO_SOURCE_DITHER) shown.flags |= VIDEO_SHOWN_DITHER;
         if (!video_shown_publish(&p->shown_rows, &shown)) {
             video_control_give(ctx); video_presenter_fault(owner, VIDEO_FAULT_SEQUENCE);
         }
@@ -303,14 +304,17 @@ static int video_presenter_prepare(video_owner *owner) {
     video_heap_ops heap = {0, video_platform_allocate, video_platform_release, video_platform_heap_view};
     if (!video_storage_init(&p->storage, &heap, video_owner_charge(raw_bytes),
                             owner->storage.display_allowance)) return 0;
-    p->storage.limit = VIDEO_PRESENTER_A4_LIMIT;
+    int dither = (owner->context->video_control.options & VIDEO_DITHER_PRESENTATION) != 0;
+    uint32_t pixels_bytes = VIDEO_DECODED_DEPTH * (dither ? VIDEO_DECODED_Y8_BYTES : VIDEO_DECODED_A4_BYTES);
+    p->storage.limit = dither ? VIDEO_PRESENTER_Y8_LIMIT : VIDEO_PRESENTER_A4_LIMIT;
     p->storage.cached_allowance = 0; /* Input slots already admitted by decoder. */
-    p->pixels = video_storage_alloc(&p->storage, VIDEO_DECODED_DEPTH * VIDEO_DECODED_A4_BYTES);
+    p->pixels = video_storage_alloc(&p->storage, pixels_bytes);
     p->stack_allocation = video_storage_alloc(&p->storage,
         VIDEO_PRESENTER_STACK_BYTES + 2 * VIDEO_STACK_GUARD_BYTES);
     if (!p->pixels || !p->stack_allocation ||
-        !video_decoded_init(&p->queue, p->generation, p->token, VIDEO_SOURCE_A4,
-                            VIDEO_DECODED_DEPTH, p->pixels, VIDEO_DECODED_DEPTH * VIDEO_DECODED_A4_BYTES) ||
+        !video_decoded_init(&p->queue, p->generation, p->token,
+                            dither ? VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER : VIDEO_SOURCE_A4,
+                            VIDEO_DECODED_DEPTH, p->pixels, pixels_bytes) ||
         !video_decoded_skip_prefix(&p->queue, p->generation, p->preroll)) return 0;
     uint8_t *base = p->stack_allocation;
     for (uint32_t i = 0; i < VIDEO_PRESENTER_STACK_BYTES + 2 * VIDEO_STACK_GUARD_BYTES; ++i)
