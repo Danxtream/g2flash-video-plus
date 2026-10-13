@@ -22,9 +22,16 @@ static const uint8_t video_tv_full[256] = {
     255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
 };
 
-/* Full-range off-mode keeps exactly Y >> 4; no gamma or threshold adjustment. */
+enum { VIDEO_BLACK_LEVEL = 1 };
+
+/* Only video samples are floored; picture margins stay independently off. */
+static inline uint8_t video_gray_floor(uint32_t level) {
+    return level < VIDEO_BLACK_LEVEL ? VIDEO_BLACK_LEVEL : level;
+}
+
+/* Keep the existing thresholds above the darkest video level. */
 static inline uint8_t video_gray_level(uint8_t y, int tv) {
-    return (tv ? video_tv_full[y] : y) >> 4;
+    return video_gray_floor((tv ? video_tv_full[y] : y) >> 4);
 }
 
 /* Quarter levels on the actual panel's [0,15] brightness domain. */
@@ -52,5 +59,5 @@ static inline uint8_t video_dither_level(uint8_t y, int tv, uint32_t x, uint32_t
     uint32_t t = video_quarter[tv ? video_tv_full[y] : y];
     uint32_t threshold = (row & 1) ? ((x & 1) ? 1 : 3) : ((x & 1) ? 2 : 0);
     uint32_t level = (t >> 2) + ((t & 3) > threshold);
-    return level > 15 ? 15 : level;
+    return video_gray_floor(level > 15 ? 15 : level);
 }

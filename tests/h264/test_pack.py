@@ -29,7 +29,7 @@ class PackTests(unittest.TestCase):
     def test_stock_lens_side_maps_to_transport_without_mirroring_pixels(self):
         subprocess.run([str(self.exe), "sides"], check=True)
 
-    def test_tv_table_exhaustive_and_full_range_identity_with_both_scales(self):
+    def test_tv_table_and_video_black_floor_with_both_scales(self):
         subprocess.run([str(self.exe), "range"], check=True)
 
     def test_dither_quarter_levels_and_final_panel_phase_native_and_double(self):

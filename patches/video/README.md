@@ -151,7 +151,8 @@ Run the sanitized worker, storage and lifecycle checks with the existing suite:
 ## Shared-shadow packing
 
 The bounded packer converts top-down Y8 to the panel's A4 layout, with the
-left pixel in the high nibble. Brightness conversion is exactly `Y >> 4`.
+left pixel in the high nibble. Full-range conversion is `max(1, Y >> 4)`;
+TV luma is normalized before applying the same video-only level-1 floor.
 Native 320x192 is centered at (160,144); doubling produces 640x384 at (0,48),
 with identical nearest-neighbor pixels and black 48-row top/bottom margins.
 Every preparation clears the shared shadow before packing, so mode changes
@@ -823,10 +824,10 @@ pixels. A4 is quantized once before publication; Y8 stays original until packing
 Changing an SPS does not retag queued pictures. SHOWN flags8 and16 indicate TV
 and unsignalled TV respectively; decoded Y and evidence CRCs remain unchanged.
 
-Full-range off-mode remains exactly Y >> 4 for all256 values. TV conversion uses
-v=clamp(Y-16,0,219), full=(v*255+109)/219, then full >> 4. The immutable256-entry
+Full-range off-mode uses max(1, Y >> 4). TV conversion uses
+v=clamp(Y-16,0,219), full=(v*255+109)/219, then max(1, full >> 4). The immutable 256-entry
 normalization table clamps Y<=16 to black and Y>=235 to white. No gamma, encoder,
-deblocking or full-range threshold change is involved.
+deblocking or threshold change above the darkest level is involved.
 
 ## Optional Dithering
 
@@ -839,7 +840,9 @@ are unchanged. Refusal is explicit; no automatic depth or representation change.
 
 The immutable quarter-level table uses t=(full*60+127)/255. Final physical
 panel coordinates choose the2x2 thresholds [0,2;3,1], base=t>>2 and exactly
-t&3 one-level promotions, capped15. TV normalizes first. Both physical rows
+t&3 one-level promotions, capped 15, then a video-only level-1 floor.
+For t<4 the floor makes the cell sum 4; other cell sums remain t.
+TV normalizes first. Picture margins remain off. Both physical rows
 of doubled video are evaluated separately; native uses the same panel phase.
 No low bits are reconstructed from A4. SHOWN flag32 records on-mode. Picture
 wire records use byte22 for the generation's mode; mixed paired modes refuse.

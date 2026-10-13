@@ -97,6 +97,22 @@ int main(void) {
             assert(video_decoded_release(&q, 9, ordinal));
         }
     }
+    for (uint32_t type = VIDEO_SOURCE_Y8; type <= VIDEO_SOURCE_A4; ++type) {
+        for (uint32_t tv = 0; tv <= 1; ++tv) {
+            assert(video_decoded_init(&q, 10, 9, type, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
+            video_frame_time time = {1, 1, 0};
+            uint32_t serial = video_decoded_reserve(&q, 10, &time);
+            memset(y, 0, VIDEO_DECODED_Y8_BYTES);
+            assert(video_decoded_copy_range(&q, 10, serial, y, 320, VIDEO_DECODED_Y8_BYTES,
+                                             tv ? VIDEO_SOURCE_TV : 0));
+            memset(y, 0xff, VIDEO_DECODED_Y8_BYTES);
+            assert(video_decoded_publish(&q, 10, serial));
+            video_frame_descriptor frame;
+            assert(video_decoded_claim(&q, 10, 1, VIDEO_SCALE_NATIVE, &frame, &time));
+            assert(frame.pixels[0] == (type == VIDEO_SOURCE_A4 ? 0x11 : 0));
+            assert(video_decoded_release(&q, 10, 1));
+        }
+    }
     free(y);
     free(pixels);
     puts("A4/Y8 ownership, poisoned producer, FIFO pins, cancel, depth and finite serials PASS");

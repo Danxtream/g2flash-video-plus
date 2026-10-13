@@ -84,10 +84,11 @@ static void dithered(void) {
             uint32_t t = (full * 60 + 127) / 255, sum = 0;
             for (uint32_t y = 0; y < 2; ++y) for (uint32_t x = 0; x < 2; ++x) {
                 uint32_t expected = (t >> 2) + ((t & 3) > threshold[y][x]);
+                if (!expected) expected = 1;
                 assert(video_dither_level(sample, tv, x, y) == expected);
                 sum += expected;
             }
-            assert(sum == t);
+            assert(sum == (t < 4 ? 4 : t));
         }
     }
     for (uint32_t scale = 1; scale <= 2; ++scale) for (uint32_t tv = 0; tv <= 1; ++tv) {
@@ -104,6 +105,7 @@ static void dithered(void) {
                 if (tv) full = video_tv_full[full];
                 uint32_t t = (full * 60 + 127) / 255;
                 expected = (t >> 2) + ((t & 3) > threshold[y & 1][x & 1]);
+                if (!expected) expected = 1;
             }
             assert(actual == expected);
         }
@@ -121,8 +123,9 @@ int main(int argc, char **argv) {
             uint32_t v = y <= 16 ? 0 : y >= 235 ? 219 : y - 16;
             uint32_t expected = (v * 255 + 109) / 219;
             assert(video_tv_full[y] == expected);
-            assert(video_gray_level(y, 0) == (y >> 4));
-            assert(video_gray_level(y, 1) == (expected >> 4));
+            uint32_t full_level = y >> 4, tv_level = expected >> 4;
+            assert(video_gray_level(y, 0) == (full_level ? full_level : 1));
+            assert(video_gray_level(y, 1) == (tv_level ? tv_level : 1));
         }
         for (uint32_t type = VIDEO_SOURCE_Y8; type <= VIDEO_SOURCE_A4; ++type)
             for (uint32_t scale = 1; scale <= 2; ++scale) {
