@@ -8,6 +8,7 @@
 #include "worker.h"
 #include "sync.h"
 #include "shown.h"
+#include "menu.h"
 
 enum {
     VIDEO_QUEUED_PRESENTATION = 4,
@@ -26,7 +27,8 @@ enum {
     VIDEO_PLAYBACK_METADATA = 4,
     VIDEO_PLAYBACK_SHOWN = 8,
     VIDEO_PLAYBACK_CONTROLS = 16,
-    VIDEO_PLAYBACK_SEEK = 32
+    VIDEO_PLAYBACK_SEEK = 32,
+    VIDEO_PLAYBACK_MENU = 64
 };
 
 struct video_owner;
@@ -44,6 +46,9 @@ typedef struct {
     uint32_t pause_requested, paused, control_serial, control_ack;
     uint32_t control_sent, control_deadline, wire_serial, wire_paused, wire_boundary;
     uint32_t preroll, media_shown, pause_after_first;
+    uint32_t control_kind, control_menu, wire_kind, menu_actual, menu_dirty, menu_command;
+    uint32_t scale_requested, flight_native;
+    video_menu menu;
     video_shown_ring shown_rows;
     video_storage storage;
     video_frame_result evidence[VIDEO_DECODED_DEPTH];

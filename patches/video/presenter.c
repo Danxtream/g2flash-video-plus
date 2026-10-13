@@ -36,16 +36,46 @@ int video_playback_control_locked(const uint8_t *data, uint32_t bytes, uint8_t o
     video_presenter *p = owner->presenter;
     uint32_t expires = VIDEO_TICK + VIDEO_INACTIVITY_LIMIT_MS;
     __atomic_store_n(&ctx->video_control.active_deadline, expires ? expires : 1, __ATOMIC_RELEASE);
-    if (data[1] != VIDEO_CONTROL_PLAYBACK && (!p->paired || p->sync.side == CFW_MESSAGE_RIGHT))
+    if (data[1] != VIDEO_CONTROL_PLAYBACK && (!p->paired || p->sync.side == CFW_MESSAGE_RIGHT)) {
         p->pause_requested = data[1] == VIDEO_CONTROL_PAUSE;
+        if (data[1] == VIDEO_CONTROL_RESUME) p->pause_after_first = 0;
+    }
     video_presenter_wake_locked(owner);
     out[3] = ctx->video_control.owner_here;
     video_write32(out + 4, ctx->video_control.stream); video_write32(out + 8, owner->token);
     video_write32(out + 12, p->paused);
-    video_write32(out + 16, p->paired && p->sync.side == CFW_MESSAGE_LEFT ? p->wire_paused : p->pause_requested);
+    video_write32(out + 16, p->paired && p->sync.side == CFW_MESSAGE_LEFT ? p->wire_paused :
+                  (p->pause_requested || p->pause_after_first));
     video_write32(out + 20, p->shown); video_write32(out + 24, p->shown ? p->done_pts : ctx->video_control.timeline.start_pts);
     video_write32(out + 28, ctx->video_control.timeline.duration);
-    video_write32(out + 32, p->paired && p->sync.side == CFW_MESSAGE_RIGHT && p->control_ack != p->control_serial);
+    video_write32(out + 32, p->menu_command ||
+        (p->paired && p->sync.side == CFW_MESSAGE_RIGHT && p->control_ack != p->control_serial));
+    return VIDEO_CONTROL_ACCEPTED;
+}
+
+int video_menu_control_locked(const uint8_t *data, uint32_t bytes, uint8_t origin, uint8_t *out) {
+    if (bytes != 24) return VIDEO_CONTROL_FORMAT;
+    uint32_t value = video_read32(data + 20);
+    if ((data[1] == VIDEO_CONTROL_MENU && value > VIDEO_MENU_QUERY) ||
+        (data[1] == VIDEO_CONTROL_SCALE && value != VIDEO_SCALE_NATIVE && value != VIDEO_SCALE_DOUBLE))
+        return VIDEO_CONTROL_FORMAT;
+    uint8_t query[20]; memcpy(query, data, 20); query[1] = VIDEO_CONTROL_PLAYBACK;
+    int result = video_playback_control_locked(query, 20, origin, out);
+    if (result) return result;
+    video_owner *owner = video_current_owner(); video_presenter *p = owner->presenter;
+    if (!p->paired || p->sync.side == CFW_MESSAGE_RIGHT) {
+        if (data[1] == VIDEO_CONTROL_SCALE) p->scale_requested = value == VIDEO_SCALE_NATIVE;
+        else if (value != VIDEO_MENU_QUERY) {
+            if (p->menu_command || !p->shown ||
+                (value >= VIDEO_MENU_NEXT && (!p->paused || !p->menu.open))) return VIDEO_CONTROL_BUSY;
+            p->menu_command = value + 1;
+        }
+    }
+    video_presenter_wake_locked(owner);
+    video_write32(out + 32, video_read32(out + 32) || p->menu_command);
+    video_write32(out + 36, p->menu_actual | p->scale_requested << 4 |
+        ((owner->context->video_control.options & VIDEO_PRESENT_NATIVE) != 0) << 5);
+    video_write32(out + 40, p->menu.seek_serial); video_write32(out + 44, p->menu.seek_target);
     return VIDEO_CONTROL_ACCEPTED;
 }
 
@@ -69,12 +99,30 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         int coordinator = !p->paired || p->sync.side == CFW_MESSAGE_RIGHT;
         int boundary = !p->paired || !p->sync.inflight ||
             (p->sync.completed == p->sync.inflight && p->sync.peer_completed == p->sync.inflight);
-        if (coordinator && boundary && !p->pause_after_first &&
-            p->control_ack == p->control_serial && p->paused != p->pause_requested) {
+        if (coordinator && p->menu_command) {
+            uint32_t action = p->menu_command - 1;
+            int applied = video_menu_action(&p->menu, action, p->done_pts, ctx->video_control.timeline.duration);
+            p->menu_command = 0;
+            if (!applied) { video_control_give(ctx); video_presenter_fault(owner, VIDEO_FAULT_SEQUENCE); }
+            if (applied == 2) p->pause_requested = 0;
+            else if (action == VIDEO_MENU_OPEN) p->pause_requested = 1;
+        }
+        uint32_t transition = 0;
+        if (coordinator && boundary && !p->pause_after_first && p->control_ack == p->control_serial) {
+            if (p->paused != p->pause_requested) {
+                p->paused = p->pause_requested;
+                p->menu.open = p->paused; p->menu.selection = 0;
+                transition = p->paused ? VIDEO_SYNC_PAUSE : VIDEO_SYNC_RESUME;
+            } else if (p->paused && video_menu_bits(&p->menu) != p->menu_actual) transition = VIDEO_SYNC_MENU;
+        }
+        if (transition) {
             if (p->control_serial == UINT32_MAX) {
                 video_control_give(ctx); video_presenter_fault(owner, VIDEO_FAULT_SEQUENCE);
             }
-            p->paused = p->pause_requested; ++p->control_serial;
+            ++p->control_serial; p->control_kind = transition;
+            p->control_menu = video_menu_bits(&p->menu);
+            if (p->menu_actual != p->control_menu) p->menu_dirty = 1;
+            p->menu_actual = p->control_menu;
             buffering = 1;
             if (p->paired) p->control_deadline = control_now + VIDEO_STOP_LIMIT_MS;
             else p->control_ack = p->control_serial;
@@ -85,14 +133,24 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         }
         if (p->paired && coordinator && p->control_ack != p->control_serial &&
             (int32_t)(control_now - p->control_sent) >= 100) {
-            control_op = p->paused ? VIDEO_SYNC_PAUSE : VIDEO_SYNC_RESUME;
+            control_op = p->control_kind;
             control_serial = p->control_serial; control_boundary = p->media_shown;
             p->control_sent = control_now;
+        }
+        if (p->shown && p->menu_dirty) {
+            video_control_give(ctx);
+            if (control_op && !video_presenter_sync_send(p, control_op, control_serial, control_boundary, 0, p->control_menu))
+                video_presenter_fault(owner, VIDEO_FAULT_DISPLAY);
+            video_frame_descriptor overlay = {.token = p->token, .generation = p->generation, .format = VIDEO_SOURCE_MENU};
+            if (!video_present_frame(&overlay)) video_presenter_fault(owner, VIDEO_FAULT_DISPLAY);
+            if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_presenter_fault(owner, VIDEO_FAULT_OWNERSHIP);
+            p->menu_dirty = 0; video_control_give(ctx);
+            continue;
         }
         if (p->paused || (coordinator && p->control_ack != p->control_serial)) {
             buffering = 1;
             video_control_give(ctx);
-            if (control_op && !video_presenter_sync_send(p, control_op, control_serial, control_boundary, 0, 0))
+            if (control_op && !video_presenter_sync_send(p, control_op, control_serial, control_boundary, 0, p->control_menu))
                 video_presenter_fault(owner, VIDEO_FAULT_DISPLAY);
             VIDEO_OS_EVENT_WAIT(p->wake, VIDEO_WAKE_ALL, 0, 50);
             continue;
@@ -105,7 +163,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
                q->slots[(q->head + ready_depth) % q->depth].state == VIDEO_DECODED_READY) ++ready_depth;
         /* Prebuffer two pictures, except an explicitly timed terminal picture.
          * After starvation re-anchor, never run a catch-up presentation burst. */
-        int terminal = available && q->slots[q->head].media.pts + 63 >= ctx->video_control.timeline.duration;
+        int terminal = available && ctx->video_control.timeline.duration - q->slots[q->head].media.pts <= 63;
         uint32_t ready_pts = available ? q->slots[q->head].media.pts : 0;
         int advertise = 0;
         if (p->paired && available) {
@@ -141,13 +199,18 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
                 if (trigger) {
                     p->trigger_tick = now; p->sync_sent = now;
                     p->sync_deadline = now + VIDEO_DISPLAY_LIMIT_MS;
+                    p->flight_native = p->scale_requested;
                 }
             } else due = available && p->sync.triggered == ordinal && p->sync.completed < ordinal;
         }
         int claim = due &&
             video_decoded_claim(q, p->generation, ordinal,
-                ctx->video_control.options & VIDEO_PRESENT_NATIVE ? VIDEO_SCALE_NATIVE : VIDEO_SCALE_DOUBLE,
+                (p->paired ? p->flight_native : p->scale_requested) ? VIDEO_SCALE_NATIVE : VIDEO_SCALE_DOUBLE,
                 &frame, &media);
+        if (claim) {
+            ctx->video_control.options = (ctx->video_control.options & ~VIDEO_PRESENT_NATIVE) |
+                (frame.scale == VIDEO_SCALE_NATIVE ? VIDEO_PRESENT_NATIVE : 0);
+        }
         if (claim && !p->paired) p->trigger_tick = deadline;
         uint32_t wait = available && !buffering && !claim ? deadline - now : 1000;
         if (p->paired && !claim) wait = 50;
@@ -159,7 +222,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         }
         if (trigger) {
             p->trigger_tick = VIDEO_TICK;
-            if (!video_presenter_sync_send(p, VIDEO_SYNC_TRIGGER, ordinal, ready_pts, 0, 0))
+            if (!video_presenter_sync_send(p, VIDEO_SYNC_TRIGGER, ordinal, ready_pts, 0, p->flight_native))
                 video_presenter_fault(owner, VIDEO_FAULT_DISPLAY);
         }
         if (!claim) {
@@ -226,6 +289,7 @@ static int video_presenter_prepare(video_owner *owner) {
     p->raw = raw; p->decoder = owner; p->generation = owner->control_generation; p->token = owner->token;
     p->preroll = (owner->context->video_control.options >> VIDEO_PREROLL_SHIFT) & 255u;
     p->pause_after_first = (owner->context->video_control.options & VIDEO_START_PAUSED) != 0;
+    p->scale_requested = (owner->context->video_control.options & VIDEO_PRESENT_NATIVE) != 0;
     p->paired = owner->context->video_control.owner_targets == CFW_MESSAGE_BOTH ||
                 (owner->context->video_control.options & VIDEO_PAIRED_PRESENTATION);
     if (!video_sync_init(&p->sync, owner->context->video_control.stream,

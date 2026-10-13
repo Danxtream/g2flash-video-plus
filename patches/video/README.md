@@ -703,8 +703,8 @@ decode. A published head can only be claimed by its exact picture ordinal,
 and it stays unavailable until actual display completion releases it.
 Cancellation stops admission but does not invalidate an outstanding presenter
 pin. Serial/generation exhaustion refuses instead of reusing a stale token.
-This standalone ownership primitive is not yet advertised as playback mode;
-the task owner enables it only after full startup/teardown admission is wired.
+Advanced capability operation13 advertises queued playback; START bit4
+enables it only with a configured timeline and admitted task/queue ownership.
 
 Optional ID31 operations11 and12 retain protocol version1 and the existing
 24-byte bounded replay format. TIMELINE11, while stopped, carries little-endian
@@ -715,8 +715,8 @@ Pictures are one-based; parameter sets and filler do not increment ordinals.
 Four metadata records have credits independent of compressed input slots.
 Exact duplicates are idempotent; conflicting, stale and overflowing records
 refuse without overwriting pending media identity. RESET retires the generation.
-These records do not themselves enable queued or synchronized presentation;
-legacy playback remains decode-ready until that capability is advertised.
+Metadata alone does not enable queued/synchronized presentation. Playback
+without the explicit queued START option retains legacy decode-ready behavior.
 
 ## Playback Controls
 
@@ -754,3 +754,26 @@ seek shows the target once and pauses at the common completion boundary;
 explicit PC resume continues it. The serialized upload control callback can
 send controls while pumping, without concurrent transport writers. Seeking
 to duration selects the last available picture; unbounded GOP prefixes refuse.
+
+## PC Menu and Scale
+
+Advanced capability bit64 advertises MENU19 and SCALE20. Both use24-byte
+owner-bound requests: header, stream, LEFT token, RIGHT token, value. MENU
+values0..5 mean open, close, next, previous, apply and query. SCALE1 selects
+native,2 selects double. A pending single-slot menu intent returns BUSY;
+retry with a fresh request, never overwrite it. RIGHT applies paired actions
+on the presenter and sends the common pause/menu view with finite serial/ACK.
+
+Replies extend the36-byte playback state to48 bytes: view, seek serial and
+seek target milliseconds (u32 each). View low bits encode open plus selection
+shifted1; bit4 is native selected and bit5 is native active. Seek selection
+cycles PLAY,-10,+10,-30,+30 seconds; targets clamp to media duration. Applying
+PLAY resumes. Other selections publish a PC source seek request; the supplied
+PlaybackController performs RESET/restoration/preroll on its single writer.
+Paused EOF retains the preview until explicit resume rather than silently STOP.
+
+The existing raw20px bitmap font draws position/duration and selection into
+the bottom48px letterbox, clipped to that band. Menu-only tagged copies retain
+the frozen video and do not change media counts, copy time or SHOWN records.
+Scale is latched on the common frame trigger; retry keeps that frame's scale.
+There is no radio entry, physical-input hook or independent gesture route.

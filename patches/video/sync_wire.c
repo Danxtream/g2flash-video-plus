@@ -32,7 +32,7 @@ static int video_presenter_sync_send(video_presenter *p, uint32_t op, uint32_t o
     uint8_t body[VIDEO_SYNC_BYTES] = {VIDEO_SYNC_BRIDGE, p->sync.side, 1, op};
     video_write32(body + 4, p->sync.stream); video_write32(body + 8, ordinal);
     video_write32(body + 12, pts); video_write32(body + 16, VIDEO_TICK);
-    body[20] = depth; body[21] = terminal != 0;
+    body[20] = depth; body[21] = terminal;
     return VIDEO_SYNC_SEND(body);
 }
 
@@ -49,23 +49,31 @@ static void video_presenter_sync_poll(video_presenter *p) {
         __atomic_store_n(&m->low, low + 1, __ATOMIC_RELEASE);
         if (body[1] == p->sync.side || video_read32(body + 4) != p->sync.stream) continue;
         uint32_t ordinal = video_read32(body + 8), pts = video_read32(body + 12);
-        if (body[3] == VIDEO_SYNC_PAUSE || body[3] == VIDEO_SYNC_RESUME) {
-            if (body[22] || body[23] || body[21] || body[20] > 1 || !ordinal)
+        if (body[3] == VIDEO_SYNC_PAUSE || body[3] == VIDEO_SYNC_RESUME || body[3] == VIDEO_SYNC_MENU) {
+            if (body[22] || body[23] || body[21] > 9 || (body[21] && !(body[21] & 1)) || body[20] > 1 || !ordinal)
                 video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
-            uint32_t paused = body[3] == VIDEO_SYNC_PAUSE;
+            uint32_t paused = body[3] == VIDEO_SYNC_MENU ? p->paused : body[3] == VIDEO_SYNC_PAUSE;
             if (p->sync.side == CFW_MESSAGE_LEFT && body[1] == CFW_MESSAGE_RIGHT && !body[20]) {
                 if (ordinal < p->wire_serial) continue;
+                if (body[3] == VIDEO_SYNC_MENU && !p->paused)
+                    video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
                 if (ordinal > p->wire_serial + 1 ||
                     (ordinal > p->wire_serial ? pts != p->media_shown :
-                     (paused != p->wire_paused || pts != p->wire_boundary)))
+                     (paused != p->wire_paused || pts != p->wire_boundary ||
+                      body[3] != p->wire_kind || body[21] != p->menu_actual)))
                     video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
                 p->wire_serial = ordinal; p->wire_paused = p->paused = paused;
                 p->wire_boundary = pts;
-                if (!video_presenter_sync_send(p, body[3], ordinal, pts, 1, 0))
+                p->wire_kind = body[3];
+                if (p->menu_actual != body[21]) p->menu_dirty = 1;
+                p->menu_actual = body[21];
+                p->menu.open = body[21] & 1; p->menu.selection = body[21] >> 1;
+                if (!video_presenter_sync_send(p, body[3], ordinal, pts, 1, body[21]))
                     video_presenter_fault(p->decoder, VIDEO_FAULT_DISPLAY);
             } else if (p->sync.side == CFW_MESSAGE_RIGHT && body[1] == CFW_MESSAGE_LEFT && body[20]) {
                 if (ordinal <= p->control_ack) continue;
-                if (ordinal != p->control_serial || pts != p->media_shown || paused != p->paused)
+                if (ordinal != p->control_serial || pts != p->media_shown || paused != p->paused ||
+                    body[3] != p->control_kind || body[21] != p->control_menu)
                     video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
                 p->control_ack = ordinal; p->control_deadline = 0;
             } else video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
@@ -78,6 +86,9 @@ static void video_presenter_sync_poll(video_presenter *p) {
         if (body[3] == VIDEO_SYNC_TRIGGER) {
             if (ordinal == p->sync.inflight && ordinal != p->captured_ordinal) {
                 p->wire_capture = captured; p->captured_ordinal = ordinal;
+                p->flight_native = body[21];
+            } else if (ordinal == p->sync.inflight && p->flight_native != body[21]) {
+                video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
             }
             if (ordinal == p->media_shown && pts == p->done_pts)
                 video_presenter_sync_send(p, VIDEO_SYNC_DONE, ordinal, pts, 0, 0);
@@ -89,7 +100,7 @@ static void video_presenter_sync_poll(video_presenter *p) {
         video_presenter_fault(p->decoder, VIDEO_FAULT_DISPLAY);
     if (p->sync.side == 2 && p->sync.inflight && p->sync.peer_completed != p->sync.inflight &&
         (int32_t)(now - p->sync_sent) >= 100) {
-        if (!video_presenter_sync_send(p, VIDEO_SYNC_TRIGGER, p->sync.inflight, p->sync.flight_pts, 0, 0))
+        if (!video_presenter_sync_send(p, VIDEO_SYNC_TRIGGER, p->sync.inflight, p->sync.flight_pts, 0, p->flight_native))
             video_presenter_fault(p->decoder, VIDEO_FAULT_DISPLAY);
         p->sync_sent = now;
     }

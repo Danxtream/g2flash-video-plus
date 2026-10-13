@@ -315,7 +315,7 @@ static int worker_radio_refusal_snapshot(uint8_t *out) {
 #include "../../patches/video/decoded_queue.c"
 #include "../../patches/video/pacing.c"
 #include "../../patches/video/sync.c"
-static uint32_t paired_fixture, partner_anchor;
+static uint32_t paired_fixture, partner_anchor, partner_native;
 static video_sync partner;
 static int test_sync_send(const uint8_t *body) {
     assert(!image_depth && !service_context && body[0] == VIDEO_SYNC_BRIDGE);
@@ -324,7 +324,7 @@ static int test_sync_send(const uint8_t *body) {
     uint32_t ordinal = video_read32(body + 8), pts = video_read32(body + 12);
     uint8_t reply[VIDEO_SYNC_BYTES]; memcpy(reply, body, sizeof(reply));
     reply[1] ^= CFW_MESSAGE_BOTH;
-    if (operation == VIDEO_SYNC_PAUSE || operation == VIDEO_SYNC_RESUME) {
+    if (operation == VIDEO_SYNC_PAUSE || operation == VIDEO_SYNC_RESUME || operation == VIDEO_SYNC_MENU) {
         assert(source == CFW_MESSAGE_RIGHT && !body[20]);
         reply[20] = 1;
         assert(!video_sync_received(reply, sizeof(reply)));
@@ -341,7 +341,7 @@ static int test_sync_send(const uint8_t *body) {
                 if (!partner_anchor) partner_anchor = tick();
                 uint32_t due = partner_anchor + (ordinal - 1) * 1000 / 16;
                 while ((int32_t)(due - tick()) > 0) delay(1);
-                reply[3] = VIDEO_SYNC_TRIGGER; reply[20] = reply[21] = 0;
+                reply[3] = VIDEO_SYNC_TRIGGER; reply[20] = 0; reply[21] = partner_native;
                 assert(video_sync_complete(&partner, ordinal));
                 assert(!video_sync_received(reply, sizeof(reply)));
             }
@@ -360,6 +360,16 @@ static int test_sync_send(const uint8_t *body) {
 #include "../../patches/video/sync_wire.c"
 #include "../../patches/video/shown.c"
 #include "../../patches/video/shown_wire.c"
+#include "../../patches/video/menu.c"
+static int test_menu_text(uint8_t *shadow, const uint8_t *text, uint32_t bytes, cfw_rectlist *rectangles) {
+    assert(picture_thread && image_depth && display_gate && bytes == 6u + text[5] && rectangles);
+    uint32_t x = text[0] | (uint32_t)text[1] << 8, y = text[2] | (uint32_t)text[3] << 8;
+    assert(x < VIDEO_PANEL_WIDTH && y < VIDEO_MENU_HEIGHT && text[5] < 34);
+    shadow[y * VIDEO_PANEL_STRIDE + x / 2] = 0xff;
+    return 0;
+}
+#define VIDEO_MENU_TEXT(shadow, text, bytes, rectangles) test_menu_text(shadow, text, bytes, rectangles)
+#include "../../patches/video/menu_draw.c"
 #include "../../patches/video/presenter.c"
 static uint32_t test_crc(const g2_h264_frame_info *frame) {
     __atomic_fetch_add(&crc_calls, 1, __ATOMIC_RELAXED); return video_frame_crc(frame);
@@ -1387,6 +1397,28 @@ int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
     return 1;
 }
 
+static void menu_fixture_command(uint32_t operation, uint32_t value, uint32_t expected_view) {
+    video_owner *owner = context.video_owner;
+    uint8_t command[24] = {0}, report[VIDEO_MENU_STATE_BYTES] = {0};
+    command[1] = operation; video_write32(command + 8, 1);
+    video_write32(command + 12, owner->token); video_write32(command + 16, owner->token);
+    video_write32(command + 20, value);
+    assert(!take(1, 1000));
+    assert(!video_menu_control_locked(command, 24, 1, report)); give(1);
+    uint32_t limit = tick() + 3000;
+    for (;;) {
+        display_pump(); pool_drain();
+        assert(!take(1, 1000));
+        assert(context.video_owner == owner && !context.video.fault);
+        video_presenter *p = owner->presenter;
+        int done = !p->menu_command && !p->menu_dirty && p->menu_actual == expected_view &&
+            p->control_ack == p->control_serial;
+        give(1);
+        if (done) return;
+        delay(1); assert((int32_t)(limit - tick()) > 0);
+    }
+}
+
 static void exercise_pause(void) {
     video_owner *owner = context.video_owner;
     uint32_t here = context.video_control.owner_here, limit = tick() + 3000;
@@ -1414,6 +1446,23 @@ static void exercise_pause(void) {
     }
     for (uint32_t i = 0; i < 150; ++i) { display_pump(); pool_drain(); delay(1); }
     assert(copied_frames == frozen && !context.video.fault && radio_active);
+    if (playback_pause_fixture == 3) {
+        assert(physical_frame[434 * VIDEO_PANEL_STRIDE + 48] == 0xff);
+        menu_fixture_command(VIDEO_CONTROL_MENU, VIDEO_MENU_NEXT, 3);
+        menu_fixture_command(VIDEO_CONTROL_MENU, VIDEO_MENU_PREVIOUS, 1);
+        menu_fixture_command(VIDEO_CONTROL_MENU, VIDEO_MENU_NEXT, 3);
+        menu_fixture_command(VIDEO_CONTROL_MENU, VIDEO_MENU_APPLY, 3);
+        assert(owner->presenter->menu.seek_serial == 1 && !owner->presenter->menu.seek_target);
+        menu_fixture_command(VIDEO_CONTROL_MENU, VIDEO_MENU_NEXT, 5);
+        menu_fixture_command(VIDEO_CONTROL_MENU, VIDEO_MENU_APPLY, 5);
+        assert(owner->presenter->menu.seek_serial == 2 && owner->presenter->menu.seek_target == 2000);
+        menu_fixture_command(VIDEO_CONTROL_MENU, VIDEO_MENU_CLOSE, 0);
+        for (uint32_t i = 432 * VIDEO_PANEL_STRIDE; i < VIDEO_PANEL_BYTES; ++i) assert(!physical_frame[i]);
+        menu_fixture_command(VIDEO_CONTROL_MENU, VIDEO_MENU_OPEN, 1);
+        menu_fixture_command(VIDEO_CONTROL_SCALE, VIDEO_SCALE_NATIVE, 1);
+        assert(owner->presenter->scale_requested && !(context.video_control.options & VIDEO_PRESENT_NATIVE));
+        assert(copied_frames == frozen && owner->presenter->shown_rows.high == frozen);
+    }
     assert(!take(1, 1000));
     command[1] = VIDEO_CONTROL_PLAYBACK;
     assert(!video_playback_control_locked(command, 20, 1, playback));
@@ -1425,7 +1474,7 @@ static void exercise_pause(void) {
 
 static void queued_consumer_mode(uint32_t mode, int with_pause) {
     configure(); request_next = 0; consume_enabled = queued_upload = 1;
-    paired_fixture = mode; partner_anchor = 0;
+    paired_fixture = mode == 3 ? 1 : mode; partner_anchor = 0; partner_native = mode == 3;
     uint32_t here = mode == 2 ? CFW_MESSAGE_RIGHT : CFW_MESSAGE_LEFT;
     assert(video_sync_init(&partner, 1, here ^ CFW_MESSAGE_BOTH));
     uint32_t prefix = with_pause == 2 ? 7 : 0, visible = 32 - prefix;
@@ -1435,6 +1484,7 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
     context.video_control.owner_origin = 1;
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
     control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_QUEUED_PRESENTATION;
+    if (partner_native) p[18] |= VIDEO_PRESENT_NATIVE;
     if (prefix) { p[18] |= VIDEO_START_PAUSED; p[19] = prefix; }
     cfw_message_route route = control_route; route.targets = mode ? CFW_MESSAGE_BOTH : CFW_MESSAGE_LEFT;
     assert(!video_control_received(p, 24, &route));
@@ -1499,6 +1549,10 @@ static void playback_controls(void) {
 static void seek_controls(void) {
     queued_consumer_mode(0, 2); queued_consumer_mode(2, 2);
     puts("hidden decoded preroll, paused target preview and distinct media/copy ordinals PASS");
+}
+static void menu_controls(void) {
+    queued_consumer_mode(0, 3); queued_consumer_mode(2, 3); queued_consumer_mode(3, 0);
+    puts("common menu actions, retained video, nonmedia overlay copies and immutable native triggers PASS");
 }
 
 static void sync_posting(void) {
@@ -1981,9 +2035,10 @@ static void display_pump(void) {
         int native = context.video_control.options & VIDEO_PRESENT_NATIVE;
         for (uint32_t y = 0; y < VIDEO_PANEL_HEIGHT; ++y)
             for (uint32_t x = 0; x < VIDEO_PANEL_STRIDE; ++x)
-                assert(physical_frame[y * VIDEO_PANEL_STRIDE + x] ==
-                    ((native ? y >= 144 && y < 336 && x >= 80 && x < 240 : y >= 48 && y < 432) ? 0x88 : 0));
-        ++copied_frames;
+                if (context.video_presentation.ordinal || y < 432)
+                    assert(physical_frame[y * VIDEO_PANEL_STRIDE + x] ==
+                        ((native ? y >= 144 && y < 336 && x >= 80 && x < 240 : y >= 48 && y < 432) ? 0x88 : 0));
+        if (context.video_presentation.ordinal) ++copied_frames;
     }
     display_signal();
 }
@@ -2261,6 +2316,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "paired-consumer")) paired_consumer();
     else if (!strcmp(argv[1], "playback-controls")) playback_controls();
     else if (!strcmp(argv[1], "seek-controls")) seek_controls();
+    else if (!strcmp(argv[1], "menu-controls")) menu_controls();
     else if (!strcmp(argv[1], "sync-posting")) sync_posting();
     else if (!strcmp(argv[1], "evidence")) evidence();
     else if (!strcmp(argv[1], "evidence-replays")) evidence_replays();

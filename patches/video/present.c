@@ -70,7 +70,7 @@ void video_display_complete(uint32_t token, int success) {
     customCfwContext *ctx = peekCustomCfwContext();
     if (!ctx || !token || token != ctx->video_presentation.token ||
         __atomic_load_n(&ctx->video_presentation.phase, __ATOMIC_ACQUIRE) != VIDEO_DISPLAY_COPYING) return;
-    ctx->video_presentation.copy_tick = VIDEO_TICK;
+    if (ctx->video_presentation.ordinal) ctx->video_presentation.copy_tick = VIDEO_TICK;
     __atomic_store_n(&ctx->video_presentation.phase,
         success ? VIDEO_DISPLAY_COMPLETE : VIDEO_DISPLAY_FAILED, __ATOMIC_RELEASE);
     video_controller_presented(token);
@@ -99,7 +99,8 @@ int video_display_fold_locked(void) {
         return 1;
     }
     p->pin = 0;
-    if (ok && p->ordinal == p->presented + 1) p->presented = p->ordinal;
+    if (ok && !p->ordinal) { /* Internal menu copies do not advance media. */ }
+    else if (ok && p->ordinal == p->presented + 1) p->presented = p->ordinal;
     else {
         ++p->failures;
         video_fault_locked(ctx, VIDEO_FAULT_DISPLAY);
@@ -112,8 +113,11 @@ int video_present_frame(const video_frame_descriptor *frame) {
     video_owner *owner = video_current_owner();
     uint32_t task = VIDEO_OS_THREAD_ID();
     int presenter = owner && owner->presenter && owner->presenter->thread == task;
+    int overlay = frame && frame->format == VIDEO_SOURCE_MENU;
     if (!owner || !frame || (!presenter && owner->thread != task) ||
         frame->token != owner->token || frame->generation != owner->control_generation ||
+        (overlay && (!presenter || frame->ordinal)) ||
+        (!overlay && !frame->ordinal) ||
         !video_prepare_shadow(owner)) return 0;
     if (owner->control_generation && !video_power_deadline(owner->control_generation)) {
         if (presenter) video_presenter_fault(owner, VIDEO_FAULT_POWER);
@@ -122,6 +126,7 @@ int video_present_frame(const video_frame_descriptor *frame) {
     customCfwContext *ctx = owner->context;
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) return 0;
     video_presentation_state *p = &ctx->video_presentation;
+    uint32_t failures_before = p->failures;
     if (p->pin || ctx->direct_pending || !ctx->framebuffer_shadow || !video_lease_valid(ctx) ||
         video_lifecycle_cancelled(&ctx->video, frame->token)) {
         video_control_give(ctx); return 0;
@@ -144,12 +149,14 @@ int video_present_frame(const video_frame_descriptor *frame) {
         }
     } else if (!VIDEO_DISPLAY_TAKE()) { video_control_give(ctx); return 0; }
     if (!video_lease_valid(ctx) || video_lifecycle_cancelled(&ctx->video, frame->token) ||
-        !video_pack_frame(ctx->framebuffer_shadow, VIDEO_PANEL_BYTES, frame) ||
+        !(overlay ? video_menu_draw(ctx->framebuffer_shadow, owner->presenter->menu_actual,
+             owner->presenter->done_pts, ctx->video_control.timeline.duration) :
+             video_pack_frame(ctx->framebuffer_shadow, VIDEO_PANEL_BYTES, frame)) ||
         !video_lifecycle_pin(&ctx->video, frame->token, 0)) {
         VIDEO_DISPLAY_SIGNAL(); video_control_give(ctx); return 0;
     }
     p->token = frame->token; p->generation = frame->generation;
-    p->ordinal = frame->ordinal; p->copy_tick = 0; p->pin = 1;
+    p->ordinal = frame->ordinal; if (!overlay) p->copy_tick = 0; p->pin = 1;
     __atomic_store_n(&p->queue_failed, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&p->phase, VIDEO_DISPLAY_QUEUED, __ATOMIC_RELEASE);
     cfw_rectlist rectangles = {0};
@@ -160,7 +167,7 @@ int video_present_frame(const video_frame_descriptor *frame) {
     for (;;) {
         if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) break;
         int done = !p->pin && p->ordinal == frame->ordinal;
-        int success = done && p->presented == frame->ordinal && !rectangles.direct_failed;
+        int success = done && (overlay ? p->failures == failures_before : p->presented == frame->ordinal) && !rectangles.direct_failed;
         video_control_give(ctx);
         if (done) return success;
         uint32_t now = VIDEO_TICK;

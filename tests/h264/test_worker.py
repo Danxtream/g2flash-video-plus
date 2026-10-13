@@ -117,6 +117,9 @@ class WorkerTests(unittest.TestCase):
     def test_seek_preroll_is_decoded_but_not_shown_and_preview_stays_paused(self):
         self.check_case("seek-controls")
 
+    def test_pc_menu_preserves_video_and_paired_scale_is_trigger_owned(self):
+        self.check_case("menu-controls")
+
     def test_wire_callback_only_posts_and_refuses_overflow_without_heap_or_wait(self):
         self.check_case("sync-posting")
 

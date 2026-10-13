@@ -10,7 +10,8 @@ enum {
     VIDEO_SYNC_TRIGGER = 2,
     VIDEO_SYNC_DONE = 3,
     VIDEO_SYNC_PAUSE = 4,
-    VIDEO_SYNC_RESUME = 5
+    VIDEO_SYNC_RESUME = 5,
+    VIDEO_SYNC_MENU = 6
 };
 typedef struct {
     uint32_t stream, side, next, inflight, triggered, completed, peer_completed, flight_pts;

@@ -9,6 +9,7 @@ enum {
     VIDEO_PANEL_BYTES = VIDEO_PANEL_STRIDE * VIDEO_PANEL_HEIGHT,
     VIDEO_SOURCE_Y8 = 1,
     VIDEO_SOURCE_A4 = 2,
+    VIDEO_SOURCE_MENU = 3, /* Presenter-only overlay; never a media picture. */
     VIDEO_SCALE_NATIVE = 1,
     VIDEO_SCALE_DOUBLE = 2,
     VIDEO_PRESENT_NATIVE = 1,

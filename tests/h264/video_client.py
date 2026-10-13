@@ -21,6 +21,8 @@ START_PAUSED = 32
 FRAME_TIME_FAST = 14
 SHOWN = 15
 PAUSE, RESUME, PLAYBACK = 16, 17, 18
+MENU, SCALE = 19, 20
+MENU_ACTIONS = {'open': 0, 'close': 1, 'next': 2, 'previous': 3, 'apply': 4, 'query': 5}
 RADIO_OFF = 2
 BASE_STATUS_BYTES, STATUS_BYTES, FRAME_BYTES, ACK_BYTES = 128, 192, 80, 16
 RESULT_FIELDS = ('ordinal', 'first_nal', 'last_nal', 'geometry', 'crc', 'cycles', 'ticks',
@@ -29,6 +31,13 @@ RESULT_FIELDS = ('ordinal', 'first_nal', 'last_nal', 'geometry', 'crc', 'cycles'
 POWER_STEPS = ('none', 'local startup refused', 'local UI not awake', 'local driver not initialized',
                'local active app is not dashboard', 'bridge send refused', 'peer acknowledgement missing',
                'peer not ready', 'peer refused', 'owner cancelled or expired', 'peer acknowledgement expired')
+
+
+class VideoSeekRequested(Exception):
+    """Transfer still-live ownership to the serialized PC seek controller."""
+    def __init__(self, target_ms, paused):
+        super().__init__('menu requested a new media generation')
+        self.target_ms, self.paused = target_ms, paused
 
 
 def status(raw):
@@ -165,7 +174,7 @@ def paired_report(reports):
 
 def playback_state(raw):
     """Decode owner-bound media position, not input or decoded sequence."""
-    if len(raw) != 36 or raw[0] != VERSION or raw[1] not in (PAUSE, RESUME, PLAYBACK):
+    if len(raw) != 36 or raw[0] != VERSION or raw[1] not in (PAUSE, RESUME, PLAYBACK, MENU, SCALE):
         raise ValueError('invalid playback state header')
     names = ('stream', 'token', 'paused', 'requested_pause', 'shown', 'position_ms', 'duration_ms', 'pending')
     report = dict(zip(names, struct.unpack_from('<8I', raw, 4)), result=raw[2], lens=raw[3])
@@ -176,6 +185,20 @@ def playback_state(raw):
     return report
 
 
+def menu_state(raw):
+    """Decode the common menu view and PC-owned pending seek request."""
+    if len(raw) != 48 or raw[1] not in (MENU, SCALE):
+        raise ValueError('invalid menu state header')
+    report = playback_state(raw[:36])
+    view, serial, target = struct.unpack_from('<3I', raw, 36)
+    if not report['result'] and (view & ~63 or (view & 15) > 9 or
+            (view & 15 and not view & 1) or target > report['duration_ms']):
+        raise ValueError('invalid menu view or seek target')
+    return dict(report, menu_open=bool(view & 1), selection=(view >> 1) & 7,
+                native_selected=bool(view & 16), native_active=bool(view & 32),
+                seek_serial=serial, seek_target_ms=target)
+
+
 class VideoClient(VideoLink):
     def playback_capabilities(self):
         """Query explicit queued support without enabling playback."""
@@ -183,10 +206,10 @@ class VideoClient(VideoLink):
         payload = struct.pack('<BBBBI', MESSAGE, PLAYBACK_CAPABILITIES, VERSION, 0, request)
         replies = self.raw_replies(payload, 16)
         for raw in replies.values():
-            if (raw[:3] != bytes((VERSION, PLAYBACK_CAPABILITIES, 0)) or raw[3] not in (1, 3, 7, 15, 31, 63) or
+            if (raw[:3] != bytes((VERSION, PLAYBACK_CAPABILITIES, 0)) or raw[3] not in (1, 3, 7, 15, 31, 63, 127) or
                     raw[4:6] != bytes((2, 16)) or raw[6:8] != (bytes((255, 1)) if raw[3] & 32 else bytes((0, 0)))):
                 raise ValueError('unsupported queued playback capability')
-        return {lens: dict(seek=bool(raw[3] & 32), max_preroll=raw[6], controls=bool(raw[3] & 16), shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
+        return {lens: dict(menu=bool(raw[3] & 64), seek=bool(raw[3] & 32), max_preroll=raw[6], controls=bool(raw[3] & 16), shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
                            stack_bytes=struct.unpack_from('<I', raw, 12)[0]) for lens, raw in replies.items()}
 
     def configure_timeline(self, stream, duration_ms, start_pts_ms=0):
@@ -241,6 +264,28 @@ class VideoClient(VideoLink):
         payload = struct.pack('<BBBBIIII', MESSAGE, operation, VERSION, 0,
                               self.counter.reserve(), stream, tokens.get(1, 0), tokens.get(2, 0))
         return {lens: playback_state(raw) for lens, raw in self.raw_replies(payload, 36).items()}
+
+    def menu(self, stream, tokens, action='query'):
+        """Publish a menu action; a busy intent slot requires a fresh retry."""
+        if action not in MENU_ACTIONS:
+            raise ValueError('invalid menu action')
+        return self._menu_control(stream, tokens, MENU, MENU_ACTIONS[action])
+
+    def scale(self, stream, tokens, native):
+        """Select native/2x for the next common picture trigger."""
+        if not isinstance(native, bool):
+            raise ValueError('native must be a boolean')
+        return self._menu_control(stream, tokens, SCALE, 1 if native else 2)
+
+    def _menu_control(self, stream, tokens, operation, value):
+        if not 0 < stream <= 0xffffffff:
+            raise ValueError('invalid menu stream')
+        payload = struct.pack('<BBBBIIIII', MESSAGE, operation, VERSION, 0, self.counter.reserve(),
+                              stream, tokens.get(1, 0), tokens.get(2, 0), value)
+        replies = {lens: menu_state(raw) for lens, raw in self.raw_replies(payload, 48).items()}
+        if any(not row['result'] and row['lens'] != lens for lens, row in replies.items()):
+            raise ValueError('menu response source differs from its lens')
+        return replies
 
     """Forwarded paired delivery and bounded frozen replies on a supplied link."""
     def raw_replies(self, payload, length, *, targets=None, result_offset=2):
@@ -379,6 +424,12 @@ class DirectPairClient:
     def playback(self, stream, tokens, operation=PLAYBACK):
         return {side: client.playback(stream, tokens, operation)[side]
                 for side, client in self.clients.items()}
+
+    def menu(self, stream, tokens, action='query'):
+        return {side: client.menu(stream, tokens, action)[side] for side, client in self.clients.items()}
+
+    def scale(self, stream, tokens, native):
+        return {side: client.scale(stream, tokens, native)[side] for side, client in self.clients.items()}
 
 
     def send_window(self, payloads):
@@ -572,8 +623,10 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, queued=Fa
     stream = capabilities['stream_high'] + 1
     preroll = reference.get('preroll', 0)
     decoded_count = reference.get('decoded_frame_count', reference['frame_count'])
+    controls_available = False
     if queued:
         playback = client.playback_capabilities()
+        controls_available = all(r.get('controls', False) for r in playback.values())
         if any(not r['compact_metadata'] or (client.targets == 3 and not r['paired']) for r in playback.values()):
             raise ValueError('every recipient must advertise queued playback and compact metadata')
         if ((preroll or paused) and any(not r.get('seek') or preroll > r['max_preroll'] for r in playback.values())):
@@ -661,6 +714,13 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, queued=Fa
                 finished = all(r['consumed'] == index and r['presented'] == reference['frame_count']
                                for r in per_lens(state).values())
                 if finished and (not verify or all(len(row) == reference['frame_count'] for row in rows.values())):
+                    if queued and (paused or controls_available):
+                        playback = client.playback(stream, tokens)
+                        if any(r['result'] for r in playback.values()):
+                            raise RuntimeError('paused EOF owner could not be checked')
+                        if any(r['paused'] or r['requested_pause'] or r['pending'] for r in playback.values()):
+                            sleep(.02)
+                            continue
                     break
             # This is a slot count AND sequence-distance limit on each recipient.
             count = min(ACK_WINDOW, credit['credits'], len(nals) - index,
@@ -734,6 +794,9 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, queued=Fa
                     host_completion_fps=reference['frame_count']/playback_seconds,
                     input_seconds=input_finished-started,
                     nal_bytes_per_second=sum(map(len, nals))/(input_finished-started))
+    except VideoSeekRequested:
+        # The supplied-link controller immediately owns RESET/restoration.
+        raise
     except Exception:
         # A failed paired START may still own the other lens. Retire all selected
         # recipients when reachable; connection loss also has firmware deadlines.

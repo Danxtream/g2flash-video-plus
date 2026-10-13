@@ -87,3 +87,5 @@ int video_worker_get_report(video_worker_report *);
 /* Owner-bound control requests only publish intent; presenter applies timing.
  * Caller holds image_mutex. Tokens select the local lens from a paired request. */
 int video_playback_control_locked(const uint8_t *, uint32_t, uint8_t, uint8_t *);
+/* Menu/scale requests publish bounded intent; drawing never runs on this caller. */
+int video_menu_control_locked(const uint8_t *, uint32_t, uint8_t, uint8_t *);
