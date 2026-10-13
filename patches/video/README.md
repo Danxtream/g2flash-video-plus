@@ -150,6 +150,12 @@ Run the sanitized worker, storage and lifecycle checks with the existing suite:
 
 ## Shared-shadow packing
 
+STATUS reports the last completed media count and its matching completion
+tick. An in-flight copy or menu refresh cannot clear or advance only half
+of that tuple. The display callback captures a pending tick; the existing
+publication fold commits both fields together. A genuine zero tick at
+counter wrap remains valid. SHOWN keeps the per-copy capture timestamps.
+
 The bounded packer converts top-down Y8 to the panel's A4 layout, with the
 left pixel in the high nibble. The default development curve rescales luma
 across visible panel levels 1 through 15. The selectable decoded-luma curve

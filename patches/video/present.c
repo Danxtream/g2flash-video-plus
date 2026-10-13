@@ -100,7 +100,9 @@ int video_display_fold_locked(void) {
     }
     p->pin = 0;
     if (ok && !p->ordinal) { /* Internal menu copies do not advance media. */ }
-    else if (ok && p->ordinal == p->presented + 1) p->presented = p->ordinal;
+    else if (ok && p->ordinal == p->presented + 1) {
+        p->presented = p->ordinal; p->completed_tick = p->copy_tick;
+    }
     else {
         ++p->failures;
         video_fault_locked(ctx, VIDEO_FAULT_DISPLAY);

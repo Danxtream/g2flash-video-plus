@@ -135,6 +135,9 @@ class WorkerTests(unittest.TestCase):
     def test_display_refusal_copy_completion_stop_races_and_unknown_job_quarantine(self):
         self.check_case("presentation-failures")
 
+    def test_status_keeps_completed_copy_tuple_during_next_admission_and_timer_wrap(self):
+        self.check_case("status-copy")
+
     def test_ordinary_image_overlay_lease_and_stock_fallback_remain_unchanged(self):
         self.check_case("original-display")
 

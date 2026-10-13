@@ -1844,6 +1844,46 @@ static void presentation_failures(void) {
     }
     puts("heap/gate/queue/copy refusal, STOP completion, claimed-queue failure and timeout retention PASS");
 }
+static void status_copy_tuple(void) {
+    configure(); request_next = 0;
+    uint8_t command[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
+    control_command(command, VIDEO_CONTROL_START, 1);
+    assert(!control_snapshot(command, 24, report)); pool_drain(); await_ready();
+    assert(!video_read32(report + 80) && !video_read32(report + 88));
+    assert(!take(1, 1000));
+    uint32_t token = context.video.token;
+    video_presentation_state *p = &context.video_presentation;
+    p->token = token; p->ordinal = 2; p->presented = 1; p->completed_tick = 100;
+    p->copy_tick = 0; p->pin = 1; p->phase = VIDEO_DISPLAY_QUEUED;
+    context.direct_shadow = context.framebuffer_shadow;
+    assert(video_lifecycle_pin(&context.video, token, 0));
+    video_control_replay entry = {0}; entry.command[1] = VIDEO_CONTROL_STATUS;
+    video_snapshot(&context, &entry);
+    assert(video_read32(entry.snapshot + 80) == 1 && video_read32(entry.snapshot + 88) == 100);
+    give(1);
+    service_context = 1;
+    assert(video_display_claim() == token);
+    video_display_complete(token, 1);
+    service_context = 0;
+    assert(!take(1, 1000));
+    p->copy_tick = 0; /* An actual counter wrap is valid, not missing evidence. */
+    video_snapshot(&context, &entry);
+    assert(video_read32(entry.snapshot + 80) == 1 && video_read32(entry.snapshot + 88) == 100);
+    assert(!video_display_fold_locked());
+    video_snapshot(&context, &entry);
+    assert(video_read32(entry.snapshot + 80) == 2 && !video_read32(entry.snapshot + 88));
+    assert(video_lifecycle_pin(&context.video, token, 0));
+    p->ordinal = 0; p->pin = 1; p->phase = VIDEO_DISPLAY_COMPLETE; p->copy_tick = 999;
+    assert(!video_display_fold_locked());
+    video_snapshot(&context, &entry);
+    assert(video_read32(entry.snapshot + 80) == 2 && !video_read32(entry.snapshot + 88));
+    give(1);
+    control_command(command, VIDEO_CONTROL_STOP, 1);
+    assert(!control_snapshot(command, 12, report)); pool_drain(); finish();
+    assert(video_read32(report + 80) == 2 && !video_read32(report + 88));
+    puts("STATUS before first copy, pending/callback/fold, genuine zero wrap and menu tuple PASS");
+}
+
 static void recovery(void) {
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
     for (uint32_t mode = 0; mode < 5; ++mode) {
@@ -2434,6 +2474,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "evidence")) evidence();
     else if (!strcmp(argv[1], "evidence-replays")) evidence_replays();
     else if (!strcmp(argv[1], "presentation-failures")) presentation_failures();
+    else if (!strcmp(argv[1], "status-copy")) status_copy_tuple();
     else if (!strcmp(argv[1], "original-display")) original_display();
     else if (!strcmp(argv[1], "inactivity")) inactivity();
     else if (!strcmp(argv[1], "cleanup")) cleanup();

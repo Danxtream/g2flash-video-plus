@@ -70,7 +70,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     video_write32(p + 76, queue.gap_sequence);
     video_write32(p + 80, ctx->video_presentation.presented);
     video_write32(p + 84, ctx->video_presentation.failures);
-    video_write32(p + 88, ctx->video_presentation.copy_tick);
+    video_write32(p + 88, ctx->video_presentation.completed_tick);
     video_write32(p + 92, s->options & 255u);
     video_evidence_status_locked(ctx, p);
     if (entry->snapshot_bytes == VIDEO_STATUS_BYTES)

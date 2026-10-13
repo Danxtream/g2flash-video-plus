@@ -49,6 +49,7 @@ typedef struct {
     uint32_t token, generation, ordinal, copy_tick;
     uint32_t pin, stop_wait, presented, failures;
     volatile uint32_t output_epoch;
+    uint32_t completed_tick; /* Paired with presented under publication protection. */
 } video_presentation_state;
 
 /* Worker task only, outside image/display locks. Return after actual copy and
