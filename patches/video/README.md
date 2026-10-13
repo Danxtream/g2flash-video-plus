@@ -717,3 +717,22 @@ Exact duplicates are idempotent; conflicting, stale and overflowing records
 refuse without overwriting pending media identity. RESET retires the generation.
 These records do not themselves enable queued or synchronized presentation;
 legacy playback remains decode-ready until that capability is advertised.
+
+## Playback Controls
+
+Advanced capability operation13 advertises bit16 for owner-bound playback
+controls. PAUSE16, RESUME17 and PLAYBACK18 use a20-byte request: the control
+header, stream, LEFT token and RIGHT token. The36-byte frozen reply contains
+version/operation/result/lens followed by stream, local token, actual paused
+state, requested pause, shown picture count, media position in milliseconds,
+duration and pending paired transition (all u32 little-endian).
+Position advances only after display copy. Commands publish intent; clock,
+boundary and wire processing remain on the independent presenter task.
+
+RIGHT waits for both copies before a paired pause. Ordered, stream-qualified
+PAUSE/RESUME wire records carry a finite control serial and the completed
+picture boundary. LEFT acknowledges exact repeats; RIGHT blocks new triggers
+until that acknowledgement, retrying at100ms with a2s limit. Resume reanchors
+the cadence after prebuffering. Pausing retains owned queues and the radio
+lifecycle; STOP/RESET still drain and restore. A supplied-link PC client can
+read and control playback without opening any connection itself.

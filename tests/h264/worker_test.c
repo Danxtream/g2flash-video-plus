@@ -64,6 +64,8 @@ static void pool_drain(void);
 static void *display_thread_entry(void *);
 static uint32_t display_gate, display_job, fail_gate, fail_queue, missing_fb;
 static uint32_t picture_relock_refusals;
+static uint32_t playback_pause_fixture, playback_pause_count;
+static void exercise_pause(void);
 static uint32_t handoff_record[VIDEO_HANDOFF_RECORD_WORDS], handoff_queues, handoff_hold, fail_handoff;
 static uint32_t power_awake = 1, power_starts;
 static uint32_t display_allocated, fail_shadow, copied_frames, overlay_calls, flush_calls, stock_copies;
@@ -78,6 +80,7 @@ static void display_signal(void) { assert(display_gate); display_gate = 0; }
 static int handoff_queue(const uint32_t *);
 static void *shadow_allocate(uint32_t bytes) {
     assert(!image_depth && !service_context && bytes == VIDEO_PANEL_BYTES && !owned_shadow);
+    if (queued_upload) assert(worker_thread); /* Shadow admission precedes concurrent decode/copy. */
     if (fail_shadow) return 0;
     owned_shadow = malloc(bytes); assert(owned_shadow); display_allocated = bytes + 4;
     return owned_shadow;
@@ -321,6 +324,12 @@ static int test_sync_send(const uint8_t *body) {
     uint32_t ordinal = video_read32(body + 8), pts = video_read32(body + 12);
     uint8_t reply[VIDEO_SYNC_BYTES]; memcpy(reply, body, sizeof(reply));
     reply[1] ^= CFW_MESSAGE_BOTH;
+    if (operation == VIDEO_SYNC_PAUSE || operation == VIDEO_SYNC_RESUME) {
+        assert(source == CFW_MESSAGE_RIGHT && !body[20]);
+        reply[20] = 1;
+        assert(!video_sync_received(reply, sizeof(reply)));
+        return 1;
+    }
     if (operation == VIDEO_SYNC_READY) {
         assert(video_sync_ready(&partner, ordinal, pts, body[20], body[21]));
         if (source == CFW_MESSAGE_RIGHT) {
@@ -1334,6 +1343,7 @@ static void drain_frame_results(void) {
 int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
     assert(bytes <= VIDEO_RAW_NAL_BYTES && !worker_thread);
     if (upload_limit && sequence >= upload_limit) return 0;
+    if (playback_pause_fixture && sequence == 12) exercise_pause();
     uint8_t record[VIDEO_SLOT_BYTES] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_NAL};
     video_write32(record + 2, 1); video_write32(record + 6, sequence);
     memcpy(record + VIDEO_NAL_HEADER_BYTES, nal, bytes);
@@ -1376,7 +1386,39 @@ int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
     return 1;
 }
 
-static void queued_consumer_mode(uint32_t mode) {
+static void exercise_pause(void) {
+    video_owner *owner = context.video_owner;
+    uint32_t here = context.video_control.owner_here, limit = tick() + 3000;
+    uint8_t command[20] = {0}, playback[VIDEO_PLAYBACK_STATE_BYTES] = {0};
+    command[1] = VIDEO_CONTROL_PAUSE;
+    video_write32(command + 8, 1);
+    video_write32(command + (here == CFW_MESSAGE_LEFT ? 12 : 16), owner->token);
+    assert(!take(1, 1000));
+    assert(video_playback_control_locked(command, 19, 1, playback) == VIDEO_CONTROL_FORMAT);
+    assert(video_playback_control_locked(command, 20, 2, playback) == VIDEO_CONTROL_STALE);
+    assert(!video_playback_control_locked(command, 20, 1, playback)); give(1);
+    for (;;) {
+        display_pump(); pool_drain();
+        assert(!take(1, 1000));
+        int stopped = owner->presenter->paused && owner->presenter->control_ack == owner->presenter->control_serial;
+        give(1);
+        if (stopped) break;
+        delay(1); assert((int32_t)(limit - tick()) > 0);
+    }
+    uint32_t frozen = copied_frames;
+    assert(frozen > 0 && frozen < 32);
+    for (uint32_t i = 0; i < 150; ++i) { display_pump(); pool_drain(); delay(1); }
+    assert(copied_frames == frozen && !context.video.fault && radio_active);
+    assert(!take(1, 1000));
+    command[1] = VIDEO_CONTROL_PLAYBACK;
+    assert(!video_playback_control_locked(command, 20, 1, playback));
+    assert(video_read32(playback + 12) == 1 && video_read32(playback + 24) == owner->presenter->done_pts);
+    command[1] = VIDEO_CONTROL_RESUME;
+    assert(!video_playback_control_locked(command, 20, 1, playback)); give(1);
+    ++playback_pause_count;
+}
+
+static void queued_consumer_mode(uint32_t mode, int with_pause) {
     configure(); request_next = 0; consume_enabled = queued_upload = 1;
     paired_fixture = mode; partner_anchor = 0;
     uint32_t here = mode == 2 ? CFW_MESSAGE_RIGHT : CFW_MESSAGE_LEFT;
@@ -1394,9 +1436,10 @@ static void queued_consumer_mode(uint32_t mode) {
     video_owner *owner = context.video_owner;
     assert(owner->presenter && creates == 2 && owner->presenter->storage.used <= VIDEO_PRESENTER_A4_LIMIT);
     picture_relock_refusals = 3;
+    playback_pause_fixture = with_pause; playback_pause_count = 0;
     uint32_t started = tick();
     assert(worker_enqueue_stream());
-    uint32_t limit = tick() + 4000;
+    uint32_t limit = tick() + 6000;
     for (;;) {
         display_pump(); pool_drain();
         assert(!take(1, 1000));
@@ -1407,6 +1450,7 @@ static void queued_consumer_mode(uint32_t mode) {
     }
     assert(tick() - started >= 1900 && consumed_frames == 32 && decoded_calls == 34);
     assert(!picture_relock_refusals);
+    assert(playback_pause_count == (uint32_t)with_pause); playback_pause_fixture = 0;
     assert(owner->presenter->queue.released == 32);
     assert(owner->presenter->shown_rows.high == 32 && owner->presenter->shown_rows.lost == 16);
     uint8_t request[20] = {0}, shown_report[VIDEO_SHOWN_BYTES] = {0};
@@ -1435,10 +1479,14 @@ static void queued_consumer_mode(uint32_t mode) {
     puts("independent guarded presenter, owned queue, fixed cadence and teardown PASS");
 }
 
-static void queued_consumer(void) { queued_consumer_mode(0); }
+static void queued_consumer(void) { queued_consumer_mode(0, 0); }
 static void paired_consumer(void) {
-    queued_consumer_mode(1); queued_consumer_mode(2);
+    queued_consumer_mode(1, 0); queued_consumer_mode(2, 0);
     puts("LEFT triggered follower and RIGHT coordinator with actual display copies PASS");
+}
+static void playback_controls(void) {
+    queued_consumer_mode(0, 1); queued_consumer_mode(2, 1);
+    puts("owner-bound boundary pause, frozen position, paired ACK and re-anchored resume PASS");
 }
 
 static void sync_posting(void) {
@@ -2199,6 +2247,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "consumer")) consumer();
     else if (!strcmp(argv[1], "queued-consumer")) queued_consumer();
     else if (!strcmp(argv[1], "paired-consumer")) paired_consumer();
+    else if (!strcmp(argv[1], "playback-controls")) playback_controls();
     else if (!strcmp(argv[1], "sync-posting")) sync_posting();
     else if (!strcmp(argv[1], "evidence")) evidence();
     else if (!strcmp(argv[1], "evidence-replays")) evidence_replays();

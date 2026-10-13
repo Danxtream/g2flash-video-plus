@@ -24,6 +24,31 @@ static void video_presenter_fault(video_owner *owner, uint32_t fault) {
     video_presenter_park(owner->presenter);
 }
 
+int video_playback_control_locked(const uint8_t *data, uint32_t bytes, uint8_t origin, uint8_t *out) {
+    customCfwContext *ctx = peekCustomCfwContext();
+    video_owner *owner = ctx ? ctx->video_owner : 0;
+    if (bytes != 20) return VIDEO_CONTROL_FORMAT;
+    if (!owner || !owner->presenter || !ctx->video.published || ctx->video.preparing ||
+        !video_control_generation_valid(ctx, owner->control_generation) ||
+        video_read32(data + 8) != ctx->video_control.stream || origin != ctx->video_control.owner_origin ||
+        video_read32(data + (ctx->video_control.owner_here == CFW_MESSAGE_LEFT ? 12 : 16)) != owner->token)
+        return VIDEO_CONTROL_STALE;
+    video_presenter *p = owner->presenter;
+    uint32_t expires = VIDEO_TICK + VIDEO_INACTIVITY_LIMIT_MS;
+    __atomic_store_n(&ctx->video_control.active_deadline, expires ? expires : 1, __ATOMIC_RELEASE);
+    if (data[1] != VIDEO_CONTROL_PLAYBACK && (!p->paired || p->sync.side == CFW_MESSAGE_RIGHT))
+        p->pause_requested = data[1] == VIDEO_CONTROL_PAUSE;
+    video_presenter_wake_locked(owner);
+    out[3] = ctx->video_control.owner_here;
+    video_write32(out + 4, ctx->video_control.stream); video_write32(out + 8, owner->token);
+    video_write32(out + 12, p->paused);
+    video_write32(out + 16, p->paired && p->sync.side == CFW_MESSAGE_LEFT ? p->wire_paused : p->pause_requested);
+    video_write32(out + 20, p->shown); video_write32(out + 24, p->shown ? p->done_pts : ctx->video_control.timeline.start_pts);
+    video_write32(out + 28, ctx->video_control.timeline.duration);
+    video_write32(out + 32, p->paired && p->sync.side == CFW_MESSAGE_RIGHT && p->control_ack != p->control_serial);
+    return VIDEO_CONTROL_ACCEPTED;
+}
+
 /* A separate callback section lets the linker resolve its ROPI address;
  * same-section MOVW/MOVT folding overflows as the surrounding player grows. */
 __attribute__((section(".text.presenter"))) static void video_presenter_entry(void *argument) {
@@ -39,6 +64,38 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         if (p->paired) video_presenter_sync_poll(p);
         if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS))
             video_presenter_fault(owner, VIDEO_FAULT_OWNERSHIP);
+        uint32_t control_op = 0, control_serial = 0, control_boundary = 0;
+        uint32_t control_now = VIDEO_TICK;
+        int coordinator = !p->paired || p->sync.side == CFW_MESSAGE_RIGHT;
+        int boundary = !p->paired || !p->sync.inflight ||
+            (p->sync.completed == p->sync.inflight && p->sync.peer_completed == p->sync.inflight);
+        if (coordinator && boundary && p->control_ack == p->control_serial && p->paused != p->pause_requested) {
+            if (p->control_serial == UINT32_MAX) {
+                video_control_give(ctx); video_presenter_fault(owner, VIDEO_FAULT_SEQUENCE);
+            }
+            p->paused = p->pause_requested; ++p->control_serial;
+            buffering = 1;
+            if (p->paired) p->control_deadline = control_now + VIDEO_STOP_LIMIT_MS;
+            else p->control_ack = p->control_serial;
+            p->control_sent = control_now - 100;
+        }
+        if (p->control_deadline && (int32_t)(control_now - p->control_deadline) >= 0) {
+            video_control_give(ctx); video_presenter_fault(owner, VIDEO_FAULT_DISPLAY);
+        }
+        if (p->paired && coordinator && p->control_ack != p->control_serial &&
+            (int32_t)(control_now - p->control_sent) >= 100) {
+            control_op = p->paused ? VIDEO_SYNC_PAUSE : VIDEO_SYNC_RESUME;
+            control_serial = p->control_serial; control_boundary = p->shown;
+            p->control_sent = control_now;
+        }
+        if (p->paused || (coordinator && p->control_ack != p->control_serial)) {
+            buffering = 1;
+            video_control_give(ctx);
+            if (control_op && !video_presenter_sync_send(p, control_op, control_serial, control_boundary, 0, 0))
+                video_presenter_fault(owner, VIDEO_FAULT_DISPLAY);
+            VIDEO_OS_EVENT_WAIT(p->wake, VIDEO_WAKE_ALL, 0, 50);
+            continue;
+        }
         video_decoded_queue *q = &p->queue;
         uint32_t now = VIDEO_TICK, ordinal = p->shown + 1, deadline = now;
         int available = q->count && q->slots[q->head].state == VIDEO_DECODED_READY;

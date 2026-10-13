@@ -84,3 +84,6 @@ int video_worker_stop(uint32_t timeout_ms);
 int video_worker_reset(uint32_t ingress_allowance, uint32_t timeout_ms);
 /* Read completed diagnostics and current lifecycle state under the image mutex. */
 int video_worker_get_report(video_worker_report *);
+/* Owner-bound control requests only publish intent; presenter applies timing.
+ * Caller holds image_mutex. Tokens select the local lens from a paired request. */
+int video_playback_control_locked(const uint8_t *, uint32_t, uint8_t, uint8_t *);

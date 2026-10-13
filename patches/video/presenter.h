@@ -22,7 +22,8 @@ enum {
     VIDEO_PLAYBACK_QUEUE = 1,
     VIDEO_PLAYBACK_PAIRED = 2,
     VIDEO_PLAYBACK_METADATA = 4,
-    VIDEO_PLAYBACK_SHOWN = 8
+    VIDEO_PLAYBACK_SHOWN = 8,
+    VIDEO_PLAYBACK_CONTROLS = 16
 };
 
 struct video_owner;
@@ -37,6 +38,8 @@ typedef struct {
     video_sync sync;
     uint32_t paired, sync_sent, sync_deadline, ready_sent, done_pts, trigger_tick, wire_capture;
     uint32_t captured_ordinal, queued_ticks[VIDEO_DECODED_DEPTH];
+    uint32_t pause_requested, paused, control_serial, control_ack;
+    uint32_t control_sent, control_deadline, wire_serial, wire_paused, wire_boundary;
     video_shown_ring shown_rows;
     video_storage storage;
     video_frame_result evidence[VIDEO_DECODED_DEPTH];

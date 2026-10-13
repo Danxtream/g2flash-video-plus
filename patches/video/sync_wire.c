@@ -49,6 +49,28 @@ static void video_presenter_sync_poll(video_presenter *p) {
         __atomic_store_n(&m->low, low + 1, __ATOMIC_RELEASE);
         if (body[1] == p->sync.side || video_read32(body + 4) != p->sync.stream) continue;
         uint32_t ordinal = video_read32(body + 8), pts = video_read32(body + 12);
+        if (body[3] == VIDEO_SYNC_PAUSE || body[3] == VIDEO_SYNC_RESUME) {
+            if (body[22] || body[23] || body[21] || body[20] > 1 || !ordinal)
+                video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
+            uint32_t paused = body[3] == VIDEO_SYNC_PAUSE;
+            if (p->sync.side == CFW_MESSAGE_LEFT && body[1] == CFW_MESSAGE_RIGHT && !body[20]) {
+                if (ordinal < p->wire_serial) continue;
+                if (ordinal > p->wire_serial + 1 ||
+                    (ordinal > p->wire_serial ? pts != p->shown :
+                     (paused != p->wire_paused || pts != p->wire_boundary)))
+                    video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
+                p->wire_serial = ordinal; p->wire_paused = p->paused = paused;
+                p->wire_boundary = pts;
+                if (!video_presenter_sync_send(p, body[3], ordinal, pts, 1, 0))
+                    video_presenter_fault(p->decoder, VIDEO_FAULT_DISPLAY);
+            } else if (p->sync.side == CFW_MESSAGE_RIGHT && body[1] == CFW_MESSAGE_LEFT && body[20]) {
+                if (ordinal <= p->control_ack) continue;
+                if (ordinal != p->control_serial || pts != p->shown || paused != p->paused)
+                    video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
+                p->control_ack = ordinal; p->control_deadline = 0;
+            } else video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
+            continue;
+        }
         if (body[22] || body[23] || body[21] > 1 ||
             !video_sync_receive(&p->sync, body[1], video_read32(body + 4), body[3],
                                 ordinal, pts, body[20], body[21]))

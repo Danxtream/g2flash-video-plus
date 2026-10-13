@@ -111,6 +111,9 @@ class WorkerTests(unittest.TestCase):
     def test_both_presenter_sides_process_posted_wire_records_and_copies(self):
         self.check_case("paired-consumer")
 
+    def test_pause_waits_for_paired_copy_boundary_and_resume_reanchors(self):
+        self.check_case("playback-controls")
+
     def test_wire_callback_only_posts_and_refuses_overflow_without_heap_or_wait(self):
         self.check_case("sync-posting")
 

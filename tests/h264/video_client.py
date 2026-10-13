@@ -19,6 +19,7 @@ PLAYBACK_CAPABILITIES, QUEUED = 13, 4
 PAIRED = 8
 FRAME_TIME_FAST = 14
 SHOWN = 15
+PAUSE, RESUME, PLAYBACK = 16, 17, 18
 RADIO_OFF = 2
 BASE_STATUS_BYTES, STATUS_BYTES, FRAME_BYTES, ACK_BYTES = 128, 192, 80, 16
 RESULT_FIELDS = ('ordinal', 'first_nal', 'last_nal', 'geometry', 'crc', 'cycles', 'ticks',
@@ -160,6 +161,19 @@ def paired_report(reports):
     return result
 
 
+def playback_state(raw):
+    """Decode owner-bound media position, not input or decoded sequence."""
+    if len(raw) != 36 or raw[0] != VERSION or raw[1] not in (PAUSE, RESUME, PLAYBACK):
+        raise ValueError('invalid playback state header')
+    names = ('stream', 'token', 'paused', 'requested_pause', 'shown', 'position_ms', 'duration_ms', 'pending')
+    report = dict(zip(names, struct.unpack_from('<8I', raw, 4)), result=raw[2], lens=raw[3])
+    if not report['result'] and (report['lens'] not in (1, 2) or not report['stream'] or not report['token'] or
+            any(report[n] > 1 for n in ('paused', 'requested_pause', 'pending')) or
+            report['position_ms'] > report['duration_ms']):
+        raise ValueError('invalid playback state values')
+    return report
+
+
 class VideoClient(VideoLink):
     def playback_capabilities(self):
         """Query explicit queued support without enabling playback."""
@@ -167,9 +181,9 @@ class VideoClient(VideoLink):
         payload = struct.pack('<BBBBI', MESSAGE, PLAYBACK_CAPABILITIES, VERSION, 0, request)
         replies = self.raw_replies(payload, 16)
         for raw in replies.values():
-            if raw[:3] != bytes((VERSION, PLAYBACK_CAPABILITIES, 0)) or raw[3] not in (1, 3, 7, 15) or raw[4:8] != bytes((2, 16, 0, 0)):
+            if raw[:3] != bytes((VERSION, PLAYBACK_CAPABILITIES, 0)) or raw[3] not in (1, 3, 7, 15, 31) or raw[4:8] != bytes((2, 16, 0, 0)):
                 raise ValueError('unsupported queued playback capability')
-        return {lens: dict(shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
+        return {lens: dict(controls=bool(raw[3] & 16), shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
                            stack_bytes=struct.unpack_from('<I', raw, 12)[0]) for lens, raw in replies.items()}
 
     def configure_timeline(self, stream, duration_ms, start_pts_ms=0):
@@ -216,6 +230,14 @@ class VideoClient(VideoLink):
         request = self.counter.reserve()
         payload = struct.pack('<BBBBIIII', MESSAGE, SHOWN, VERSION, 0, request, stream, token, cursor)
         return shown_report(self.raw_replies(payload, 64, targets=target)[target])
+
+    def playback(self, stream, tokens, operation=PLAYBACK):
+        """Publish pause/resume intent or read actual position on both owners."""
+        if operation not in (PAUSE, RESUME, PLAYBACK) or not 0 < stream <= 0xffffffff:
+            raise ValueError('invalid playback operation or stream')
+        payload = struct.pack('<BBBBIIII', MESSAGE, operation, VERSION, 0,
+                              self.counter.reserve(), stream, tokens.get(1, 0), tokens.get(2, 0))
+        return {lens: playback_state(raw) for lens, raw in self.raw_replies(payload, 36).items()}
 
     """Forwarded paired delivery and bounded frozen replies on a supplied link."""
     def raw_replies(self, payload, length, *, targets=None, result_offset=2):
@@ -347,6 +369,10 @@ class DirectPairClient:
 
     def shown(self, stream, token, cursor=0, *, lens):
         return self.clients[lens].shown(stream, token, cursor)
+
+    def playback(self, stream, tokens, operation=PLAYBACK):
+        return {side: client.playback(stream, tokens, operation)[side]
+                for side, client in self.clients.items()}
 
 
     def send_window(self, payloads):

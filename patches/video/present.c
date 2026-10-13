@@ -48,6 +48,7 @@ static int video_prepare_shadow(video_owner *owner) {
             __atomic_store_n(&ctx->framebuffer_shadow, candidate, __ATOMIC_RELEASE);
             owner->shadow_missing = 0;
             owner->storage.display_allowance = owner->ingress_allowance;
+            if (owner->presenter) owner->presenter->storage.display_allowance = owner->ingress_allowance;
             published = 1;
         }
         video_control_give(ctx);
