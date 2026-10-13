@@ -114,6 +114,28 @@ static void dithered(void) {
         }
     }
 }
+static void dither_cells(void) {
+    uint8_t source[8], shadow[VIDEO_PANEL_BYTES];
+    for (uint32_t tv = 0; tv <= 1; ++tv) for (uint32_t raw = 0; raw <= 1; ++raw)
+        for (uint32_t phase = 0; phase < 2; ++phase) for (uint32_t sample = 0; sample < 256; ++sample) {
+            uint16_t expected = 0;
+            for (uint32_t row = 0; row < 2; ++row) for (uint32_t x = 0; x < 2; ++x)
+                expected = (expected << 4) | video_dither_curve(sample, tv, raw, x, phase + row);
+            assert(video_dither_cells[tv && !raw][phase][sample] == expected);
+            memset(source, sample, sizeof(source));
+            uint32_t height = phase ? 1 : 2;
+            video_frame_descriptor f = {1, 1, 1, 4, height, 4, sizeof(source),
+                VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER | (tv ? VIDEO_SOURCE_TV : 0) |
+                    (raw ? VIDEO_SOURCE_RAW_GRAY : 0), VIDEO_SCALE_DOUBLE, source};
+            assert(video_pack_frame(shadow, sizeof(shadow), &f));
+            uint32_t y = 240 - height;
+            for (uint32_t row = 0; row < height * 2; ++row) for (uint32_t col = 0; col < 4; ++col)
+                assert(shadow[(y + row) * VIDEO_PANEL_STRIDE + 158 + col] ==
+                       (row & 1 ? expected & 255 : expected >> 8));
+            assert(!shadow[y * VIDEO_PANEL_STRIDE + 157] && !shadow[y * VIDEO_PANEL_STRIDE + 162]);
+        }
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (!strcmp(argv[1], "pixels")) {
@@ -142,7 +164,8 @@ int main(int argc, char **argv) {
         for (uint32_t y = 0; y < 256; ++y)
             printf("%u %u %u %u %u\n", y, video_gray_curve(y, 0, 0), video_gray_curve(y, 1, 0),
                    video_gray_curve(y, 0, 1), video_gray_curve(y, 1, 1));
-    } else if (!strcmp(argv[1], "dither")) dithered();
+    } else if (!strcmp(argv[1], "cells")) dither_cells();
+    else if (!strcmp(argv[1], "dither")) dithered();
     else if (!strcmp(argv[1], "reject")) rejected();
     else if (!strcmp(argv[1], "sides")) {
         assert(video_source_from_side(2) == 1 && video_source_from_side(1) == 2);

@@ -859,3 +859,10 @@ of doubled video are evaluated separately; native uses the same panel phase.
 No low bits are reconstructed from A4. SHOWN flag32 records on-mode. Picture
 wire records use byte22 for the generation's mode; mixed paired modes refuse.
 The supplied PC seek/controller retains the choice in a fresh generation.
+
+At 2x scale an immutable 2048-byte cell table performs one lookup per source
+sample and writes its two packed panel rows. TV normalization and quarter
+evaluation are already in each cell; the decoded-luma curve selects the raw
+table. Width alignment guarantees an even centered x, while both centered
+row phases are retained. Native scale keeps the scalar path. No new frame
+RAM, extra Y8 copy, decoder change or phase approximation is required.

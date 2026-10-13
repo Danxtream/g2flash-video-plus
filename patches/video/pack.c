@@ -1,6 +1,7 @@
 /* Brightness packing in final panel coordinates. SPDX-License-Identifier: GPL-3.0-only */
 #include "present.h"
 #include "brightness.h"
+#include "dither_cells.h"
 #include <stddef.h>
 
 #pragma clang section text=".text.video.pack"
@@ -39,6 +40,21 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
     uint32_t x = (VIDEO_PANEL_WIDTH - frame->width * frame->scale) / 2;
     uint32_t y = (VIDEO_PANEL_HEIGHT - frame->height * frame->scale) / 2;
     if (dither) {
+        if (frame->scale == VIDEO_SCALE_DOUBLE) {
+            /* Width is a multiple of four, so the centered x is always even.
+             * Each source load writes its complete two-row Bayer cell once. */
+            const uint16_t *cells = video_dither_cells[tv && !raw][y & 1];
+            for (uint32_t row = 0; row < frame->height; ++row) {
+                const uint8_t *in = frame->pixels + row * frame->stride;
+                uint8_t *out = shadow + (y + row * 2) * VIDEO_PANEL_STRIDE + x / 2;
+                for (uint32_t col = 0; col < frame->width; ++col) {
+                    uint16_t cell = cells[in[col]];
+                    out[col] = cell >> 8;
+                    out[VIDEO_PANEL_STRIDE + col] = cell;
+                }
+            }
+            return 1;
+        }
         for (uint32_t row = 0; row < frame->height * frame->scale; ++row) {
             const uint8_t *in = frame->pixels + (row / frame->scale) * frame->stride;
             uint8_t *out = shadow + (y + row) * VIDEO_PANEL_STRIDE + x / 2;
