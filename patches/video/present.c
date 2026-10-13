@@ -157,6 +157,7 @@ int video_present_frame(const video_frame_descriptor *frame) {
     }
     p->token = frame->token; p->generation = frame->generation;
     p->ordinal = frame->ordinal; if (!overlay) p->copy_tick = 0; p->pin = 1;
+    if (presenter && !overlay) owner->presenter->submit_tick = VIDEO_TICK;
     __atomic_store_n(&p->queue_failed, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&p->phase, VIDEO_DISPLAY_QUEUED, __ATOMIC_RELEASE);
     cfw_rectlist rectangles = {0};

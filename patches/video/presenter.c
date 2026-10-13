@@ -8,6 +8,40 @@ static void video_presenter_wake_locked(video_owner *owner) {
         VIDEO_OS_EVENT_SET(owner->presenter->wake, VIDEO_WAKE_ALL);
 }
 
+static void video_presenter_resources(video_presenter *p) {
+    uint32_t guards = 1, untouched = 0;
+    const uint8_t *base = p->stack_allocation;
+    for (uint32_t i = 0; i < VIDEO_STACK_GUARD_BYTES; ++i)
+        if (base[i] != VIDEO_GUARD_FILL || p->stack[VIDEO_PRESENTER_STACK_BYTES + i] != VIDEO_GUARD_FILL)
+            guards = 0;
+    while (untouched < VIDEO_PRESENTER_STACK_BYTES && p->stack[untouched] == VIDEO_STACK_FILL) ++untouched;
+    if (!video_control_wait(p->decoder->context, VIDEO_STOP_LIMIT_MS))
+        video_presenter_fault(p->decoder, VIDEO_FAULT_OWNERSHIP);
+    p->guards_ok = guards; p->stack_used = VIDEO_PRESENTER_STACK_BYTES - untouched;
+    video_control_give(p->decoder->context);
+    if (!guards) video_presenter_fault(p->decoder, VIDEO_FAULT_STACK);
+}
+
+static int video_trigger_snapshot_locked(customCfwContext *ctx, const uint8_t *data,
+                                         uint8_t origin, uint8_t *out) {
+    video_owner *owner = ctx->video_owner;
+    if (!owner || !owner->presenter || !ctx->video.published || ctx->video.preparing ||
+        !ctx->video_control.start_guard || origin != ctx->video_control.owner_origin ||
+        video_read32(data + 8) != ctx->video_control.stream ||
+        video_read32(data + (ctx->video_control.owner_here == CFW_MESSAGE_LEFT ? 12 : 16)) != owner->token)
+        return VIDEO_CONTROL_STALE;
+    video_presenter *p = owner->presenter; video_trigger_timing *t = &p->trigger_timing;
+    uint32_t values[] = {ctx->video_control.stream, owner->token, t->ordinal, t->pts,
+        t->round_trip, t->peer_total, t->peer_copy, t->local_copy, t->wire_bound,
+        (uint32_t)t->lower, (uint32_t)t->upper, t->valid, t->samples, t->anomalies,
+        t->minimum, t->maximum, p->holds, p->queue.count, p->stack_used, p->guards_ok,
+        p->storage.used, p->storage.peak, p->storage.limit};
+    out[3] = ctx->video_control.owner_here;
+    for (uint32_t i = 0; i < sizeof(values) / sizeof(values[0]); ++i) video_write32(out + 4 + i * 4, values[i]);
+    video_presenter_wake_locked(owner);
+    return VIDEO_CONTROL_ACCEPTED;
+}
+
 static void video_presenter_park(video_presenter *p) __attribute__((noreturn));
 static void video_presenter_park(video_presenter *p) {
     uint32_t wake = p->wake, complete = p->complete;
@@ -91,6 +125,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         VIDEO_OS_EVENT_WAIT(p->wake, VIDEO_WAKE_ALL, 0, VIDEO_WAIT_FOREVER);
     }
     while (!video_lifecycle_cancelled(&ctx->video, p->token)) {
+        video_presenter_resources(p);
         if (p->paired) video_presenter_sync_poll(p);
         if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS))
             video_presenter_fault(owner, VIDEO_FAULT_OWNERSHIP);
@@ -197,6 +232,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
                 trigger = due && video_sync_trigger(&p->sync);
                 due = trigger;
                 if (trigger) {
+                    p->flight_retried = 0;
                     p->trigger_tick = now; p->sync_sent = now;
                     p->sync_deadline = now + VIDEO_DISPLAY_LIMIT_MS;
                     p->flight_native = p->scale_requested;
@@ -208,6 +244,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
                 (p->paired ? p->flight_native : p->scale_requested) ? VIDEO_SCALE_NATIVE : VIDEO_SCALE_DOUBLE,
                 &frame, &media);
         if (claim) {
+            p->claim_tick = VIDEO_TICK;
             ctx->video_control.options = (ctx->video_control.options & ~VIDEO_PRESENT_NATIVE) |
                 (frame.scale == VIDEO_SCALE_NATIVE ? VIDEO_PRESENT_NATIVE : 0);
         }
@@ -251,7 +288,8 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         }
         video_shown_frame shown = {media.ordinal, media.pts, ctx->video_presentation.copy_tick,
             p->paired && p->sync.side == CFW_MESSAGE_LEFT ? p->wire_capture : p->trigger_tick,
-            p->queued_ticks[q->head], p->paired ? VIDEO_SHOWN_PAIRED | VIDEO_SHOWN_UNCERTAIN : 0u};
+            p->queued_ticks[q->head], p->paired ? VIDEO_SHOWN_PAIRED | VIDEO_SHOWN_UNCERTAIN : 0u,
+            p->claim_tick, p->submit_tick};
         if (frame.format & VIDEO_SOURCE_TV) shown.flags |= VIDEO_SHOWN_TV;
         if (frame.format & VIDEO_SOURCE_UNSIGNALLED) shown.flags |= VIDEO_SHOWN_UNSIGNALLED;
         if (frame.format & VIDEO_SOURCE_DITHER) shown.flags |= VIDEO_SHOWN_DITHER;
@@ -320,6 +358,7 @@ static int video_presenter_prepare(video_owner *owner) {
     for (uint32_t i = 0; i < VIDEO_PRESENTER_STACK_BYTES + 2 * VIDEO_STACK_GUARD_BYTES; ++i)
         base[i] = VIDEO_GUARD_FILL;
     p->stack = base + VIDEO_STACK_GUARD_BYTES;
+    p->guards_ok = 1;
     for (uint32_t i = 0; i < VIDEO_PRESENTER_STACK_BYTES; ++i) p->stack[i] = VIDEO_STACK_FILL;
     video_event_attr wake = {"video picture wake", 0, p->wake_control, sizeof(p->wake_control)};
     video_event_attr complete = {"video picture complete", 0, p->complete_control, sizeof(p->complete_control)};

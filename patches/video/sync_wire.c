@@ -34,6 +34,13 @@ static int video_presenter_sync_send(video_presenter *p, uint32_t op, uint32_t o
     video_write32(body + 12, pts); video_write32(body + 16, VIDEO_TICK);
     body[20] = depth; body[21] = terminal;
     if (op <= VIDEO_SYNC_DONE) body[22] = (p->queue.format & VIDEO_SOURCE_DITHER) != 0;
+    if (op == VIDEO_SYNC_DONE) {
+        uint32_t total = VIDEO_TICK - p->wire_capture;
+        uint32_t copy = p->decoder->context->video_presentation.copy_tick - p->wire_capture;
+        video_write32(body + 16, total);
+        uint32_t encoded = copy <= 65534 ? copy : 65535;
+        body[20] = encoded; body[21] = encoded >> 8;
+    }
     return VIDEO_SYNC_SEND(body);
 }
 
@@ -80,10 +87,20 @@ static void video_presenter_sync_poll(video_presenter *p) {
             } else video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
             continue;
         }
-        if (body[22] != ((p->queue.format & VIDEO_SOURCE_DITHER) != 0) || body[23] || body[21] > 1 ||
+        int done = body[3] == VIDEO_SYNC_DONE;
+        int fresh_done = done && ordinal == p->sync.inflight && p->sync.peer_completed != ordinal;
+        if (body[22] != ((p->queue.format & VIDEO_SOURCE_DITHER) != 0) || body[23] || (!done && body[21] > 1) ||
             !video_sync_receive(&p->sync, body[1], video_read32(body + 4), body[3],
-                                ordinal, pts, body[20], body[21]))
+                                ordinal, pts, done ? 0 : body[20], done ? 0 : body[21]))
             video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
+        if (fresh_done && p->sync.side == CFW_MESSAGE_RIGHT) {
+            if (!video_control_wait(p->decoder->context, VIDEO_STOP_LIMIT_MS))
+                video_presenter_fault(p->decoder, VIDEO_FAULT_OWNERSHIP);
+            video_trigger_record(&p->trigger_timing, ordinal, pts, captured - p->trigger_tick,
+                video_read32(body + 16), (uint32_t)body[20] | (uint32_t)body[21] << 8,
+                p->decoder->context->video_presentation.copy_tick - p->trigger_tick, p->flight_retried);
+            video_control_give(p->decoder->context);
+        }
         if (body[3] == VIDEO_SYNC_TRIGGER) {
             if (ordinal == p->sync.inflight && ordinal != p->captured_ordinal) {
                 p->wire_capture = captured; p->captured_ordinal = ordinal;
@@ -104,6 +121,7 @@ static void video_presenter_sync_poll(video_presenter *p) {
         if (!video_presenter_sync_send(p, VIDEO_SYNC_TRIGGER, p->sync.inflight, p->sync.flight_pts, 0, p->flight_native))
             video_presenter_fault(p->decoder, VIDEO_FAULT_DISPLAY);
         p->sync_sent = now;
+        p->flight_retried = 1;
     }
 }
 #pragma clang section text=""

@@ -350,6 +350,7 @@ static int test_sync_send(const uint8_t *body) {
         assert(video_sync_receive(&partner, source, stream, operation, ordinal, pts, 0, 0));
         assert(video_sync_complete(&partner, ordinal));
         reply[3] = VIDEO_SYNC_DONE;
+        video_write32(reply + 16, 0); reply[20] = reply[21] = 0;
         assert(!video_sync_received(reply, sizeof(reply)));
     } else if (operation == VIDEO_SYNC_DONE) {
         assert(video_sync_receive(&partner, source, stream, operation, ordinal, pts, 0, 0));
@@ -1515,15 +1516,27 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
     assert(!picture_relock_refusals);
     assert(playback_pause_count == (uint32_t)(with_pause != 0)); playback_pause_fixture = 0;
     assert(owner->presenter->queue.released == 32);
-    assert(owner->presenter->shown_rows.high == visible && owner->presenter->shown_rows.lost == visible - 16);
+    uint32_t first_report = visible > VIDEO_SHOWN_ROWS ? visible - VIDEO_SHOWN_ROWS + 1 : 1;
+    assert(owner->presenter->shown_rows.high == visible && owner->presenter->shown_rows.lost == first_report - 1);
     uint8_t request[20] = {0}, shown_report[VIDEO_SHOWN_BYTES] = {0};
     video_write32(request + 8, 1); video_write32(request + 12, owner->token);
     video_write32(request + 16, 1);
     assert(!take(1, 1000));
     assert(video_shown_snapshot_locked(&context, request, 1, shown_report) == VIDEO_CONTROL_ACCEPTED);
-    assert(video_read32(shown_report + 12) == visible - 15 && video_read32(shown_report + 16) == 17 &&
-           (video_read32(shown_report + 36) & 4) && video_read32(shown_report + 48) == visible - 16);
+    assert(video_read32(shown_report + 12) == first_report && video_read32(shown_report + 16) == prefix + first_report &&
+           ((video_read32(shown_report + 36) & 4) != 0) == (first_report > 1) &&
+           video_read32(shown_report + 48) == first_report - 1);
     assert((video_read32(shown_report + 36) & VIDEO_SHOWN_DITHER) == (dither_fixture ? VIDEO_SHOWN_DITHER : 0));
+    assert((uint32_t)(video_read32(shown_report + 68) - video_read32(shown_report + 64)) <= VIDEO_DISPLAY_LIMIT_MS);
+    uint8_t timing_request[20] = {0}, timing_report[VIDEO_TRIGGER_TIMING_BYTES] = {0};
+    video_write32(timing_request + 8, 1);
+    video_write32(timing_request + (here == CFW_MESSAGE_LEFT ? 12 : 16), owner->token);
+    assert(!video_trigger_snapshot_locked(&context, timing_request, 1, timing_report));
+    assert(video_read32(timing_report + 80) == 1 &&
+           video_read32(timing_report + 88) <= video_read32(timing_report + 92));
+    if (here == CFW_MESSAGE_RIGHT) assert(video_read32(timing_report + 52) + video_read32(timing_report + 56) > 0);
+    timing_request[8] ^= 1;
+    assert(video_trigger_snapshot_locked(&context, timing_request, 1, timing_report) == VIDEO_CONTROL_STALE);
     request[12] ^= 1;
     assert(video_shown_snapshot_locked(&context, request, 1, shown_report) == VIDEO_CONTROL_STALE);
     give(1);

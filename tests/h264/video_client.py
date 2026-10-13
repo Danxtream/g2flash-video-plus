@@ -24,6 +24,7 @@ SHOWN = 15
 PAUSE, RESUME, PLAYBACK = 16, 17, 18
 MENU, SCALE = 19, 20
 RADIO_POLICY = 21
+TRIGGER_TIMING = 22
 MENU_ACTIONS = {'open': 0, 'close': 1, 'next': 2, 'previous': 3, 'apply': 4, 'query': 5}
 RADIO_OFF = 2
 BASE_STATUS_BYTES, STATUS_BYTES, FRAME_BYTES, ACK_BYTES = 128, 192, 80, 16
@@ -225,10 +226,11 @@ class VideoClient(VideoLink):
         for raw in replies.values():
             if (raw[:3] != bytes((VERSION, PLAYBACK_CAPABILITIES, 0)) or raw[3] not in (1, 3, 7, 15, 31, 63, 127, 255) or
                     raw[4:6] != bytes((2, 16)) or
-                    (raw[3] & 32 and (raw[6] != 255 or raw[7] not in (1, 3))) or
+                    (raw[3] & 32 and (raw[6] != 255 or raw[7] not in (1, 3, 5, 7))) or
                     (not raw[3] & 32 and raw[6:8] != bytes((0, 0)))):
                 raise ValueError('unsupported queued playback capability')
-        return {lens: dict(dither=bool(raw[7] & 2), policy=bool(raw[3] & 128), menu=bool(raw[3] & 64), seek=bool(raw[3] & 32), max_preroll=raw[6], controls=bool(raw[3] & 16), shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
+        self.shown_bytes = {lens: 72 if raw[7] & 4 else 64 for lens, raw in replies.items()}
+        return {lens: dict(trigger_timing=bool(raw[7] & 4), dither=bool(raw[7] & 2), policy=bool(raw[3] & 128), menu=bool(raw[3] & 64), seek=bool(raw[3] & 32), max_preroll=raw[6], controls=bool(raw[3] & 16), shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
                            stack_bytes=struct.unpack_from('<I', raw, 12)[0]) for lens, raw in replies.items()}
 
     def configure_timeline(self, stream, duration_ms, start_pts_ms=0):
@@ -274,7 +276,20 @@ class VideoClient(VideoLink):
             raise ValueError('select a valid report owner and cursor')
         request = self.counter.reserve()
         payload = struct.pack('<BBBBIIII', MESSAGE, SHOWN, VERSION, 0, request, stream, token, cursor)
-        return shown_report(self.raw_replies(payload, 64, targets=target)[target])
+        length = getattr(self, 'shown_bytes', {}).get(target, 64)
+        return shown_report(self.raw_replies(payload, length, targets=target)[target])
+
+    def trigger_timing(self, stream, tokens):
+        """Read nominal wire/copy bounds and task-owned resource observations."""
+        if not 0 < stream <= 0xffffffff or any(not 0 < tokens.get(side, 0) <= 0xffffffff for side in sources(self.targets)):
+            raise ValueError('trigger timing requires every active owner token')
+        payload = struct.pack('<BBBBIIII', MESSAGE, TRIGGER_TIMING, VERSION, 0,
+                              self.counter.reserve(), stream, tokens.get(1, 0), tokens.get(2, 0))
+        replies = {lens: trigger_timing_report(raw) for lens, raw in self.raw_replies(payload, 96).items()}
+        if any(not r['result'] and (r['lens'] != lens or r['stream'] != stream or r['token'] != tokens[lens])
+               for lens, r in replies.items()):
+            raise ValueError('trigger timing owner differs from its request')
+        return replies
 
     def playback(self, stream, tokens, operation=PLAYBACK):
         """Publish pause/resume intent or read actual position on both owners."""
@@ -460,6 +475,9 @@ class DirectPairClient:
     def menu(self, stream, tokens, action='query'):
         return {side: client.menu(stream, tokens, action)[side] for side, client in self.clients.items()}
 
+    def trigger_timing(self, stream, tokens):
+        return {side: client.trigger_timing(stream, tokens)[side] for side, client in self.clients.items()}
+
     def scale(self, stream, tokens, native):
         return {side: client.scale(stream, tokens, native)[side] for side, client in self.clients.items()}
 
@@ -495,17 +513,49 @@ class DirectPairClient:
 
 def shown_report(raw):
     """Validate source-tagged capture evidence, including loss/uncertainty."""
-    if len(raw) != 64 or raw[:2] != bytes((VERSION, SHOWN)) or (not raw[2] and raw[3] not in (1, 2)):
+    if len(raw) not in (64, 72) or raw[:2] != bytes((VERSION, SHOWN)) or (not raw[2] and raw[3] not in (1, 2)):
         raise ValueError('invalid shown-frame header')
     names = ('stream', 'token', 'serial', 'ordinal', 'pts', 'copy_tick', 'trigger_tick', 'queued_tick',
              'flags', 'first', 'high', 'lost', 'holds', 'wire_delay_ms', 'uncertainty_ms')
     result = dict(zip(names, struct.unpack_from('<15I', raw, 4)), result=raw[2], lens=raw[3])
+    result['claim_tick'], result['submit_tick'] = struct.unpack_from('<II', raw, 64) if len(raw) == 72 else (None, None)
     if not raw[2] and (not result['stream'] or not result['token'] or not result['ordinal'] or
                       not 0 < result['first'] <= result['serial'] <= result['high'] or
                       result['lost'] != result['first'] - 1 or result['flags'] & ~63):
         raise ValueError('inconsistent shown-frame identity or ring')
     result['trigger_to_copy_ms'] = (result['copy_tick'] - result['trigger_tick']) & 0xffffffff
     result['uncertainty_ms'] = None if result['uncertainty_ms'] == 0xffffffff else result['uncertainty_ms']
+    return result
+
+
+def trigger_timing_report(raw):
+    """Validate nominal tick intervals without asserting optical/clock qualification."""
+    if len(raw) != 96 or raw[:2] != bytes((VERSION, TRIGGER_TIMING)) or (not raw[2] and raw[3] not in (1, 2)):
+        raise ValueError('invalid trigger timing header')
+    names = ('stream', 'token', 'ordinal', 'pts', 'round_trip_ms', 'peer_total_ms', 'peer_copy_ms',
+             'local_copy_ms', 'wire_bound_ms', 'offset_lower_ms', 'offset_upper_ms', 'valid', 'samples',
+             'anomalies', 'minimum_bound_ms', 'maximum_bound_ms', 'holds', 'occupancy', 'stack_used',
+             'guards_ok', 'memory_used', 'memory_peak', 'memory_cap')
+    result = dict(zip(names, struct.unpack_from('<23I', raw, 4)), result=raw[2], lens=raw[3])
+    result['offset_lower_ms'], result['offset_upper_ms'] = struct.unpack_from('<ii', raw, 40)
+    if not raw[2] and (not result['stream'] or not result['token'] or result['valid'] not in (0, 1) or
+            result['guards_ok'] not in (0, 1) or result['occupancy'] > 2 or result['stack_used'] > 8192 or
+            result['memory_cap'] not in (77824, 139264) or
+            not result['memory_used'] <= result['memory_peak'] <= result['memory_cap']):
+        raise ValueError('inconsistent trigger timing resources or owner')
+    if not raw[2] and result['valid'] and (result['lens'] != 2 or not result['ordinal'] or not result['samples'] or
+            result['round_trip_ms'] > 2000 or result['peer_total_ms'] > 2000 or
+            result['peer_copy_ms'] > result['peer_total_ms'] or result['local_copy_ms'] > 2000 or
+            not result['minimum_bound_ms'] <= result['wire_bound_ms'] <= result['maximum_bound_ms'] or
+            result['offset_lower_ms'] > result['offset_upper_ms']):
+        raise ValueError('inconsistent nominal trigger interval')
+    result['qualified'] = False
+    result['note'] = 'Nominal local tick bounds only; drift and optical onset are unqualified.'
+    if result['valid'] and not result['result']:
+        result['offset_estimate_ms'] = (result['offset_lower_ms'] + result['offset_upper_ms']) / 2
+        result['nominal_uncertainty_ms'] = (result['offset_upper_ms'] - result['offset_lower_ms']) / 2
+    else:
+        result['offset_estimate_ms'] = result['nominal_uncertainty_ms'] = None
     return result
 
 

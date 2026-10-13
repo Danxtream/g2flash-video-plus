@@ -9,6 +9,7 @@
 #include "sync.h"
 #include "shown.h"
 #include "menu.h"
+#include "trigger_timing.h"
 
 enum {
     VIDEO_QUEUED_PRESENTATION = 4,
@@ -50,6 +51,8 @@ typedef struct {
     uint32_t preroll, media_shown, pause_after_first;
     uint32_t control_kind, control_menu, wire_kind, menu_actual, menu_dirty, menu_command;
     uint32_t scale_requested, flight_native;
+    uint32_t flight_retried, claim_tick, submit_tick;
+    video_trigger_timing trigger_timing;
     video_menu menu;
     video_shown_ring shown_rows;
     video_storage storage;
@@ -58,3 +61,6 @@ typedef struct {
     uint8_t wake_control[VIDEO_EVENT_CONTROL_BYTES] __attribute__((aligned(8)));
     uint8_t complete_control[VIDEO_EVENT_CONTROL_BYTES] __attribute__((aligned(8)));
 } video_presenter;
+
+/* Owner-bound frozen snapshot; calculation and sentinel sampling are task work. */
+static int video_trigger_snapshot_locked(customCfwContext *, const uint8_t *, uint8_t, uint8_t *);

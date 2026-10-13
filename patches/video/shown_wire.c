@@ -25,6 +25,7 @@ static int video_shown_snapshot_locked(customCfwContext *ctx, const uint8_t *dat
     video_write32(out + 20, row.pts); video_write32(out + 24, row.copy_tick);
     video_write32(out + 28, row.trigger_tick); video_write32(out + 32, row.queued_tick);
     video_write32(out + 36, row.flags | (cursor && cursor < r->first ? VIDEO_SHOWN_RECOVERED : 0u));
+    video_write32(out + 64, row.claim_tick); video_write32(out + 68, row.submit_tick);
     return VIDEO_CONTROL_ACCEPTED;
 }
 #pragma clang section text=""

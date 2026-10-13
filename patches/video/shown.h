@@ -2,12 +2,13 @@
 #pragma once
 #include <stdint.h>
 enum {
-    VIDEO_SHOWN_ROWS = 16, VIDEO_SHOWN_BYTES = 64, VIDEO_CONTROL_SHOWN = 15,
+    VIDEO_SHOWN_ROWS = 32, VIDEO_SHOWN_BYTES = 72, VIDEO_CONTROL_SHOWN = 15,
     VIDEO_SHOWN_PAIRED = 1, VIDEO_SHOWN_UNCERTAIN = 2, VIDEO_SHOWN_RECOVERED = 4,
     VIDEO_SHOWN_TV = 8, VIDEO_SHOWN_UNSIGNALLED = 16, VIDEO_SHOWN_DITHER = 32
 };
 typedef struct {
     uint32_t ordinal, pts, copy_tick, trigger_tick, queued_tick, flags;
+    uint32_t claim_tick, submit_tick;
 } video_shown_frame;
 typedef struct {
     uint32_t high, first, lost;

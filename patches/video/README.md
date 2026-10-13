@@ -3,16 +3,36 @@
 ## Queued Playback
 
 SHOWN operation15 queries an owned stream/token and telemetry cursor in20
-bytes. Its frozen64-byte reply is version/op/result/lens, followed by LE32
+bytes. Its frozen72-byte reply is version/op/result/lens, followed by LE32
 stream, token, telemetry serial, frame ordinal, media PTS, copy tick, trigger
 tick, queued tick, flags, first available serial, high serial, overwritten
-count, holds, wire compensation and uncertainty. Capability bit3 advertises
+count, holds, wire compensation and uncertainty, then claim and submit ticks.
+Advanced capability byte7 bit2 selects extended captures; old64-byte replies
+remain supported by the PC client. Capability bit3 advertises
 this extension. Cursor0 selects the oldest available row; an overwritten
 cursor recovers there with flag4. Flag1 denotes a paired trigger and flag2
 uncalibrated wire timing; UINT32_MAX uncertainty is explicitly unknown.
-The16-row ring never waits for host acknowledgements. Timestamps come from
+The32-row ring never waits for host acknowledgements. Timestamps come from
 actual software display-copy capture, not packet arrival at the host or panel
 light emission. Compare local trigger-to-copy deltas, not absolute lens clocks.
+
+Advanced capability byte7 bit2 also advertises TRIGGER_TIMING22. Its20-byte
+request carries stream and both owner tokens, like PLAYBACK. The frozen96-byte
+reply has version/op/result/lens plus23LE32 fields:stream,token,mediaN,PTS,
+roundtrip,LEFT receive-to-DONE elapsed,LEFT receive-to-copy,RIGHT trigger-to-copy,
+nominal transport upper bound,signed lower/upper offset,valid,sample/anomaly
+counts,min/max transport bound,holds,occupancy,stack used,guards OK,allocated
+bytes,peak and cap. Timing calculation and stack sampling run on presenter;
+the command handler only freezes an owner-bound copy.
+
+LEFT DONE carries local elapsed at wire16 and local copy duration at20/21;
+22 remains generation mode. RIGHT uses its own trigger-to-receive roundtrip,
+never unrelated tick origins. Duplicates do not replace first trigger capture.
+Retries/inconsistent timing remain raw invalid observations without stopping
+decoding. Bounds include four nominal milliseconds for endpoint rounding;
+clock drift and optical onset are NOT qualified. Min/max show loaded jitter,
+not a physical one-way latency guarantee. No half-roundtrip symmetry claim,
+shared clock exchange or assumed nonzero compensation is introduced.
 
 The optional control13 query returns16 bytes: version, operation, result,
 feature mask (bit0 owned queue, bit1 paired triggers, bit2 compact metadata), depth2, frame rate16, two reserved bytes,
