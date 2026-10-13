@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "decoded_queue.h"
+#include "brightness.h"
 
 #pragma clang section text=".text.video"
 
@@ -48,7 +49,14 @@ static video_decoded_slot *video_decoded_filling(video_decoded_queue *q, uint32_
 
 int video_decoded_copy(video_decoded_queue *q, uint32_t generation, uint32_t serial,
                        const uint8_t *y, uint32_t stride, uint32_t bytes) {
+    return video_decoded_copy_range(q, generation, serial, y, stride, bytes, 0);
+}
+
+int video_decoded_copy_range(video_decoded_queue *q, uint32_t generation, uint32_t serial,
+                             const uint8_t *y, uint32_t stride, uint32_t bytes, uint32_t range) {
     if (!q || !y || q->generation != generation ||
+        (range & ~(VIDEO_SOURCE_TV | VIDEO_SOURCE_UNSIGNALLED)) ||
+        ((range & VIDEO_SOURCE_UNSIGNALLED) && !(range & VIDEO_SOURCE_TV)) ||
         __atomic_load_n(&q->cancelled, __ATOMIC_ACQUIRE) || stride < 320 ||
         stride > UINT32_MAX / 192 || bytes < stride * 192) return 0;
     video_decoded_slot *slot = video_decoded_filling(q, serial);
@@ -61,12 +69,13 @@ int video_decoded_copy(video_decoded_queue *q, uint32_t generation, uint32_t ser
         uint8_t *dst = slot->pixels + row * (q->format == VIDEO_SOURCE_A4 ? 160 : 320);
         if (q->format == VIDEO_SOURCE_A4) {
             for (uint32_t col = 0; col < 160; ++col)
-                dst[col] = (src[2 * col] & 0xf0) | (src[2 * col + 1] >> 4);
+                dst[col] = (video_gray_level(src[2 * col], range & VIDEO_SOURCE_TV) << 4) |
+                            video_gray_level(src[2 * col + 1], range & VIDEO_SOURCE_TV);
         } else {
             for (uint32_t col = 0; col < 320; ++col) dst[col] = src[col];
         }
     }
-    slot->copied = 1;
+    slot->range = range; slot->copied = 1;
     return 1;
 }
 
@@ -85,7 +94,7 @@ int video_decoded_claim(video_decoded_queue *q, uint32_t generation, uint32_t or
     video_decoded_slot *slot = &q->slots[q->head];
     if (slot->state != VIDEO_DECODED_READY || slot->media.ordinal != ordinal) return 0;
     *frame = (video_frame_descriptor){q->token, generation, ordinal, 320, 192,
-        q->format == VIDEO_SOURCE_A4 ? 160 : 320, q->slot_bytes, q->format, scale, slot->pixels};
+        q->format == VIDEO_SOURCE_A4 ? 160 : 320, q->slot_bytes, q->format | slot->range, scale, slot->pixels};
     *media = slot->media;
     slot->state = VIDEO_DECODED_PRESENTING;
     return 1;

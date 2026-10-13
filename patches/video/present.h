@@ -10,6 +10,9 @@ enum {
     VIDEO_SOURCE_Y8 = 1,
     VIDEO_SOURCE_A4 = 2,
     VIDEO_SOURCE_MENU = 3, /* Presenter-only overlay; never a media picture. */
+    VIDEO_SOURCE_TYPE_MASK = 3,
+    VIDEO_SOURCE_TV = 4,
+    VIDEO_SOURCE_UNSIGNALLED = 8,
     VIDEO_SCALE_NATIVE = 1,
     VIDEO_SCALE_DOUBLE = 2,
     VIDEO_PRESENT_NATIVE = 1,

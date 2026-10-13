@@ -17,7 +17,7 @@ enum {
 typedef struct {
     video_frame_time media;
     uint8_t *pixels;
-    uint32_t serial, state, copied;
+    uint32_t serial, state, copied, range;
 } video_decoded_slot;
 
 /* Caller provides an admitted owned allocation; no decoder plane is retained.
@@ -40,6 +40,9 @@ uint32_t video_decoded_reserve(video_decoded_queue *, uint32_t generation,
 /* Copy/quantize borrowed Y before the producer's next decode. No heap or wait. */
 int video_decoded_copy(video_decoded_queue *, uint32_t generation, uint32_t serial,
                        const uint8_t *y, uint32_t stride, uint32_t bytes);
+/* Retain completed-picture range flags with the owned pixels, never an SPS pointer. */
+int video_decoded_copy_range(video_decoded_queue *, uint32_t generation, uint32_t serial,
+                             const uint8_t *y, uint32_t stride, uint32_t bytes, uint32_t range);
 /* Publish only a finished copy with the matching finite reservation. */
 int video_decoded_publish(video_decoded_queue *, uint32_t generation, uint32_t serial);
 /* Claim exactly the head frame named by the coordinator; no independent advance. */

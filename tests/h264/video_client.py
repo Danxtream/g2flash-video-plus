@@ -494,7 +494,7 @@ def shown_report(raw):
     result = dict(zip(names, struct.unpack_from('<15I', raw, 4)), result=raw[2], lens=raw[3])
     if not raw[2] and (not result['stream'] or not result['token'] or not result['ordinal'] or
                       not 0 < result['first'] <= result['serial'] <= result['high'] or
-                      result['lost'] != result['first'] - 1 or result['flags'] & ~7):
+                      result['lost'] != result['first'] - 1 or result['flags'] & ~31):
         raise ValueError('inconsistent shown-frame identity or ring')
     result['trigger_to_copy_ms'] = (result['copy_tick'] - result['trigger_tick']) & 0xffffffff
     result['uncertainty_ms'] = None if result['uncertainty_ms'] == 0xffffffff else result['uncertainty_ms']

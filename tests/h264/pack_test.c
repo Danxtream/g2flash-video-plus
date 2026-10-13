@@ -9,18 +9,20 @@ static uint8_t brightness(uint32_t x, uint32_t y) {
     return (uint8_t)(x + y * 7);
 }
 static void check_pixels(uint32_t format, uint32_t scale, uint32_t width, uint32_t height) {
-    uint32_t stride = (format == VIDEO_SOURCE_Y8 ? width : width / 2) + 17;
+    uint32_t type = format & VIDEO_SOURCE_TYPE_MASK;
+    int tv = (format & VIDEO_SOURCE_TV) != 0;
+    uint32_t stride = (type == VIDEO_SOURCE_Y8 ? width : width / 2) + 17;
     uint32_t bytes = stride * height;
     uint8_t *source = malloc(bytes), *storage = malloc(VIDEO_PANEL_BYTES + 64);
     assert(source && storage);
     memset(source, 0xcd, bytes); memset(storage, 0xef, VIDEO_PANEL_BYTES + 64);
     for (uint32_t y = 0; y < height; ++y) {
-        if (format == VIDEO_SOURCE_Y8) {
+        if (type == VIDEO_SOURCE_Y8) {
             for (uint32_t x = 0; x < width; ++x) source[y * stride + x] = brightness(x, y);
         } else {
             for (uint32_t x = 0; x < width; x += 2)
-                source[y * stride + x / 2] = (brightness(x, y) & 0xf0) |
-                                             (brightness(x + 1, y) >> 4);
+                source[y * stride + x / 2] = (video_gray_level(brightness(x, y), tv) << 4) |
+                                             video_gray_level(brightness(x + 1, y), tv);
         }
     }
     video_frame_descriptor frame = {3, 9, 17, width, height, stride, bytes, format, scale, source};
@@ -33,7 +35,7 @@ static void check_pixels(uint32_t format, uint32_t scale, uint32_t width, uint32
             actual = x % 2 ? actual & 15 : actual >> 4;
             uint8_t expected = x >= ox && x < ox + width * scale &&
                 y >= oy && y < oy + height * scale ?
-                brightness((x - ox) / scale, (y - oy) / scale) >> 4 : 0;
+                video_gray_level(brightness((x - ox) / scale, (y - oy) / scale), tv) : 0;
             assert(actual == expected);
         }
     for (uint32_t i = 0; i < 32; ++i)
@@ -45,7 +47,7 @@ static void rejected(void) {
     assert(shadow && source); memset(shadow, 0xaa, VIDEO_PANEL_BYTES);
     video_frame_descriptor valid = {1, 1, 1, 320, 192, 320, 320 * 192,
                                     VIDEO_SOURCE_Y8, VIDEO_SCALE_DOUBLE, source};
-    for (uint32_t variant = 0; variant < 11; ++variant) {
+    for (uint32_t variant = 0; variant < 14; ++variant) {
         video_frame_descriptor f = valid;
         switch (variant) {
             case 0: f.width = 0; break;
@@ -59,6 +61,9 @@ static void rejected(void) {
             case 8: f.pixels = shadow + 16; break;
             case 9: f.pixels = (const uint8_t *)(UINTPTR_MAX - 1); break;
             case 10: f.pixels = 0; break;
+            case 11: f.format |= 128; break;
+            case 12: f.format |= VIDEO_SOURCE_UNSIGNALLED; break;
+            case 13: f.format = VIDEO_SOURCE_MENU; break;
         }
         assert(!video_pack_frame(shadow, VIDEO_PANEL_BYTES, &f));
     }
@@ -75,6 +80,19 @@ int main(int argc, char **argv) {
             for (uint32_t scale = VIDEO_SCALE_NATIVE; scale <= VIDEO_SCALE_DOUBLE; ++scale)
                 check_pixels(format, scale, 320, 192);
         check_pixels(VIDEO_SOURCE_A4, VIDEO_SCALE_NATIVE, 640, 384);
+    } else if (!strcmp(argv[1], "range")) {
+        for (uint32_t y = 0; y < 256; ++y) {
+            uint32_t v = y <= 16 ? 0 : y >= 235 ? 219 : y - 16;
+            uint32_t expected = (v * 255 + 109) / 219;
+            assert(video_tv_full[y] == expected);
+            assert(video_gray_level(y, 0) == (y >> 4));
+            assert(video_gray_level(y, 1) == (expected >> 4));
+        }
+        for (uint32_t type = VIDEO_SOURCE_Y8; type <= VIDEO_SOURCE_A4; ++type)
+            for (uint32_t scale = 1; scale <= 2; ++scale) {
+                check_pixels(type | VIDEO_SOURCE_TV, scale, 320, 192);
+                check_pixels(type | VIDEO_SOURCE_TV | VIDEO_SOURCE_UNSIGNALLED, scale, 320, 192);
+            }
     } else if (!strcmp(argv[1], "reject")) rejected();
     else if (!strcmp(argv[1], "sides")) {
         assert(video_source_from_side(2) == 1 && video_source_from_side(1) == 2);

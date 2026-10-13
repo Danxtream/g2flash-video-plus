@@ -63,6 +63,27 @@ int main(void) {
     video_frame_time sought = {4, 8, 500};
     assert(video_decoded_reserve(&q, 8, &sought));
     assert(!video_decoded_skip_prefix(&q, 8, 3));
+    for (uint32_t format = VIDEO_SOURCE_Y8; format <= VIDEO_SOURCE_A4; ++format) {
+        assert(video_decoded_init(&q, 9, 9, format, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
+        memset(y, 235, VIDEO_DECODED_Y8_BYTES);
+        for (uint32_t ordinal = 1; ordinal <= 2; ++ordinal) {
+            video_frame_time time = {ordinal, ordinal, ordinal * 62};
+            uint32_t serial = video_decoded_reserve(&q, 9, &time);
+            uint32_t range = ordinal == 1 ? 0 : VIDEO_SOURCE_TV | VIDEO_SOURCE_UNSIGNALLED;
+            assert(!video_decoded_copy_range(&q, 9, serial, y, 320, VIDEO_DECODED_Y8_BYTES, 128));
+            assert(video_decoded_copy_range(&q, 9, serial, y, 320, VIDEO_DECODED_Y8_BYTES, range));
+            assert(video_decoded_publish(&q, 9, serial));
+        }
+        memset(y, 0, VIDEO_DECODED_Y8_BYTES);
+        for (uint32_t ordinal = 1; ordinal <= 2; ++ordinal) {
+            video_frame_descriptor frame; video_frame_time time;
+            assert(video_decoded_claim(&q, 9, ordinal, VIDEO_SCALE_NATIVE, &frame, &time));
+            assert((frame.format & VIDEO_SOURCE_TV) == (ordinal == 1 ? 0 : VIDEO_SOURCE_TV));
+            assert((frame.format & VIDEO_SOURCE_UNSIGNALLED) == (ordinal == 1 ? 0 : VIDEO_SOURCE_UNSIGNALLED));
+            assert(frame.pixels[0] == (format == VIDEO_SOURCE_Y8 ? 235 : ordinal == 1 ? 0xee : 0xff));
+            assert(video_decoded_release(&q, 9, ordinal));
+        }
+    }
     free(y);
     free(pixels);
     puts("A4/Y8 ownership, poisoned producer, FIFO pins, cancel, depth and finite serials PASS");

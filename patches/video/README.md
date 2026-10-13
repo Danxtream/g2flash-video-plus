@@ -794,3 +794,16 @@ A validated wire-fed peer makes no PHY READ/SET request, even with a bound
 lease-only host; non-changing epoch ownership still tracks host loss and
 grants no2M permission. Locally delivered ingress/direct owners keep read-before-
 set, finite WSF handoff, refusal reporting and all existing exit restoration.
+
+## Luma Range
+
+Each completed picture retains the active SPS range, including explicit versus
+inferred TV signalling. Owned FIFO slots keep those flags beside their copied
+pixels. A4 is quantized once before publication; Y8 stays original until packing.
+Changing an SPS does not retag queued pictures. SHOWN flags8 and16 indicate TV
+and unsignalled TV respectively; decoded Y and evidence CRCs remain unchanged.
+
+Full-range off-mode remains exactly Y >> 4 for all256 values. TV conversion uses
+v=clamp(Y-16,0,219), full=(v*255+109)/219, then full >> 4. The immutable256-entry
+normalization table clamps Y<=16 to black and Y>=235 to white. No gamma, encoder,
+deblocking or full-range threshold change is involved.

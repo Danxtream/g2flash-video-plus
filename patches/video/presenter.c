@@ -252,6 +252,8 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         video_shown_frame shown = {media.ordinal, media.pts, ctx->video_presentation.copy_tick,
             p->paired && p->sync.side == CFW_MESSAGE_LEFT ? p->wire_capture : p->trigger_tick,
             p->queued_ticks[q->head], p->paired ? VIDEO_SHOWN_PAIRED | VIDEO_SHOWN_UNCERTAIN : 0u};
+        if (frame.format & VIDEO_SOURCE_TV) shown.flags |= VIDEO_SHOWN_TV;
+        if (frame.format & VIDEO_SOURCE_UNSIGNALLED) shown.flags |= VIDEO_SHOWN_UNSIGNALLED;
         if (!video_shown_publish(&p->shown_rows, &shown)) {
             video_control_give(ctx); video_presenter_fault(owner, VIDEO_FAULT_SEQUENCE);
         }
@@ -358,8 +360,9 @@ static int video_presenter_produce(video_owner *owner, const video_frame_descrip
         VIDEO_OS_EVENT_WAIT(owner->wake, VIDEO_WAKE_ALL, 0, 100);
     }
     if (!serial) return 0;
-    int copied = video_decoded_copy(&p->queue, p->generation, serial,
-                                    frame->pixels, frame->stride, frame->bytes);
+    int copied = video_decoded_copy_range(&p->queue, p->generation, serial,
+        frame->pixels, frame->stride, frame->bytes,
+        frame->format & (VIDEO_SOURCE_TV | VIDEO_SOURCE_UNSIGNALLED));
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) return 0;
     int published = copied && video_decoded_publish(&p->queue, p->generation, serial);
     if (published) p->queued_ticks[slot] = VIDEO_TICK;
