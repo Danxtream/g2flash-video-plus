@@ -90,6 +90,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
             video_decoded_claim(q, p->generation, ordinal,
                 ctx->video_control.options & VIDEO_PRESENT_NATIVE ? VIDEO_SCALE_NATIVE : VIDEO_SCALE_DOUBLE,
                 &frame, &media);
+        if (claim && !p->paired) p->trigger_tick = deadline;
         uint32_t wait = available && !buffering && !claim ? deadline - now : 1000;
         if (p->paired && !claim) wait = 50;
         video_control_give(ctx);
@@ -98,8 +99,11 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
                 video_presenter_fault(owner, VIDEO_FAULT_DISPLAY);
             p->ready_sent = now;
         }
-        if (trigger && !video_presenter_sync_send(p, VIDEO_SYNC_TRIGGER, ordinal, ready_pts, 0, 0))
-            video_presenter_fault(owner, VIDEO_FAULT_DISPLAY);
+        if (trigger) {
+            p->trigger_tick = VIDEO_TICK;
+            if (!video_presenter_sync_send(p, VIDEO_SYNC_TRIGGER, ordinal, ready_pts, 0, 0))
+                video_presenter_fault(owner, VIDEO_FAULT_DISPLAY);
+        }
         if (!claim) {
             uint32_t result = VIDEO_OS_EVENT_WAIT(p->wake, VIDEO_WAKE_ALL, 0, wait);
             if ((result & VIDEO_EVENT_ERROR) && result != VIDEO_EVENT_TIMEOUT)
@@ -122,6 +126,12 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
             row->ordinal = ordinal; row->copy_tick = ctx->video_presentation.copy_tick;
             w->rows[(ordinal - 1) % VIDEO_EVIDENCE_ROWS] = *row;
             w->high = ordinal;
+        }
+        video_shown_frame shown = {media.ordinal, media.pts, ctx->video_presentation.copy_tick,
+            p->paired && p->sync.side == CFW_MESSAGE_LEFT ? p->wire_capture : p->trigger_tick,
+            p->queued_ticks[q->head], p->paired ? VIDEO_SHOWN_PAIRED | VIDEO_SHOWN_UNCERTAIN : 0u};
+        if (!video_shown_publish(&p->shown_rows, &shown)) {
+            video_control_give(ctx); video_presenter_fault(owner, VIDEO_FAULT_SEQUENCE);
         }
         int released = video_decoded_release(q, p->generation, ordinal);
         p->shown = ordinal;
@@ -220,6 +230,7 @@ static int video_presenter_produce(video_owner *owner, const video_frame_descrip
                                     frame->pixels, frame->stride, frame->bytes);
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) return 0;
     int published = copied && video_decoded_publish(&p->queue, p->generation, serial);
+    if (published) p->queued_ticks[slot] = VIDEO_TICK;
     video_presenter_wake_locked(owner);
     video_control_give(ctx);
     return published;

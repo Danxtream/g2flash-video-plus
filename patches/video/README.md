@@ -2,6 +2,18 @@
 
 ## Queued Playback
 
+SHOWN operation15 queries an owned stream/token and telemetry cursor in20
+bytes. Its frozen64-byte reply is version/op/result/lens, followed by LE32
+stream, token, telemetry serial, frame ordinal, media PTS, copy tick, trigger
+tick, queued tick, flags, first available serial, high serial, overwritten
+count, holds, wire compensation and uncertainty. Capability bit3 advertises
+this extension. Cursor0 selects the oldest available row; an overwritten
+cursor recovers there with flag4. Flag1 denotes a paired trigger and flag2
+uncalibrated wire timing; UINT32_MAX uncertainty is explicitly unknown.
+The16-row ring never waits for host acknowledgements. Timestamps come from
+actual software display-copy capture, not packet arrival at the host or panel
+light emission. Compare local trigger-to-copy deltas, not absolute lens clocks.
+
 The optional control13 query returns16 bytes: version, operation, result,
 feature mask (bit0 owned queue, bit1 paired triggers, bit2 compact metadata), depth2, frame rate16, two reserved bytes,
 then LE32 A4 charged allowance77824 and presenter stack8192. START option4

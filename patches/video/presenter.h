@@ -7,6 +7,7 @@
 #include "evidence.h"
 #include "worker.h"
 #include "sync.h"
+#include "shown.h"
 
 enum {
     VIDEO_QUEUED_PRESENTATION = 4,
@@ -20,7 +21,8 @@ enum {
     VIDEO_PLAYBACK_CAPABILITIES_BYTES = 16,
     VIDEO_PLAYBACK_QUEUE = 1,
     VIDEO_PLAYBACK_PAIRED = 2,
-    VIDEO_PLAYBACK_METADATA = 4
+    VIDEO_PLAYBACK_METADATA = 4,
+    VIDEO_PLAYBACK_SHOWN = 8
 };
 
 struct video_owner;
@@ -34,6 +36,8 @@ typedef struct {
     video_pacing pacing;
     video_sync sync;
     uint32_t paired, sync_sent, sync_deadline, ready_sent, done_pts, trigger_tick, wire_capture;
+    uint32_t captured_ordinal, queued_ticks[VIDEO_DECODED_DEPTH];
+    video_shown_ring shown_rows;
     video_storage storage;
     video_frame_result evidence[VIDEO_DECODED_DEPTH];
     uint8_t tcb[VIDEO_THREAD_CONTROL_BYTES] __attribute__((aligned(8)));

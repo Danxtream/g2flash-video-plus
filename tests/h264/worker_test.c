@@ -63,6 +63,7 @@ static void display_pump(void);
 static void pool_drain(void);
 static void *display_thread_entry(void *);
 static uint32_t display_gate, display_job, fail_gate, fail_queue, missing_fb;
+static uint32_t picture_relock_refusals;
 static uint32_t handoff_record[VIDEO_HANDOFF_RECORD_WORDS], handoff_queues, handoff_hold, fail_handoff;
 static uint32_t power_awake = 1, power_starts;
 static uint32_t display_allocated, fail_shadow, copied_frames, overlay_calls, flush_calls, stock_copies;
@@ -99,6 +100,9 @@ static uint32_t tick(void) {
 }
 static int take(uint32_t m, uint32_t timeout) {
     assert(!service_context && m == 1 && (!timeout || !image_depth) && timeout <= 2000);
+    if (picture_thread && !timeout && picture_relock_refusals) {
+        --picture_relock_refusals; return -1;
+    }
     if (fail_publication && creates && !worker_thread) {
         --fail_publication; return -1;
     }
@@ -345,6 +349,8 @@ static int test_sync_send(const uint8_t *body) {
 }
 #define VIDEO_SYNC_SEND test_sync_send
 #include "../../patches/video/sync_wire.c"
+#include "../../patches/video/shown.c"
+#include "../../patches/video/shown_wire.c"
 #include "../../patches/video/presenter.c"
 static uint32_t test_crc(const g2_h264_frame_info *frame) {
     __atomic_fetch_add(&crc_calls, 1, __ATOMIC_RELAXED); return video_frame_crc(frame);
@@ -518,6 +524,7 @@ static int terminate(uint32_t id) {
 static void configure(void) {
     assert(!display_job && !display_gate && !owned_shadow);
     fail_gate = fail_queue = missing_fb = fail_shadow = copied_frames = overlay_calls = flush_calls = stock_copies = 0;
+    picture_relock_refusals = 0;
     handoff_queues = handoff_hold = fail_handoff = 0;
     assert(!radio_active);
     power_awake = 1; power_starts = 0; radio_lost = 0;
@@ -1343,6 +1350,17 @@ int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
             give(1);
             if (offered) break;
             display_pump(); pool_drain();
+            if ((int32_t)(limit - tick()) <= 0) {
+                assert(!take(1, 1000));
+                video_owner *active = context.video_owner;
+                video_presenter *picture = active ? active->presenter : 0;
+                fprintf(stderr, "metadata deadline sequence=%u state=%u fault=%u error=%u shown=%u ready=%u peer=%u flight=%u completed=%u peer_done=%u\n",
+                    sequence, context.video.state, context.video.fault, context.video_control.error,
+                    picture ? picture->shown : 0, picture ? picture->sync.local_ordinal : 0,
+                    picture ? picture->sync.peer_ordinal : 0, picture ? picture->sync.inflight : 0,
+                    picture ? picture->sync.completed : 0, picture ? picture->sync.peer_completed : 0);
+                give(1);
+            }
             assert((int32_t)(limit - tick()) > 0); delay(1);
         }
     }
@@ -1375,6 +1393,7 @@ static void queued_consumer_mode(uint32_t mode) {
     pool_drain(); await_ready();
     video_owner *owner = context.video_owner;
     assert(owner->presenter && creates == 2 && owner->presenter->storage.used <= VIDEO_PRESENTER_A4_LIMIT);
+    picture_relock_refusals = 3;
     uint32_t started = tick();
     assert(worker_enqueue_stream());
     uint32_t limit = tick() + 4000;
@@ -1387,7 +1406,19 @@ static void queued_consumer_mode(uint32_t mode) {
         assert((int32_t)(limit - tick()) > 0 && !context.video.fault); delay(1);
     }
     assert(tick() - started >= 1900 && consumed_frames == 32 && decoded_calls == 34);
+    assert(!picture_relock_refusals);
     assert(owner->presenter->queue.released == 32);
+    assert(owner->presenter->shown_rows.high == 32 && owner->presenter->shown_rows.lost == 16);
+    uint8_t request[20] = {0}, shown_report[VIDEO_SHOWN_BYTES] = {0};
+    video_write32(request + 8, 1); video_write32(request + 12, owner->token);
+    video_write32(request + 16, 1);
+    assert(!take(1, 1000));
+    assert(video_shown_snapshot_locked(&context, request, 1, shown_report) == VIDEO_CONTROL_ACCEPTED);
+    assert(video_read32(shown_report + 12) == 17 && video_read32(shown_report + 16) == 17 &&
+           (video_read32(shown_report + 36) & 4) && video_read32(shown_report + 48) == 16);
+    request[12] ^= 1;
+    assert(video_shown_snapshot_locked(&context, request, 1, shown_report) == VIDEO_CONTROL_STALE);
+    give(1);
     control_command(p, VIDEO_CONTROL_STOP, 1);
     assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
     pool_drain(); finish(); assert(!presenter_live && terminates == 2);

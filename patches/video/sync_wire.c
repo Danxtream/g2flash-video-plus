@@ -54,7 +54,9 @@ static void video_presenter_sync_poll(video_presenter *p) {
                                 ordinal, pts, body[20], body[21]))
             video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
         if (body[3] == VIDEO_SYNC_TRIGGER) {
-            p->wire_capture = captured;
+            if (ordinal == p->sync.inflight && ordinal != p->captured_ordinal) {
+                p->wire_capture = captured; p->captured_ordinal = ordinal;
+            }
             if (ordinal == p->shown && pts == p->done_pts)
                 video_presenter_sync_send(p, VIDEO_SYNC_DONE, ordinal, pts, 0, 0);
         }

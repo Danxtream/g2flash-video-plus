@@ -18,6 +18,7 @@ TIMELINE, FRAME_TIME = 11, 12
 PLAYBACK_CAPABILITIES, QUEUED = 13, 4
 PAIRED = 8
 FRAME_TIME_FAST = 14
+SHOWN = 15
 RADIO_OFF = 2
 BASE_STATUS_BYTES, STATUS_BYTES, FRAME_BYTES, ACK_BYTES = 128, 192, 80, 16
 RESULT_FIELDS = ('ordinal', 'first_nal', 'last_nal', 'geometry', 'crc', 'cycles', 'ticks',
@@ -166,9 +167,9 @@ class VideoClient(VideoLink):
         payload = struct.pack('<BBBBI', MESSAGE, PLAYBACK_CAPABILITIES, VERSION, 0, request)
         replies = self.raw_replies(payload, 16)
         for raw in replies.values():
-            if raw[:3] != bytes((VERSION, PLAYBACK_CAPABILITIES, 0)) or raw[3] not in (1, 3, 7) or raw[4:8] != bytes((2, 16, 0, 0)):
+            if raw[:3] != bytes((VERSION, PLAYBACK_CAPABILITIES, 0)) or raw[3] not in (1, 3, 7, 15) or raw[4:8] != bytes((2, 16, 0, 0)):
                 raise ValueError('unsupported queued playback capability')
-        return {lens: dict(paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
+        return {lens: dict(shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
                            stack_bytes=struct.unpack_from('<I', raw, 12)[0]) for lens, raw in replies.items()}
 
     def configure_timeline(self, stream, duration_ms, start_pts_ms=0):
@@ -206,6 +207,15 @@ class VideoClient(VideoLink):
         if any(r['credits'] > 4 for r in reports.values()):
             raise ValueError('invalid metadata credits')
         return dict(result=max(r['result'] for r in reports.values()), by_lens=reports)
+
+    def shown(self, stream, token, cursor=0, *, lens=None):
+        """Read one captured per-lens copy report; no playback acknowledgement."""
+        target = self.targets if lens is None else lens
+        if target not in (1, 2) or not self.targets & target or not stream or not token or not 0 <= cursor <= 0xffffffff:
+            raise ValueError('select a valid report owner and cursor')
+        request = self.counter.reserve()
+        payload = struct.pack('<BBBBIIII', MESSAGE, SHOWN, VERSION, 0, request, stream, token, cursor)
+        return shown_report(self.raw_replies(payload, 64, targets=target)[target])
 
     """Forwarded paired delivery and bounded frozen replies on a supplied link."""
     def raw_replies(self, payload, length, *, targets=None, result_offset=2):
@@ -335,6 +345,10 @@ class DirectPairClient:
                    for side, client in self.clients.items()}
         return dict(result=max(r['result'] for r in reports.values()), by_lens=reports)
 
+    def shown(self, stream, token, cursor=0, *, lens):
+        return self.clients[lens].shown(stream, token, cursor)
+
+
     def send_window(self, payloads):
         results = {side: client.send_window(payloads) for side, client in self.clients.items()}
         return [{side: results[side][index][side] for side in self.clients}
@@ -359,6 +373,35 @@ class DirectPairClient:
     def metrics(self):
         """Retain transport measurements per link rather than merging clocks."""
         return {side: client.metrics for side, client in self.clients.items()}
+
+
+def shown_report(raw):
+    """Validate source-tagged capture evidence, including loss/uncertainty."""
+    if len(raw) != 64 or raw[:2] != bytes((VERSION, SHOWN)) or (not raw[2] and raw[3] not in (1, 2)):
+        raise ValueError('invalid shown-frame header')
+    names = ('stream', 'token', 'serial', 'ordinal', 'pts', 'copy_tick', 'trigger_tick', 'queued_tick',
+             'flags', 'first', 'high', 'lost', 'holds', 'wire_delay_ms', 'uncertainty_ms')
+    result = dict(zip(names, struct.unpack_from('<15I', raw, 4)), result=raw[2], lens=raw[3])
+    if not raw[2] and (not result['stream'] or not result['token'] or not result['ordinal'] or
+                      not 0 < result['first'] <= result['serial'] <= result['high'] or
+                      result['lost'] != result['first'] - 1 or result['flags'] & ~7):
+        raise ValueError('inconsistent shown-frame identity or ring')
+    result['trigger_to_copy_ms'] = (result['copy_tick'] - result['trigger_tick']) & 0xffffffff
+    result['uncertainty_ms'] = None if result['uncertainty_ms'] == 0xffffffff else result['uncertainty_ms']
+    return result
+
+
+def paired_offset(left, right):
+    """Compare deltas from the common trigger, never absolute lens clocks."""
+    if any(r['result'] for r in (left, right)) or (left['lens'], right['lens']) != (1, 2) or any(
+            left[k] != right[k] for k in ('stream', 'ordinal', 'pts')):
+        raise ValueError('unmatched shown-frame pair')
+    estimate = left['trigger_to_copy_ms'] - right['trigger_to_copy_ms'] + right['wire_delay_ms']
+    uncertainty = None if any(r['uncertainty_ms'] is None for r in (left, right)) else sum(
+        r['uncertainty_ms'] for r in (left, right))
+    return dict(offset_estimate_ms=estimate, uncertainty_ms=uncertainty,
+                qualified=uncertainty is not None,
+                note='Software copy captures; loaded wire delay and optical onset require hardware evidence.')
 
 
 def verify_row(row, expected, stream, token):

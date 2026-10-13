@@ -39,6 +39,7 @@ static int video_presenter_stop(video_owner *, uint32_t);
 static void video_presenter_destroy(video_owner *);
 static void video_presenter_wake_locked(video_owner *);
 static void video_presenter_fault(video_owner *, uint32_t) __attribute__((noreturn));
+static int video_shown_snapshot_locked(customCfwContext *, const uint8_t *, uint8_t, uint8_t *);
 static int video_prepare_shadow(video_owner *);
 
 static void video_decode_before(video_owner *, uint32_t, uint8_t);

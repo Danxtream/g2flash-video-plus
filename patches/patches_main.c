@@ -61,4 +61,6 @@
 #include "video/pacing.c"
 #include "video/sync.c"
 #include "video/sync_wire.c"
+#include "video/shown.c"
+#include "video/shown_wire.c"
 #include "video/presenter.c"

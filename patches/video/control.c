@@ -267,6 +267,15 @@ int video_control_received(const uint8_t *data, uint16_t size,
         memcpy(entry->command, data, size);
         entry->result = video_control_apply(ctx, data, size, route->here, route->origin, route->targets);
         video_snapshot(ctx, entry);
+        if (data[1] == VIDEO_CONTROL_SHOWN) {
+            bzero(entry->snapshot, VIDEO_SHOWN_BYTES);
+            entry->snapshot_bytes = VIDEO_SHOWN_BYTES;
+            entry->result = size != 20 ? VIDEO_CONTROL_FORMAT :
+                video_shown_snapshot_locked(ctx, data, route->origin, entry->snapshot);
+            entry->snapshot[0] = VIDEO_PROTOCOL_VERSION;
+            entry->snapshot[1] = VIDEO_CONTROL_SHOWN;
+            entry->snapshot[2] = entry->result;
+        }
         if (data[1] == VIDEO_CONTROL_FRAME_TIME_FAST) {
             entry->snapshot_bytes = VIDEO_CREDITS_BYTES;
             video_write32(entry->snapshot, s->timeline.accepted);
@@ -279,7 +288,7 @@ int video_control_received(const uint8_t *data, uint16_t size,
             entry->result = VIDEO_CONTROL_ACCEPTED;
             entry->snapshot[0] = VIDEO_PROTOCOL_VERSION;
             entry->snapshot[1] = VIDEO_PLAYBACK_CAPABILITIES;
-            entry->snapshot[3] = VIDEO_PLAYBACK_QUEUE | VIDEO_PLAYBACK_PAIRED | VIDEO_PLAYBACK_METADATA;
+            entry->snapshot[3] = VIDEO_PLAYBACK_QUEUE | VIDEO_PLAYBACK_PAIRED | VIDEO_PLAYBACK_METADATA | VIDEO_PLAYBACK_SHOWN;
             entry->snapshot[4] = VIDEO_DECODED_DEPTH;
             entry->snapshot[5] = VIDEO_TIMELINE_FPS;
             video_write32(entry->snapshot + 8, VIDEO_PRESENTER_A4_LIMIT);
