@@ -2076,10 +2076,10 @@ static void display_pump(void) {
                     uint32_t gray = 0x88;
                     if (context.video_control.options & VIDEO_DITHER_PRESENTATION) {
                         /* Synthetic Y128 is unsignalled TV: normalized130 gives
-                         * quarter-level31, with three Bayer promotions. */
+                         * rescaled quarter-level33, with one Bayer promotion. */
                         const uint32_t threshold[2][2] = {{0, 2}, {3, 1}};
-                        gray = ((7 + (3 > threshold[y & 1][(x * 2) & 1])) << 4) |
-                               (7 + (3 > threshold[y & 1][(x * 2 + 1) & 1]));
+                        gray = ((8 + (1 > threshold[y & 1][(x * 2) & 1])) << 4) |
+                               (8 + (1 > threshold[y & 1][(x * 2 + 1) & 1]));
                     }
                     assert(physical_frame[y * VIDEO_PANEL_STRIDE + x] ==
                         ((native ? y >= 144 && y < 336 && x >= 80 && x < 240 : y >= 48 && y < 432) ? gray : 0));
@@ -2336,6 +2336,31 @@ static void policy_contract(void) {
     puts("default/query/invalid/replay policy, pending selection and next generation latch PASS");
 }
 
+static void gray_contract(void) {
+    configure(); request_next = 0;
+    uint8_t p[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
+    control_command(p, VIDEO_CONTROL_GRAY_CURVE, 0); video_write32(p + 8, UINT32_MAX);
+    assert(!control_response(p, 12, report, VIDEO_GRAY_CURVE_BYTES));
+    assert(!video_read32(report + 4) && video_read32(report + 8) == UINT32_MAX);
+    control_command(p, VIDEO_CONTROL_GRAY_CURVE, 0); video_write32(p + 8, 2);
+    assert(control_response(p, 12, report, VIDEO_GRAY_CURVE_BYTES) == VIDEO_CONTROL_FORMAT);
+    control_command(p, VIDEO_CONTROL_GRAY_CURVE, 0); video_write32(p + 8, 1);
+    assert(!control_response(p, 12, report, VIDEO_GRAY_CURVE_BYTES));
+    assert(!control_response(p, 12, report, VIDEO_GRAY_CURVE_BYTES));
+    control_command(p, VIDEO_CONTROL_START, 1);
+    assert(!control_snapshot(p, 24, report)); pool_drain(); await_ready();
+    assert(context.video_control.options & VIDEO_GRAY_ACTIVE_RAW);
+    control_command(p, VIDEO_CONTROL_GRAY_CURVE, 0); video_write32(p + 8, 0);
+    assert(!control_response(p, 12, report, VIDEO_GRAY_CURVE_BYTES));
+    assert(!video_read32(report + 4) && video_read32(report + 8) == 1 && video_read32(report + 12));
+    assert(context.video_control.options & VIDEO_GRAY_ACTIVE_RAW);
+    control_command(p, VIDEO_CONTROL_RESET, 1); assert(!control_snapshot(p, 12, report)); pool_drain(); finish();
+    control_command(p, VIDEO_CONTROL_START, 2); assert(!control_snapshot(p, 24, report)); pool_drain(); await_ready();
+    assert(!(context.video_control.options & VIDEO_GRAY_ACTIVE_RAW));
+    control_command(p, VIDEO_CONTROL_STOP, 2); assert(!control_snapshot(p, 12, report)); pool_drain(); finish();
+    puts("gray development default/query/invalid/replay/pending/reset/fresh latch PASS");
+}
+
 static void radio_provenance(void) {
     for (uint32_t origin = 1; origin <= 2; ++origin) for (uint32_t here = 1; here <= 2; ++here) {
         configure(); request_next = 0;
@@ -2417,6 +2442,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "radio-disconnect")) radio_disconnect();
     else if (!strcmp(argv[1], "radio-contract")) radio_contract();
     else if (!strcmp(argv[1], "policy-contract")) policy_contract();
+    else if (!strcmp(argv[1], "gray-contract")) gray_contract();
     else if (!strcmp(argv[1], "radio-provenance")) radio_provenance();
     else assert(0);
     assert(!allocations_live && !task_live && !image_depth);

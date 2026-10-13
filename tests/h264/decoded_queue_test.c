@@ -27,7 +27,7 @@ int main(void) {
             assert(video_decoded_publish(&q, 1, serial));
             assert(!video_decoded_claim(&q, 1, 2, VIDEO_SCALE_NATIVE, &frame, &media));
             assert(video_decoded_claim(&q, 1, 1, VIDEO_SCALE_DOUBLE, &frame, &media));
-            assert(frame.pixels[0] == (format == VIDEO_SOURCE_A4 ? 0xaa : 0xab));
+            assert(frame.pixels[0] == (format == VIDEO_SOURCE_A4 ? 0xbb : 0xab));
             assert(media.ordinal == 1 && media.nal_sequence == 3);
             uint32_t next = video_decoded_reserve(&q, 1, &second);
             assert((next != 0) == (depth == 2));

@@ -151,8 +151,9 @@ Run the sanitized worker, storage and lifecycle checks with the existing suite:
 ## Shared-shadow packing
 
 The bounded packer converts top-down Y8 to the panel's A4 layout, with the
-left pixel in the high nibble. Full-range conversion is `max(1, Y >> 4)`;
-TV luma is normalized before applying the same video-only level-1 floor.
+left pixel in the high nibble. The default development curve rescales luma
+across visible panel levels 1 through 15. The selectable decoded-luma curve
+keeps max(1, Y >> 4) without range normalization. Picture margins stay off.
 Native 320x192 is centered at (160,144); doubling produces 640x384 at (0,48),
 with identical nearest-neighbor pixels and black 48-row top/bottom margins.
 Every preparation clears the shared shadow before packing, so mode changes
@@ -824,10 +825,20 @@ pixels. A4 is quantized once before publication; Y8 stays original until packing
 Changing an SPS does not retag queued pictures. SHOWN flags8 and16 indicate TV
 and unsignalled TV respectively; decoded Y and evidence CRCs remain unchanged.
 
-Full-range off-mode uses max(1, Y >> 4). TV conversion uses
-v=clamp(Y-16,0,219), full=(v*255+109)/219, then max(1, full >> 4). The immutable 256-entry
-normalization table clamps Y<=16 to black and Y>=235 to white. No gamma, encoder,
-deblocking or threshold change above the darkest level is involved.
+The rescale curve uses f=TV?normalize(Y):Y, then
+level=(16+(f*239+127)/255)>>4. The immutable normalization table clamps
+Y<=16 to 0 and Y>=235 to 255. A level table avoids hot-path division.
+The alternative decoded-luma curve uses max(1,Y>>4) regardless of the SPS
+range flag. Neither curve changes decoder bytes, evidence CRCs or margins.
+
+Advanced capability byte 7 bit 3 advertises development GRAY_CURVE23.
+A 12-byte request carries the usual header then selected0=rescale(default),
+1=decoded-luma, or UINT32_MAX=query. Its frozen 24-byte response contains
+version/op/result/lens followed by selected, active(UINT32_MAX while idle),
+pending, and two reserved zeros. It latches at START or fresh seek, never
+switches live and is not a glasses-menu or public settings entry. Old images
+do not advertise it. Paired picture wire byte23 binds the latched curve;
+mixed curves refuse rather than present inconsistent pictures.
 
 ## Optional Dithering
 
@@ -838,11 +849,12 @@ on admits two61440-byte original Y8 snapshots under a separate139264-byte
 presenter cap (A4 cap77824). Heap reserves, decoder cap and cache ownership
 are unchanged. Refusal is explicit; no automatic depth or representation change.
 
-The immutable quarter-level table uses t=(full*60+127)/255. Final physical
-panel coordinates choose the2x2 thresholds [0,2;3,1], base=t>>2 and exactly
-t&3 one-level promotions, capped 15, then a video-only level-1 floor.
-For t<4 the floor makes the cell sum 4; other cell sums remain t.
-TV normalizes first. Picture margins remain off. Both physical rows
+The immutable quarter-level table uses t=4+(f*56+127)/255, linear between
+visible endpoints 1 and 15. Rescale normalizes TV luma before that lookup;
+the decoded-luma curve uses raw Y and deliberately ignores the range flag.
+Final panel coordinates choose the 2x2 thresholds [0,2;3,1], base=t>>2
+and exactly t&3 one-level promotions. Cell sums remain t and each output
+is monotonic in Y. Picture margins remain off. Both physical rows
 of doubled video are evaluated separately; native uses the same panel phase.
 No low bits are reconstructed from A4. SHOWN flag32 records on-mode. Picture
 wire records use byte22 for the generation's mode; mixed paired modes refuse.

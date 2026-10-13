@@ -159,6 +159,9 @@ class WorkerTests(unittest.TestCase):
     def test_policy_selection_does_not_switch_live_and_latches_next_generation(self):
         self.check_case("policy-contract")
 
+    def test_gray_curve_defaults_replays_and_latches_only_after_reset(self):
+        self.check_case("gray-contract")
+
     def test_each_ingress_and_direct_owner_requests_phy_but_wire_peer_does_not(self):
         self.check_case("radio-provenance")
 

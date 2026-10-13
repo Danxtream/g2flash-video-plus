@@ -22,42 +22,63 @@ static const uint8_t video_tv_full[256] = {
     255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
 };
 
-enum { VIDEO_BLACK_LEVEL = 1 };
-
-/* Only video samples are floored; picture margins stay independently off. */
-static inline uint8_t video_gray_floor(uint32_t level) {
-    return level < VIDEO_BLACK_LEVEL ? VIDEO_BLACK_LEVEL : level;
-}
-
-/* Keep the existing thresholds above the darkest video level. */
-static inline uint8_t video_gray_level(uint8_t y, int tv) {
-    return video_gray_floor((tv ? video_tv_full[y] : y) >> 4);
-}
-
-/* Quarter levels on the actual panel's [0,15] brightness domain. */
-static const uint8_t video_quarter[256] = {
-    0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4,
-    4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7,
-    8, 8, 8, 8, 8, 9, 9, 9, 9, 10, 10, 10, 10, 11, 11, 11,
-    11, 12, 12, 12, 12, 12, 13, 13, 13, 13, 14, 14, 14, 14, 15, 15,
-    15, 15, 16, 16, 16, 16, 16, 17, 17, 17, 17, 18, 18, 18, 18, 19,
-    19, 19, 19, 20, 20, 20, 20, 20, 21, 21, 21, 21, 22, 22, 22, 22,
-    23, 23, 23, 23, 24, 24, 24, 24, 24, 25, 25, 25, 25, 26, 26, 26,
-    26, 27, 27, 27, 27, 28, 28, 28, 28, 28, 29, 29, 29, 29, 30, 30,
-    30, 30, 31, 31, 31, 31, 32, 32, 32, 32, 32, 33, 33, 33, 33, 34,
-    34, 34, 34, 35, 35, 35, 35, 36, 36, 36, 36, 36, 37, 37, 37, 37,
-    38, 38, 38, 38, 39, 39, 39, 39, 40, 40, 40, 40, 40, 41, 41, 41,
-    41, 42, 42, 42, 42, 43, 43, 43, 43, 44, 44, 44, 44, 44, 45, 45,
-    45, 45, 46, 46, 46, 46, 47, 47, 47, 47, 48, 48, 48, 48, 48, 49,
-    49, 49, 49, 50, 50, 50, 50, 51, 51, 51, 51, 52, 52, 52, 52, 52,
-    53, 53, 53, 53, 54, 54, 54, 54, 55, 55, 55, 55, 56, 56, 56, 56,
-    56, 57, 57, 57, 57, 58, 58, 58, 58, 59, 59, 59, 59, 60, 60, 60,
+/* Development curves share visible endpoints, without changing decoded Y. */
+static const uint8_t video_rescale[256] = {
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+    6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9,
+    9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10,
+    10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11,
+    11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 12, 12, 12, 12,
+    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 13, 13, 13,
+    13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 14, 14,
+    14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 15,
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
 };
 
-/* The Bayer phase is anchored to final physical panel coordinates. */
-static inline uint8_t video_dither_level(uint8_t y, int tv, uint32_t x, uint32_t row) {
-    uint32_t t = video_quarter[tv ? video_tv_full[y] : y];
+/* Linear quarter levels from panel brightness one to fifteen. */
+static const uint8_t video_quarter[256] = {
+    4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 6, 7, 7, 7, 7,
+    8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 10, 10, 10, 10, 11, 11,
+    11, 11, 11, 12, 12, 12, 12, 13, 13, 13, 13, 13, 14, 14, 14, 14,
+    15, 15, 15, 15, 15, 16, 16, 16, 16, 17, 17, 17, 17, 17, 18, 18,
+    18, 18, 18, 19, 19, 19, 19, 20, 20, 20, 20, 20, 21, 21, 21, 21,
+    22, 22, 22, 22, 22, 23, 23, 23, 23, 24, 24, 24, 24, 24, 25, 25,
+    25, 25, 26, 26, 26, 26, 26, 27, 27, 27, 27, 27, 28, 28, 28, 28,
+    29, 29, 29, 29, 29, 30, 30, 30, 30, 31, 31, 31, 31, 31, 32, 32,
+    32, 32, 33, 33, 33, 33, 33, 34, 34, 34, 34, 35, 35, 35, 35, 35,
+    36, 36, 36, 36, 37, 37, 37, 37, 37, 38, 38, 38, 38, 38, 39, 39,
+    39, 39, 40, 40, 40, 40, 40, 41, 41, 41, 41, 42, 42, 42, 42, 42,
+    43, 43, 43, 43, 44, 44, 44, 44, 44, 45, 45, 45, 45, 46, 46, 46,
+    46, 46, 47, 47, 47, 47, 47, 48, 48, 48, 48, 49, 49, 49, 49, 49,
+    50, 50, 50, 50, 51, 51, 51, 51, 51, 52, 52, 52, 52, 53, 53, 53,
+    53, 53, 54, 54, 54, 54, 55, 55, 55, 55, 55, 56, 56, 56, 56, 56,
+    57, 57, 57, 57, 58, 58, 58, 58, 58, 59, 59, 59, 59, 60, 60, 60,
+};
+
+/* Raw mode deliberately uses decoded Y even when its SPS signals TV range. */
+static inline uint8_t video_gray_curve(uint8_t y, int tv, int raw) {
+    if (raw) return y < 16 ? 1 : y >> 4;
+    return video_rescale[tv ? video_tv_full[y] : y];
+}
+
+static inline uint8_t video_gray_level(uint8_t y, int tv) {
+    return video_gray_curve(y, tv, 0);
+}
+
+/* Anchor the Bayer phase to final physical panel coordinates. */
+static inline uint8_t video_dither_curve(uint8_t y, int tv, int raw, uint32_t x, uint32_t row) {
+    uint32_t t = video_quarter[tv && !raw ? video_tv_full[y] : y];
     uint32_t threshold = (row & 1) ? ((x & 1) ? 1 : 3) : ((x & 1) ? 2 : 0);
-    uint32_t level = (t >> 2) + ((t & 3) > threshold);
-    return video_gray_floor(level > 15 ? 15 : level);
+    return (t >> 2) + ((t & 3) > threshold);
+}
+
+static inline uint8_t video_dither_level(uint8_t y, int tv, uint32_t x, uint32_t row) {
+    return video_dither_curve(y, tv, 0, x, row);
 }

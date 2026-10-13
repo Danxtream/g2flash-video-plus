@@ -17,11 +17,12 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
     uint32_t type = frame->format & VIDEO_SOURCE_TYPE_MASK;
     int tv = (frame->format & VIDEO_SOURCE_TV) != 0;
     int dither = (frame->format & VIDEO_SOURCE_DITHER) != 0;
+    int raw = (frame->format & VIDEO_SOURCE_RAW_GRAY) != 0;
     if (!shadow || bytes < VIDEO_PANEL_BYTES || !frame->pixels ||
         !frame->width || !frame->height || frame->width % 4 ||
         (frame->scale != VIDEO_SCALE_NATIVE && frame->scale != VIDEO_SCALE_DOUBLE) ||
         (type != VIDEO_SOURCE_Y8 && type != VIDEO_SOURCE_A4) ||
-        (frame->format & ~(VIDEO_SOURCE_TYPE_MASK | VIDEO_SOURCE_TV | VIDEO_SOURCE_UNSIGNALLED | VIDEO_SOURCE_DITHER)) ||
+        (frame->format & ~(VIDEO_SOURCE_TYPE_MASK | VIDEO_SOURCE_TV | VIDEO_SOURCE_UNSIGNALLED | VIDEO_SOURCE_DITHER | VIDEO_SOURCE_RAW_GRAY)) ||
         (dither && type != VIDEO_SOURCE_Y8) ||
         ((frame->format & VIDEO_SOURCE_UNSIGNALLED) && !tv) ||
         frame->width > VIDEO_PANEL_WIDTH / frame->scale ||
@@ -42,8 +43,8 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
             const uint8_t *in = frame->pixels + (row / frame->scale) * frame->stride;
             uint8_t *out = shadow + (y + row) * VIDEO_PANEL_STRIDE + x / 2;
             for (uint32_t col = 0; col < frame->width * frame->scale; col += 2)
-                out[col / 2] = (video_dither_level(in[col / frame->scale], tv, x + col, y + row) << 4) |
-                    video_dither_level(in[(col + 1) / frame->scale], tv, x + col + 1, y + row);
+                out[col / 2] = (video_dither_curve(in[col / frame->scale], tv, raw, x + col, y + row) << 4) |
+                    video_dither_curve(in[(col + 1) / frame->scale], tv, raw, x + col + 1, y + row);
         }
         return 1;
     }
@@ -53,15 +54,15 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
         if (frame->scale == VIDEO_SCALE_NATIVE) {
             if (type == VIDEO_SOURCE_Y8) {
                 for (uint32_t col = 0; col < frame->width; col += 2)
-                    out[col / 2] = (video_gray_level(in[col], tv) << 4) |
-                                   video_gray_level(in[col + 1], tv);
+                    out[col / 2] = (video_gray_curve(in[col], tv, raw) << 4) |
+                                   video_gray_curve(in[col + 1], tv, raw);
             } else {
                 for (uint32_t col = 0; col < row_bytes; ++col) out[col] = in[col];
             }
         } else {
             if (type == VIDEO_SOURCE_Y8) {
                 for (uint32_t col = 0; col < frame->width; ++col)
-                    out[col] = (uint8_t)(video_gray_level(in[col], tv) * 0x11);
+                    out[col] = (uint8_t)(video_gray_curve(in[col], tv, raw) * 0x11);
             } else {
                 for (uint32_t col = 0; col < row_bytes; ++col) {
                     out[col * 2] = (uint8_t)((in[col] >> 4) * 0x11);
