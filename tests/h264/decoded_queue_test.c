@@ -55,6 +55,14 @@ int main(void) {
     q.serial = UINT32_MAX;
     video_frame_time final = {50, 150, 3100};
     assert(!video_decoded_reserve(&q, 7, &final));
+    assert(video_decoded_init(&q, 8, 9, VIDEO_SOURCE_A4, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
+    assert(!video_decoded_skip_prefix(&q, 7, 3));
+    assert(!video_decoded_skip_prefix(&q, 8, 256));
+    assert(video_decoded_skip_prefix(&q, 8, 3));
+    assert(q.accepted == 3 && q.released == 3 && !q.serial && !q.count);
+    video_frame_time sought = {4, 8, 500};
+    assert(video_decoded_reserve(&q, 8, &sought));
+    assert(!video_decoded_skip_prefix(&q, 8, 3));
     free(y);
     free(pixels);
     puts("A4/Y8 ownership, poisoned producer, FIFO pins, cancel, depth and finite serials PASS");

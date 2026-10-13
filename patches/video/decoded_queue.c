@@ -15,6 +15,13 @@ int video_decoded_init(video_decoded_queue *q, uint32_t generation, uint32_t tok
     return 1;
 }
 
+int video_decoded_skip_prefix(video_decoded_queue *q, uint32_t generation, uint32_t prefix) {
+    if (!q || q->generation != generation || prefix > 255 || q->count || q->serial ||
+        q->accepted || q->released || q->cancelled) return 0;
+    q->accepted = q->released = prefix;
+    return 1;
+}
+
 uint32_t video_decoded_reserve(video_decoded_queue *q, uint32_t generation,
                               const video_frame_time *media) {
     if (!q || !media || q->generation != generation || q->cancelled ||

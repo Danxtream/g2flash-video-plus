@@ -54,5 +54,18 @@ int main(void) {
     video_timeline_stop(&s, 7);
     assert(s.active);
     puts("Bounded picture timelines, duplicate/conflict, NAL independence and stale generations PASS");
+    video_timeline_stop(&s, 8);
+    assert(video_timeline_configure(&s, 3, 1000, 125, 16, 1));
+    assert(video_timeline_start(&s, 3, 9));
+    next = (video_frame_time){1, 2, 0};
+    assert(!video_timeline_offer(&s, 3, 9, &next));
+    assert(!video_timeline_offer_preroll(&s, 3, 9, &next, 256));
+    assert(video_timeline_offer_preroll(&s, 3, 9, &next, 2));
+    next = (video_frame_time){2, 3, 62};
+    assert(video_timeline_offer_preroll(&s, 3, 9, &next, 2));
+    next = (video_frame_time){3, 4, 124};
+    assert(!video_timeline_offer_preroll(&s, 3, 9, &next, 2));
+    next.pts = 125;
+    assert(video_timeline_offer_preroll(&s, 3, 9, &next, 2));
     return 0;
 }

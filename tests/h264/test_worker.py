@@ -114,6 +114,9 @@ class WorkerTests(unittest.TestCase):
     def test_pause_waits_for_paired_copy_boundary_and_resume_reanchors(self):
         self.check_case("playback-controls")
 
+    def test_seek_preroll_is_decoded_but_not_shown_and_preview_stays_paused(self):
+        self.check_case("seek-controls")
+
     def test_wire_callback_only_posts_and_refuses_overflow_without_heap_or_wait(self):
         self.check_case("sync-posting")
 

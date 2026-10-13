@@ -19,10 +19,12 @@ int video_timeline_start(video_timeline *s, uint32_t stream, uint32_t generation
     return 1;
 }
 
-int video_timeline_offer(video_timeline *s, uint32_t stream, uint32_t generation,
-                         const video_frame_time *frame) {
+int video_timeline_offer_preroll(video_timeline *s, uint32_t stream, uint32_t generation,
+                                 const video_frame_time *frame, uint32_t prefix) {
     if (!s || !frame || !s->active || s->stream != stream || s->generation != generation ||
-        !frame->ordinal || frame->pts < s->start_pts || frame->pts > s->duration) return 0;
+        !frame->ordinal || prefix > 255 ||
+        (frame->ordinal <= prefix ? frame->pts >= s->start_pts : frame->pts < s->start_pts) ||
+        frame->pts > s->duration) return 0;
     for (uint32_t i = 0; i < s->count; ++i) {
         const video_frame_time *old = &s->frames[(s->head + i) % VIDEO_TIMELINE_RECORDS];
         if (old->ordinal == frame->ordinal)
@@ -37,6 +39,11 @@ int video_timeline_offer(video_timeline *s, uint32_t stream, uint32_t generation
     s->last_nal = frame->nal_sequence;
     s->last_pts = frame->pts;
     return 1;
+}
+
+int video_timeline_offer(video_timeline *s, uint32_t stream, uint32_t generation,
+                         const video_frame_time *frame) {
+    return video_timeline_offer_preroll(s, stream, generation, frame, 0);
 }
 
 int video_timeline_take(video_timeline *s, uint32_t generation, uint32_t ordinal,

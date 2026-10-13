@@ -32,6 +32,8 @@ typedef struct {
 /* Initialize only after full mode-specific heap admission; depth is explicit. */
 int video_decoded_init(video_decoded_queue *, uint32_t generation, uint32_t token,
                        uint32_t format, uint32_t depth, uint8_t *, uint32_t bytes);
+/* Initialize media high marks for an explicit hidden seek prefix, not copies. */
+int video_decoded_skip_prefix(video_decoded_queue *, uint32_t generation, uint32_t prefix);
 /* Reserve the next FIFO picture. Zero means full, stale or exhausted; never overwrite. */
 uint32_t video_decoded_reserve(video_decoded_queue *, uint32_t generation,
                               const video_frame_time *);

@@ -10,13 +10,14 @@ import time
 from video_link import VideoLink, ACK_WINDOW, sources
 from phy_client import PHY_DIAGNOSTICS, RADIO_REFUSAL_DIAGNOSTICS, phy_report, radio_refusal_report
 from receive_client import (control, diagnostics, diagnostic_alerts,
-                            MESSAGE, VERSION, START, STOP, STATUS, CAPABILITIES,
+                            MESSAGE, VERSION, START, STOP, RESET, STATUS, CAPABILITIES,
                             DIAGNOSTICS, PAGE, nal)
 
 FRAME_READ, FRAME_ACK, CREDITS, VERIFY_FRAMES, NATIVE = 8, 9, 10, 128, 1
 TIMELINE, FRAME_TIME = 11, 12
 PLAYBACK_CAPABILITIES, QUEUED = 13, 4
 PAIRED = 8
+START_PAUSED = 32
 FRAME_TIME_FAST = 14
 SHOWN = 15
 PAUSE, RESUME, PLAYBACK = 16, 17, 18
@@ -38,7 +39,8 @@ def status(raw):
             raw[46:50] != bytes((1, 1, 4, 6)) or raw[50] not in (0, 4, 6) or raw[51] > raw[50] or
             raw[70] != 63 or raw[71] not in (VERIFY_FRAMES | NATIVE, VERIFY_FRAMES | NATIVE | RADIO_OFF,
                                            VERIFY_FRAMES | NATIVE | RADIO_OFF | QUEUED,
-                                           VERIFY_FRAMES | NATIVE | RADIO_OFF | QUEUED | PAIRED) or raw[68] > 2 or raw[69] >> 3 >= len(POWER_STEPS)):
+                                           VERIFY_FRAMES | NATIVE | RADIO_OFF | QUEUED | PAIRED,
+                                           VERIFY_FRAMES | NATIVE | RADIO_OFF | QUEUED | PAIRED | START_PAUSED) or raw[68] > 2 or raw[69] >> 3 >= len(POWER_STEPS)):
         raise ValueError('unsupported or inconsistent playback contract')
     result = dict(version=raw[0], stage=raw[1], result=raw[2], state=raw[3], capacity=raw[50],
                   credits=raw[51], recovery=raw[68], headers=raw[69] & 7, compact_credits=bool(raw[70] & 8),
@@ -181,9 +183,10 @@ class VideoClient(VideoLink):
         payload = struct.pack('<BBBBI', MESSAGE, PLAYBACK_CAPABILITIES, VERSION, 0, request)
         replies = self.raw_replies(payload, 16)
         for raw in replies.values():
-            if raw[:3] != bytes((VERSION, PLAYBACK_CAPABILITIES, 0)) or raw[3] not in (1, 3, 7, 15, 31) or raw[4:8] != bytes((2, 16, 0, 0)):
+            if (raw[:3] != bytes((VERSION, PLAYBACK_CAPABILITIES, 0)) or raw[3] not in (1, 3, 7, 15, 31, 63) or
+                    raw[4:6] != bytes((2, 16)) or raw[6:8] != (bytes((255, 1)) if raw[3] & 32 else bytes((0, 0)))):
                 raise ValueError('unsupported queued playback capability')
-        return {lens: dict(controls=bool(raw[3] & 16), shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
+        return {lens: dict(seek=bool(raw[3] & 32), max_preroll=raw[6], controls=bool(raw[3] & 16), shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
                            stack_bytes=struct.unpack_from('<I', raw, 12)[0]) for lens, raw in replies.items()}
 
     def configure_timeline(self, stream, duration_ms, start_pts_ms=0):
@@ -274,11 +277,13 @@ class VideoClient(VideoLink):
             raise ValueError('use source-tagged replies for paired commands')
         return next(iter(self.raw_replies(payload, length).values()))
 
-    def command(self, op, stream=0, *, native=False, verify=False, queued=False, paired=False, radio="video", token=0, ordinal=0, lens=None):
+    def command(self, op, stream=0, *, native=False, verify=False, queued=False, paired=False, paused=False, preroll=0, radio="video", token=0, ordinal=0, lens=None):
         if radio not in ("off", "video"):
             raise ValueError("radio mode must be off or video")
         if paired and not queued:
             raise ValueError('paired presentation requires queued playback')
+        if not 0 <= preroll <= 255 or ((preroll or paused) and not queued):
+            raise ValueError('seek prefix and paused preview require queued playback')
         request = self.counter.reserve()
         if op in (FRAME_READ, FRAME_ACK):
             target = self.targets if lens is None else lens
@@ -295,7 +300,8 @@ class VideoClient(VideoLink):
             return dict(result=raw[2], stream=astream, token=atoken, acked=cursor)
         payload = bytearray(control(op, request, stream))
         if op == START:
-            payload[18] = (NATIVE if native else 0) | (VERIFY_FRAMES if verify else 0) | (RADIO_OFF if radio == "off" else 0) | (QUEUED if queued else 0) | (PAIRED if paired else 0)
+            payload[18] = (NATIVE if native else 0) | (VERIFY_FRAMES if verify else 0) | (RADIO_OFF if radio == "off" else 0) | (QUEUED if queued else 0) | (PAIRED if paired else 0) | (START_PAUSED if paused else 0)
+            payload[19] = preroll
         return paired_report({source: status(raw) for source, raw in
                               self.raw_replies(payload, STATUS_BYTES if op == STATUS else BASE_STATUS_BYTES).items()})
 
@@ -469,9 +475,81 @@ def presentation_rate(samples):
                 reason='observed copy intervals; excludes startup and reply delay')
 
 
-def stream_clip(client, nals, reference, *, verify=True, native=False, queued=False, radio="video", progress=lambda text: None,
+def seek_restoration_ready(before, after):
+    """Require all bound-link health and every old owner's original PHY pair."""
+    pending = False
+    for lens, baseline in before.items():
+        current = after[lens]
+        for old in baseline['links']:
+            if not old['bound']:
+                continue
+            row = current['links'][old['connection'] - 1]
+            if (not row['bound'] or not row['connected'] or row['epoch'] != old['epoch'] or
+                    row['uncertain'] or row['status'] or not row['current']['valid']):
+                raise RuntimeError('seek host link changed or restoration is uncertain')
+            if row['pending'] or row['owners'] or row['permission'] or row['phase'] in ('restore-wait', 'restore-set', 'restore-read'):
+                pending = True
+                continue
+            if old['owners'] or old['permission']:
+                original, restored = old['before'], row['after']
+                if (not original['valid'] or not restored['valid'] or not row['current']['valid'] or
+                        (original['tx'], original['rx']) != (restored['tx'], restored['rx']) or
+                        (original['tx'], original['rx']) != (row['current']['tx'], row['current']['rx'])):
+                    raise RuntimeError('seek did not restore an old owner original PHY pair')
+    return not pending
+
+
+def seek_clip(client, nals, reference, target_ms, *, paused=False, renew=lambda: None,
+              on_control=lambda client, stream, tokens: None, **kwargs):
+    """Retire old owners, decode hidden preroll and confirm target on every lens.
+
+    The serialized on_control callback may issue PC commands while the upload
+    pump is active. Paused previews remain paused until an explicit resume;
+    neither a helper thread nor an independent transport writer is created.
+    """
+    from seek_clip import prepare_seek
+    selected, prepared = prepare_seek(nals, reference, target_ms)
+    state = client.command(STATUS)
+    if state['state'] != 0:
+        sample = client.phy()
+        before = sample.get('by_lens', {client.lens: sample})
+        retired = client.command(RESET, state['stream'])
+        deadline = time.monotonic() + 30
+        while retired['state'] != 0:
+            if retired['result'] or retired['state'] == 4 or time.monotonic() > deadline:
+                raise RuntimeError('seek could not safely retire every old owner')
+            renew(); time.sleep(.02); retired = client.command(STATUS)
+        if retired['result'] or retired['error']:
+            raise RuntimeError('seek retirement reported a safety failure')
+        while True:
+            sample = client.phy()
+            if seek_restoration_ready(before, sample.get('by_lens', {client.lens: sample})):
+                break
+            if time.monotonic() > deadline:
+                raise RuntimeError('seek original PHY restoration did not finish')
+            renew(); time.sleep(.05)
+    reached = {}
+    def control_tick(active, stream, tokens):
+        for lens, token in tokens.items():
+            if lens in reached:
+                continue
+            row = active.shown(stream, token, 0, lens=lens)
+            if row['result'] == 3:
+                continue
+            if row['result'] or row['ordinal'] != prepared['preroll'] + 1 or row['pts'] != prepared['start_pts_ms']:
+                raise RuntimeError('seek target copy could not be confirmed')
+            reached[lens] = row
+        on_control(active, stream, tokens)
+    result = stream_clip(client, selected, prepared, queued=True, paused=paused,
+                         renew=renew, on_control=control_tick, **kwargs)
+    if set(reached) != set(sources(client.targets)):
+        raise RuntimeError('seek target did not complete on every lens')
+    return dict(result, seek_target=prepared['start_pts_ms'], target_shown=reached)
+
+
+def stream_clip(client, nals, reference, *, verify=True, native=False, queued=False, paused=False, radio="video", progress=lambda text: None,
                 renew=lambda: None, on_ready=lambda state: None, on_finished=lambda state: None, pace_fps=0, timeout=600,
-                clock=time.monotonic, sleep=time.sleep):
+                on_control=lambda client, stream, tokens: None, clock=time.monotonic, sleep=time.sleep):
     """Use owner-bound credit windows; a reconnect or refusal voids the run.
 
     Full status is read at startup, infrequently during input, and at EOF. Frame
@@ -492,17 +570,24 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, queued=Fa
     if radio == 'off' and any(not r.get('radio_supported') for r in per_lens(capabilities).values()):
         raise ValueError('radio Off is not advertised by every targeted lens')
     stream = capabilities['stream_high'] + 1
+    preroll = reference.get('preroll', 0)
+    decoded_count = reference.get('decoded_frame_count', reference['frame_count'])
     if queued:
         playback = client.playback_capabilities()
         if any(not r['compact_metadata'] or (client.targets == 3 and not r['paired']) for r in playback.values()):
             raise ValueError('every recipient must advertise queued playback and compact metadata')
-        if client.configure_timeline(stream, (reference['frame_count'] * 1000 + 15) // 16)['result']:
+        if ((preroll or paused) and any(not r.get('seek') or preroll > r['max_preroll'] for r in playback.values())):
+            raise ValueError('seek/paused preview is not advertised by every recipient')
+        if client.configure_timeline(stream, reference.get('duration_ms', (reference['frame_count'] * 1000 + 15) // 16),
+                                     reference.get('start_pts_ms', 0))['result']:
             raise ValueError('timeline configuration refused')
     deadline = clock() + timeout
     try:
         start_options = dict(native=native, verify=verify, radio=radio)
         if queued:
             start_options['queued'] = True
+            if preroll or paused:
+                start_options.update(preroll=preroll, paused=paused)
         state = client.command(START, stream, **start_options)
         if state['result']:
             raise ValueError(f'START refused: {state["result"]}')
@@ -524,11 +609,14 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, queued=Fa
         credit_waits = 0
         input_finished = None
         eof_sampled = False
-        finishing = {r['last_nal']: r['ordinal'] for r in reference['frames']}
+        timed_frames = reference.get('timeline_frames', reference['frames'])
+        finishing = {r['last_nal']: r['ordinal'] for r in timed_frames}
+        timed_by_ordinal = {r['ordinal']: r for r in timed_frames}
         while True:
             if clock() > deadline:
                 raise TimeoutError('bounded upload/result drain deadline expired')
             renew()
+            on_control(client, stream, tokens)
             credit = client.credits(stream, tokens)
             reports = per_lens(credit)
             if set(reports) != set(tokens) or any(r['result'] or r['error'] or r['state'] != 2 or
@@ -541,7 +629,7 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, queued=Fa
                 for lens, r in per_lens(state).items():
                     if (r['result'] or r['error'] or r['state'] != 2 or
                             (r['stream'], r['token']) != (stream, tokens[lens]) or
-                            r['consumed'] > index or r['pictures'] > reference['frame_count'] or
+                            r['consumed'] > index or r['pictures'] > decoded_count or
                             r['presented'] > reference['frame_count']):
                         raise RuntimeError('decoder/session/count failed during playback')
                     copy_samples[lens].append(dict(presented=r['presented'], copy_tick=r['copy_tick']))
@@ -590,7 +678,8 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, queued=Fa
                     for offset in range(count):
                         ordinal = finishing.get(index + offset)
                         if ordinal:
-                            metadata = client.frame_time_fast(stream, ordinal, index + offset, (ordinal - 1) * 1000 // 16)
+                            metadata = client.frame_time_fast(stream, ordinal, index + offset,
+                                timed_by_ordinal[ordinal].get('pts_ms', (ordinal - 1) * 1000 // 16))
                             if metadata['result'] == 3:
                                 count = offset
                                 break

@@ -736,3 +736,21 @@ until that acknowledgement, retrying at100ms with a2s limit. Resume reanchors
 the cadence after prebuffering. Pausing retains owned queues and the radio
 lifecycle; STOP/RESET still drain and restore. A supplied-link PC client can
 read and control playback without opening any connection itself.
+
+## Seek Generation
+
+Advanced capability bit32 advertises seek version1 with maximum255 decoded
+preroll pictures (capability bytes6/7). START byte19 is that explicit prefix;
+option32 requests a paused target preview. Both require queued presentation.
+TIMELINE retains the full media duration and target PTS. Prefix metadata must
+precede the target; visible metadata must not. Each decoded prefix picture
+updates references but never enters the display queue or shown reports.
+Display/evidence ordinals count actual copies separately from media ordinals.
+
+The PC seek helper drains RESET, selects the preceding IDR and its applicable
+SPS/PPS, preserves every tail NAL and starts a fresh generation. It requires
+the target's shown record from every lens before confirming arrival. A paused
+seek shows the target once and pauses at the common completion boundary;
+explicit PC resume continues it. The serialized upload control callback can
+send controls while pumping, without concurrent transport writers. Seeking
+to duration selects the last available picture; unbounded GOP prefixes refuse.

@@ -1354,8 +1354,9 @@ int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
         video_frame_time media = {sequence - 1, sequence, (sequence - 2) * 1000 / 16};
         for (;;) {
             assert(!take(1, 1000));
-            int offered = video_timeline_offer(&context.video_control.timeline, 1,
-                                               context.video_control.control_generation, &media);
+            int offered = video_timeline_offer_preroll(&context.video_control.timeline, 1,
+                context.video_control.control_generation, &media,
+                (context.video_control.options >> VIDEO_PREROLL_SHIFT) & 255u);
             if (offered) video_worker_wake_locked(context.video.token, VIDEO_WAKE_INPUT);
             give(1);
             if (offered) break;
@@ -1407,6 +1408,10 @@ static void exercise_pause(void) {
     }
     uint32_t frozen = copied_frames;
     assert(frozen > 0 && frozen < 32);
+    if (playback_pause_fixture == 2) {
+        assert(frozen == 1 && owner->presenter->media_shown == 8 && owner->presenter->done_pts == 437);
+        assert(owner->presenter->queue.released == 8 && consumed_frames > frozen);
+    }
     for (uint32_t i = 0; i < 150; ++i) { display_pump(); pool_drain(); delay(1); }
     assert(copied_frames == frozen && !context.video.fault && radio_active);
     assert(!take(1, 1000));
@@ -1423,11 +1428,14 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
     paired_fixture = mode; partner_anchor = 0;
     uint32_t here = mode == 2 ? CFW_MESSAGE_RIGHT : CFW_MESSAGE_LEFT;
     assert(video_sync_init(&partner, 1, here ^ CFW_MESSAGE_BOTH));
+    uint32_t prefix = with_pause == 2 ? 7 : 0, visible = 32 - prefix;
+    partner.next = prefix + 1;
     context.framebuffer_shadow = 0;
-    assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, 0, 16, 1));
+    assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, prefix * 1000 / 16, 16, 1));
     context.video_control.owner_origin = 1;
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
     control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_QUEUED_PRESENTATION;
+    if (prefix) { p[18] |= VIDEO_START_PAUSED; p[19] = prefix; }
     cfw_message_route route = control_route; route.targets = mode ? CFW_MESSAGE_BOTH : CFW_MESSAGE_LEFT;
     assert(!video_control_received(p, 24, &route));
     context.video_control.owner_here = here;
@@ -1443,23 +1451,23 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
     for (;;) {
         display_pump(); pool_drain();
         assert(!take(1, 1000));
-        int done = copied_frames == 32 && owner->presenter->shown == 32;
+        int done = copied_frames == visible && owner->presenter->shown == visible;
         give(1);
         if (done) break;
         assert((int32_t)(limit - tick()) > 0 && !context.video.fault); delay(1);
     }
-    assert(tick() - started >= 1900 && consumed_frames == 32 && decoded_calls == 34);
+    assert(tick() - started >= (visible - 1) * 1000 / 16 && consumed_frames == 32 && decoded_calls == 34);
     assert(!picture_relock_refusals);
-    assert(playback_pause_count == (uint32_t)with_pause); playback_pause_fixture = 0;
+    assert(playback_pause_count == (uint32_t)(with_pause != 0)); playback_pause_fixture = 0;
     assert(owner->presenter->queue.released == 32);
-    assert(owner->presenter->shown_rows.high == 32 && owner->presenter->shown_rows.lost == 16);
+    assert(owner->presenter->shown_rows.high == visible && owner->presenter->shown_rows.lost == visible - 16);
     uint8_t request[20] = {0}, shown_report[VIDEO_SHOWN_BYTES] = {0};
     video_write32(request + 8, 1); video_write32(request + 12, owner->token);
     video_write32(request + 16, 1);
     assert(!take(1, 1000));
     assert(video_shown_snapshot_locked(&context, request, 1, shown_report) == VIDEO_CONTROL_ACCEPTED);
-    assert(video_read32(shown_report + 12) == 17 && video_read32(shown_report + 16) == 17 &&
-           (video_read32(shown_report + 36) & 4) && video_read32(shown_report + 48) == 16);
+    assert(video_read32(shown_report + 12) == visible - 15 && video_read32(shown_report + 16) == 17 &&
+           (video_read32(shown_report + 36) & 4) && video_read32(shown_report + 48) == visible - 16);
     request[12] ^= 1;
     assert(video_shown_snapshot_locked(&context, request, 1, shown_report) == VIDEO_CONTROL_STALE);
     give(1);
@@ -1487,6 +1495,10 @@ static void paired_consumer(void) {
 static void playback_controls(void) {
     queued_consumer_mode(0, 1); queued_consumer_mode(2, 1);
     puts("owner-bound boundary pause, frozen position, paired ACK and re-anchored resume PASS");
+}
+static void seek_controls(void) {
+    queued_consumer_mode(0, 2); queued_consumer_mode(2, 2);
+    puts("hidden decoded preroll, paused target preview and distinct media/copy ordinals PASS");
 }
 
 static void sync_posting(void) {
@@ -2201,7 +2213,7 @@ static void radio_contract(void) {
     configure(); request_next = 0;
     uint8_t p[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
     control_command(p, VIDEO_CONTROL_CAPABILITIES, 0);
-    assert(!control_snapshot(p, 8, report) && report[71] == 0x8f && !radio_acquires);
+    assert(!control_snapshot(p, 8, report) && report[71] == 0xaf && !radio_acquires);
     control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_RADIO_OFF;
     assert(!control_snapshot(p, 24, report));
     assert(!control_snapshot(p, 24, report) && !radio_acquires);
@@ -2248,6 +2260,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "queued-consumer")) queued_consumer();
     else if (!strcmp(argv[1], "paired-consumer")) paired_consumer();
     else if (!strcmp(argv[1], "playback-controls")) playback_controls();
+    else if (!strcmp(argv[1], "seek-controls")) seek_controls();
     else if (!strcmp(argv[1], "sync-posting")) sync_posting();
     else if (!strcmp(argv[1], "evidence")) evidence();
     else if (!strcmp(argv[1], "evidence-replays")) evidence_replays();

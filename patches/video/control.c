@@ -65,13 +65,13 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
         __ATOMIC_ACQUIRE) << VIDEO_POWER_STEP_SHIFT);
     p[70] = 7 | VIDEO_FEATURE_CREDITS | VIDEO_FEATURE_DECODE_TOTALS |
         (1u << VIDEO_STATUS_EXTENSION_SHIFT); /* Advertise one 64-byte STATUS extension. */
-    p[71] = VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES | VIDEO_QUEUED_PRESENTATION | VIDEO_PAIRED_PRESENTATION;
+    p[71] = VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES | VIDEO_QUEUED_PRESENTATION | VIDEO_PAIRED_PRESENTATION | VIDEO_START_PAUSED;
     video_write32(p + 72, queue.gap_deadline);
     video_write32(p + 76, queue.gap_sequence);
     video_write32(p + 80, ctx->video_presentation.presented);
     video_write32(p + 84, ctx->video_presentation.failures);
     video_write32(p + 88, ctx->video_presentation.copy_tick);
-    video_write32(p + 92, s->options);
+    video_write32(p + 92, s->options & 255u);
     video_evidence_status_locked(ctx, p);
     if (entry->snapshot_bytes == VIDEO_STATUS_BYTES)
         video_decode_encode(&ctx->video_decode_last, p + VIDEO_BASE_STATUS_BYTES);
@@ -115,8 +115,8 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         video_frame_time frame = {video_read32(p + 12), video_read32(p + 16), video_read32(p + 20)};
         if (op == VIDEO_CONTROL_FRAME_TIME_FAST && s->timeline.count == VIDEO_TIMELINE_RECORDS &&
             frame.ordinal > s->timeline.accepted) return VIDEO_CONTROL_BUSY;
-        return video_timeline_offer(&s->timeline, video_read32(p + 8),
-            s->control_generation, &frame) ?
+        return video_timeline_offer_preroll(&s->timeline, video_read32(p + 8),
+            s->control_generation, &frame, (s->options >> VIDEO_PREROLL_SHIFT) & 255u) ?
             (video_worker_wake_locked(ctx->video.token, VIDEO_WAKE_INPUT), VIDEO_CONTROL_ACCEPTED) : VIDEO_CONTROL_INPUT;
     }
     if (op == VIDEO_CONTROL_CREDITS) {
@@ -148,7 +148,8 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         if (n != VIDEO_START_BYTES || p[12] != (VIDEO_FRAME_WIDTH & 255) ||
             p[13] != VIDEO_FRAME_WIDTH >> 8 || p[14] != VIDEO_FRAME_HEIGHT || p[15] ||
             p[16] != VIDEO_FRAME_REFERENCES || p[17] != VIDEO_FRAME_DPB ||
-            p[18] & ~(VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES | VIDEO_QUEUED_PRESENTATION | VIDEO_PAIRED_PRESENTATION) || p[19])
+            p[18] & ~(VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES | VIDEO_QUEUED_PRESENTATION | VIDEO_PAIRED_PRESENTATION | VIDEO_START_PAUSED) ||
+            ((p[19] || (p[18] & VIDEO_START_PAUSED)) && !(p[18] & VIDEO_QUEUED_PRESENTATION)))
             return VIDEO_CONTROL_FORMAT;
         uint32_t stream = video_read32(p + 8), interval = video_read32(p + 20);
         if (!stream || stream <= s->stream_high || interval < VIDEO_INTERVAL_MIN ||
@@ -166,7 +167,7 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
             return VIDEO_CONTROL_FORMAT;
         s->stream = s->stream_high = stream;
         s->interval = interval;
-        s->options = p[18];
+        s->options = p[18] | (uint32_t)p[19] << VIDEO_PREROLL_SHIFT;
         s->owner_origin = origin;
         s->owner_here = here;
         s->owner_targets = targets;
@@ -296,9 +297,11 @@ int video_control_received(const uint8_t *data, uint16_t size,
             entry->result = VIDEO_CONTROL_ACCEPTED;
             entry->snapshot[0] = VIDEO_PROTOCOL_VERSION;
             entry->snapshot[1] = VIDEO_PLAYBACK_CAPABILITIES;
-            entry->snapshot[3] = VIDEO_PLAYBACK_QUEUE | VIDEO_PLAYBACK_PAIRED | VIDEO_PLAYBACK_METADATA | VIDEO_PLAYBACK_SHOWN | VIDEO_PLAYBACK_CONTROLS;
+            entry->snapshot[3] = VIDEO_PLAYBACK_QUEUE | VIDEO_PLAYBACK_PAIRED | VIDEO_PLAYBACK_METADATA | VIDEO_PLAYBACK_SHOWN | VIDEO_PLAYBACK_CONTROLS | VIDEO_PLAYBACK_SEEK;
             entry->snapshot[4] = VIDEO_DECODED_DEPTH;
             entry->snapshot[5] = VIDEO_TIMELINE_FPS;
+            entry->snapshot[6] = 255; /* Maximum explicit decoded seek prefix. */
+            entry->snapshot[7] = 1; /* Seek contract version. */
             video_write32(entry->snapshot + 8, VIDEO_PRESENTER_A4_LIMIT);
             video_write32(entry->snapshot + 12, VIDEO_PRESENTER_STACK_BYTES);
         }

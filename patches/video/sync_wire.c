@@ -56,7 +56,7 @@ static void video_presenter_sync_poll(video_presenter *p) {
             if (p->sync.side == CFW_MESSAGE_LEFT && body[1] == CFW_MESSAGE_RIGHT && !body[20]) {
                 if (ordinal < p->wire_serial) continue;
                 if (ordinal > p->wire_serial + 1 ||
-                    (ordinal > p->wire_serial ? pts != p->shown :
+                    (ordinal > p->wire_serial ? pts != p->media_shown :
                      (paused != p->wire_paused || pts != p->wire_boundary)))
                     video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
                 p->wire_serial = ordinal; p->wire_paused = p->paused = paused;
@@ -65,7 +65,7 @@ static void video_presenter_sync_poll(video_presenter *p) {
                     video_presenter_fault(p->decoder, VIDEO_FAULT_DISPLAY);
             } else if (p->sync.side == CFW_MESSAGE_RIGHT && body[1] == CFW_MESSAGE_LEFT && body[20]) {
                 if (ordinal <= p->control_ack) continue;
-                if (ordinal != p->control_serial || pts != p->shown || paused != p->paused)
+                if (ordinal != p->control_serial || pts != p->media_shown || paused != p->paused)
                     video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
                 p->control_ack = ordinal; p->control_deadline = 0;
             } else video_presenter_fault(p->decoder, VIDEO_FAULT_SEQUENCE);
@@ -79,7 +79,7 @@ static void video_presenter_sync_poll(video_presenter *p) {
             if (ordinal == p->sync.inflight && ordinal != p->captured_ordinal) {
                 p->wire_capture = captured; p->captured_ordinal = ordinal;
             }
-            if (ordinal == p->shown && pts == p->done_pts)
+            if (ordinal == p->media_shown && pts == p->done_pts)
                 video_presenter_sync_send(p, VIDEO_SYNC_DONE, ordinal, pts, 0, 0);
         }
     }

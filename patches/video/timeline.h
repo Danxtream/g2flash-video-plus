@@ -30,6 +30,9 @@ int video_timeline_start(video_timeline *, uint32_t stream, uint32_t generation)
 /* Accept monotonic completed-picture metadata with bounded independent credits. */
 int video_timeline_offer(video_timeline *, uint32_t stream, uint32_t generation,
                          const video_frame_time *);
+/* Permit only the explicit bounded seek prefix below the visible target PTS. */
+int video_timeline_offer_preroll(video_timeline *, uint32_t stream, uint32_t generation,
+                                 const video_frame_time *, uint32_t prefix);
 /* Consume metadata only for the exact completed picture and terminating NAL. */
 int video_timeline_take(video_timeline *, uint32_t generation, uint32_t ordinal,
                         uint32_t nal_sequence, video_frame_time *);

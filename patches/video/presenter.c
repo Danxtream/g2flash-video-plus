@@ -69,7 +69,8 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         int coordinator = !p->paired || p->sync.side == CFW_MESSAGE_RIGHT;
         int boundary = !p->paired || !p->sync.inflight ||
             (p->sync.completed == p->sync.inflight && p->sync.peer_completed == p->sync.inflight);
-        if (coordinator && boundary && p->control_ack == p->control_serial && p->paused != p->pause_requested) {
+        if (coordinator && boundary && !p->pause_after_first &&
+            p->control_ack == p->control_serial && p->paused != p->pause_requested) {
             if (p->control_serial == UINT32_MAX) {
                 video_control_give(ctx); video_presenter_fault(owner, VIDEO_FAULT_SEQUENCE);
             }
@@ -85,7 +86,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         if (p->paired && coordinator && p->control_ack != p->control_serial &&
             (int32_t)(control_now - p->control_sent) >= 100) {
             control_op = p->paused ? VIDEO_SYNC_PAUSE : VIDEO_SYNC_RESUME;
-            control_serial = p->control_serial; control_boundary = p->shown;
+            control_serial = p->control_serial; control_boundary = p->media_shown;
             p->control_sent = control_now;
         }
         if (p->paused || (coordinator && p->control_ack != p->control_serial)) {
@@ -97,7 +98,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
             continue;
         }
         video_decoded_queue *q = &p->queue;
-        uint32_t now = VIDEO_TICK, ordinal = p->shown + 1, deadline = now;
+        uint32_t now = VIDEO_TICK, ordinal = q->released + 1, deadline = now;
         int available = q->count && q->slots[q->head].state == VIDEO_DECODED_READY;
         uint32_t ready_depth = 0;
         while (ready_depth < q->count &&
@@ -167,6 +168,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
                 video_presenter_fault(owner, VIDEO_FAULT_EVENT);
             continue;
         }
+        frame.ordinal = p->shown + 1; /* Display copies exclude decoded preroll. */
         if (!video_present_frame(&frame)) {
             if (video_lifecycle_cancelled(&ctx->video, p->token)) break;
             video_presenter_fault(owner, VIDEO_FAULT_DISPLAY);
@@ -175,14 +177,14 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
             video_presenter_fault(owner, VIDEO_FAULT_OWNERSHIP);
         if (owner->evidence) {
             video_evidence *w = owner->evidence;
-            if (ordinal != w->high + 1 || w->high - w->acked >= VIDEO_EVIDENCE_ROWS) {
+            if (frame.ordinal != w->high + 1 || w->high - w->acked >= VIDEO_EVIDENCE_ROWS) {
                 video_control_give(ctx);
                 video_presenter_fault(owner, VIDEO_FAULT_OWNERSHIP);
             }
             video_frame_result *row = &p->evidence[q->head];
-            row->ordinal = ordinal; row->copy_tick = ctx->video_presentation.copy_tick;
-            w->rows[(ordinal - 1) % VIDEO_EVIDENCE_ROWS] = *row;
-            w->high = ordinal;
+            row->ordinal = frame.ordinal; row->copy_tick = ctx->video_presentation.copy_tick;
+            w->rows[(frame.ordinal - 1) % VIDEO_EVIDENCE_ROWS] = *row;
+            w->high = frame.ordinal;
         }
         video_shown_frame shown = {media.ordinal, media.pts, ctx->video_presentation.copy_tick,
             p->paired && p->sync.side == CFW_MESSAGE_LEFT ? p->wire_capture : p->trigger_tick,
@@ -191,7 +193,8 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
             video_control_give(ctx); video_presenter_fault(owner, VIDEO_FAULT_SEQUENCE);
         }
         int released = video_decoded_release(q, p->generation, ordinal);
-        p->shown = ordinal;
+        ++p->shown; p->media_shown = ordinal;
+        if (p->pause_after_first) { p->pause_requested = 1; p->pause_after_first = 0; }
         if (p->paired && !video_sync_complete(&p->sync, ordinal)) {
             video_control_give(ctx); video_presenter_fault(owner, VIDEO_FAULT_SEQUENCE);
         }
@@ -221,6 +224,8 @@ static int video_presenter_prepare(video_owner *owner) {
                                  ~(uintptr_t)(VIDEO_ALLOC_ALIGNMENT - 1));
     bzero((uint8_t *)p, sizeof(*p));
     p->raw = raw; p->decoder = owner; p->generation = owner->control_generation; p->token = owner->token;
+    p->preroll = (owner->context->video_control.options >> VIDEO_PREROLL_SHIFT) & 255u;
+    p->pause_after_first = (owner->context->video_control.options & VIDEO_START_PAUSED) != 0;
     p->paired = owner->context->video_control.owner_targets == CFW_MESSAGE_BOTH ||
                 (owner->context->video_control.options & VIDEO_PAIRED_PRESENTATION);
     if (!video_sync_init(&p->sync, owner->context->video_control.stream,
@@ -228,6 +233,7 @@ static int video_presenter_prepare(video_owner *owner) {
         VIDEO_OWNER_FREE(raw); return 0;
     }
     owner->presenter = p;
+    p->sync.next = p->preroll + 1;
     video_heap_ops heap = {0, video_platform_allocate, video_platform_release, video_platform_heap_view};
     if (!video_storage_init(&p->storage, &heap, video_owner_charge(raw_bytes),
                             owner->storage.display_allowance)) return 0;
@@ -238,7 +244,8 @@ static int video_presenter_prepare(video_owner *owner) {
         VIDEO_PRESENTER_STACK_BYTES + 2 * VIDEO_STACK_GUARD_BYTES);
     if (!p->pixels || !p->stack_allocation ||
         !video_decoded_init(&p->queue, p->generation, p->token, VIDEO_SOURCE_A4,
-                            VIDEO_DECODED_DEPTH, p->pixels, VIDEO_DECODED_DEPTH * VIDEO_DECODED_A4_BYTES)) return 0;
+                            VIDEO_DECODED_DEPTH, p->pixels, VIDEO_DECODED_DEPTH * VIDEO_DECODED_A4_BYTES) ||
+        !video_decoded_skip_prefix(&p->queue, p->generation, p->preroll)) return 0;
     uint8_t *base = p->stack_allocation;
     for (uint32_t i = 0; i < VIDEO_PRESENTER_STACK_BYTES + 2 * VIDEO_STACK_GUARD_BYTES; ++i)
         base[i] = VIDEO_GUARD_FILL;
@@ -271,6 +278,10 @@ static int video_presenter_produce(video_owner *owner, const video_frame_descrip
         int matched = room && video_timeline_take(&ctx->video_control.timeline,
             p->generation, frame->ordinal, nal_sequence, &media);
         if (matched) {
+            if (media.ordinal <= p->preroll) {
+                if (owner->evidence) owner->evidence->building = (video_frame_result){0};
+                video_control_give(ctx); return 1;
+            }
             slot = (p->queue.head + p->queue.count) % p->queue.depth;
             serial = video_decoded_reserve(&p->queue, p->generation, &media);
             if (serial && owner->evidence) {
