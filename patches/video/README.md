@@ -2,30 +2,32 @@
 
 ## Queued Playback
 
-SHOWN operation15 queries an owned stream/token and telemetry cursor in20
-bytes. Its frozen72-byte reply is version/op/result/lens, followed by LE32
+SHOWN operation 15 queries an owned stream/token and telemetry cursor in 20
+bytes. Its frozen 72-byte reply is version/op/result/lens, followed by LE32
 stream, token, telemetry serial, frame ordinal, media PTS, copy tick, trigger
 tick, queued tick, flags, first available serial, high serial, overwritten
 count, holds, wire compensation and uncertainty, then claim and submit ticks.
-Advanced capability byte7 bit2 selects extended captures; old64-byte replies
-remain supported by the PC client. Capability bit3 advertises
-this extension. Cursor0 selects the oldest available row; an overwritten
-cursor recovers there with flag4. Flag1 denotes a paired trigger and flag2
+Advanced capability byte 7 bit 2 selects extended captures; old 64-byte replies
+remain supported by the PC client. Capability bit 3 advertises
+this extension. Cursor 0 selects the oldest available row; an overwritten
+cursor recovers there with flag 4. Flag 1 denotes a paired trigger and flag 2
 uncalibrated wire timing; UINT32_MAX uncertainty is explicitly unknown.
-The32-row ring never waits for host acknowledgements. Timestamps come from
+The 32-row ring never waits for host acknowledgements. Timestamps come from
 actual software display-copy capture, not packet arrival at the host or panel
 light emission. Compare local trigger-to-copy deltas, not absolute lens clocks.
 
-Advanced capability byte7 bit2 also advertises TRIGGER_TIMING22. Its20-byte
-request carries stream and both owner tokens, like PLAYBACK. The frozen96-byte
-reply has version/op/result/lens plus23LE32 fields:stream,token,mediaN,PTS,
-roundtrip,LEFT receive-to-DONE elapsed,LEFT receive-to-copy,RIGHT trigger-to-copy,
-nominal transport upper bound,signed lower/upper offset,valid,sample/anomaly
-counts,min/max transport bound,holds,occupancy,stack used,guards OK,allocated
-bytes,peak and cap. Timing calculation and stack sampling run on presenter;
+Advanced capability byte 7 bit 2 also advertises TRIGGER_TIMING 22. Its 20-byte
+request carries stream and both owner tokens, like PLAYBACK. The frozen 96-byte
+reply has version/op/result/lens plus 23 LE32 fields: stream, token, mediaN,
+PTS,
+roundtrip, LEFT receive-to-DONE elapsed, LEFT receive-to-copy, RIGHT trigger-to-copy,
+nominal transport upper bound, signed lower/upper offset, valid, sample/anomaly
+counts, min/max transport bound, holds, occupancy, stack used, guards OK,
+allocated
+bytes, peak and cap. Timing calculation and stack sampling run on presenter;
 the command handler only freezes an owner-bound copy.
 
-LEFT DONE carries local elapsed at wire16 and local copy duration at20/21;
+LEFT DONE carries local elapsed at wire 16 and local copy duration at 20/21;
 22 remains generation mode. RIGHT uses its own trigger-to-receive roundtrip,
 never unrelated tick origins. Duplicates do not replace first trigger capture.
 Retries/inconsistent timing remain raw invalid observations without stopping
@@ -34,21 +36,21 @@ clock drift and optical onset are NOT qualified. Min/max show loaded jitter,
 not a physical one-way latency guarantee. No half-roundtrip symmetry claim,
 shared clock exchange or assumed nonzero compensation is introduced.
 
-The optional control13 query returns16 bytes: version, operation, result,
-feature mask (bit0 owned queue, bit1 paired triggers, bit2 compact metadata), depth2, frame rate16, two reserved bytes,
-then LE32 A4 charged allowance77824 and presenter stack8192. START option4
+The optional control 13 query returns 16 bytes: version, operation, result,
+feature mask (bit 0 owned queue, bit 1 paired triggers, bit 2 compact metadata), depth 2, frame rate 16, two reserved bytes,
+then LE32 A4 charged allowance 77824 and presenter stack 8192. START option 4
 requires a configured TIMELINE. BOTH-target queued START enables paired wire
-triggers; option8 explicitly pairs independently delivered host streams.
+triggers; option 8 explicitly pairs independently delivered host streams.
 Neither legacy capability nor default START implies synchronized playback.
 
-Compact FRAME_TIME operation14 retains the24-byte request and returns6 bytes:
+Compact FRAME_TIME operation 14 retains the 24-byte request and returns 6 bytes:
 LE32 accepted picture ordinal, remaining metadata credits, result. Full mail
 returns BUSY without accepting a new row. The PC queues metadata for reference
 identified terminating NALs, never assuming every NAL produces a picture.
 
-RIGHT coordinates at16fps, regardless of compressed-payload ingress. Wire-only
-kind5 records carry source/version/operation, stream, picture ordinal, PTS,
-sender-local tick, ready depth and terminal flag in24 bytes. READY gates the
+RIGHT coordinates at 16 fps, regardless of compressed-payload ingress. Wire-only
+kind 5 records carry source/version/operation, stream, picture ordinal, PTS,
+sender-local tick, ready depth and terminal flag in 24 bytes. READY gates the
 matching heads; a common TRIGGER consumes an already-decoded frame. RIGHT
 waits for both actual copy completions before advancing. LEFT never runs its
 own cadence. Repeated READY/TRIGGER/DONE records are idempotent; a lost DONE
@@ -59,12 +61,13 @@ to zero pending loaded hardware measurements, not a claimed optical offset.
 Bridge callback only posts into a stable bounded mailbox; controller forwards
 wakes, and presenter processes records. Legacy input and stock hooks unchanged.
 
-The lazy presenter owns two30720-byte A4 snapshots and a guarded8KiB static
+The lazy presenter owns two 30720-byte A4 snapshots and a guarded 8 KiB static
 task stack, with its own reserve-aware allocation ledger. Metadata names the
 completed picture and terminating NAL independently. The decoder cannot reuse
 its borrowed Y until copying is complete; snapshots stay pinned through actual
 display-copy completion. Prebuffer two pictures, except the timed terminal
-picture. Absolute16fps deadlines use alternating62/63ms intervals; starvation
+picture. Absolute 16 fps deadlines use alternating 62/63 ms intervals;
+starvation
 holds/rebuffers rather than presenting overdue pictures in a burst. Controller
 completion work posts wakeups; pacing runs on the presenter task. Unknown
 completion, task ABI, stack guard or teardown failures retain quarantine.
@@ -758,20 +761,21 @@ own device evidence; a successful boot does not establish them.
 ## Picture Timeline Records
 
 The decoded-picture FIFO owns admitted source-size A4 or original Y8 storage
-provided by its session owner. Depth1 or2 is explicit; full queues apply
+provided by its session owner. Depth 1 or 2 is explicit; full queues apply
 backpressure rather than overwrite. Producer Y is copied before the next
 decode. A published head can only be claimed by its exact picture ordinal,
 and it stays unavailable until actual display completion releases it.
 Cancellation stops admission but does not invalidate an outstanding presenter
 pin. Serial/generation exhaustion refuses instead of reusing a stale token.
-Advanced capability operation13 advertises queued playback; START bit4
+Advanced capability operation 13 advertises queued playback; START bit 4
 enables it only with a configured timeline and admitted task/queue ownership.
 
-Optional ID31 operations11 and12 retain protocol version1 and the existing
-24-byte bounded replay format. TIMELINE11, while stopped, carries little-endian
+Optional ID31 operations 11 and 12 retain protocol version 1 and the existing
+24-byte bounded replay format. TIMELINE 11, while stopped, carries little-endian
 u32 stream/duration_ms/start_pts_ms and u16 fps numerator/denominator after
-the eight-byte control header. This contract currently accepts16/1 only.
-FRAME_TIME12 carries u32 stream/picture_ordinal/terminating_nal_sequence/pts_ms.
+the eight-byte control header. This contract currently accepts 16/1 only.
+FRAME_TIME 12 carries u32
+stream/picture_ordinal/terminating_nal_sequence/pts_ms.
 Pictures are one-based; parameter sets and filler do not increment ordinals.
 Four metadata records have credits independent of compressed input slots.
 Exact duplicates are idempotent; conflicting, stale and overflowing records
@@ -781,9 +785,9 @@ without the explicit queued START option retains legacy decode-ready behavior.
 
 ## Playback Controls
 
-Advanced capability operation13 advertises bit16 for owner-bound playback
-controls. PAUSE16, RESUME17 and PLAYBACK18 use a20-byte request: the control
-header, stream, LEFT token and RIGHT token. The36-byte frozen reply contains
+Advanced capability operation 13 advertises bit 16 for owner-bound playback
+controls. PAUSE 16, RESUME 17 and PLAYBACK 18 use a 20-byte request: the control
+header, stream, LEFT token and RIGHT token. The 36-byte frozen reply contains
 version/operation/result/lens followed by stream, local token, actual paused
 state, requested pause, shown picture count, media position in milliseconds,
 duration and pending paired transition (all u32 little-endian).
@@ -793,16 +797,17 @@ boundary and wire processing remain on the independent presenter task.
 RIGHT waits for both copies before a paired pause. Ordered, stream-qualified
 PAUSE/RESUME wire records carry a finite control serial and the completed
 picture boundary. LEFT acknowledges exact repeats; RIGHT blocks new triggers
-until that acknowledgement, retrying at100ms with a2s limit. Resume reanchors
+until that acknowledgement, retrying at 100 ms with a 2 s limit. Resume
+reanchors
 the cadence after prebuffering. Pausing retains owned queues and the radio
 lifecycle; STOP/RESET still drain and restore. A supplied-link PC client can
 read and control playback without opening any connection itself.
 
 ## Seek Generation
 
-Advanced capability bit32 advertises seek version1 with maximum255 decoded
-preroll pictures (capability bytes6/7). START byte19 is that explicit prefix;
-option32 requests a paused target preview. Both require queued presentation.
+Advanced capability bit 32 advertises seek version 1 with maximum 255 decoded
+preroll pictures (capability bytes 6/7). START byte 19 is that explicit prefix;
+option 32 requests a paused target preview. Both require queued presentation.
 TIMELINE retains the full media duration and target PTS. Prefix metadata must
 precede the target; visible metadata must not. Each decoded prefix picture
 updates references but never enters the display queue or shown reports.
@@ -818,34 +823,38 @@ to duration selects the last available picture; unbounded GOP prefixes refuse.
 
 ## PC Menu and Scale
 
-Advanced capability bit64 advertises MENU19 and SCALE20. Both use24-byte
+Advanced capability bit 64 advertises MENU 19 and SCALE 20. Both use 24-byte
 owner-bound requests: header, stream, LEFT token, RIGHT token, value. MENU
-values0..5 mean open, close, next, previous, apply and query. SCALE1 selects
-native,2 selects double. A pending single-slot menu intent returns BUSY;
+values 0..5 mean open, close, next, previous, apply and query. SCALE 1 selects
+native, 2 selects double. A pending single-slot menu intent returns BUSY;
 retry with a fresh request, never overwrite it. RIGHT applies paired actions
 on the presenter and sends the common pause/menu view with finite serial/ACK.
 
-Replies extend the36-byte playback state to48 bytes: view, seek serial and
+Replies extend the 36-byte playback state to 48 bytes: view, seek serial and
 seek target milliseconds (u32 each). View low bits encode open plus selection
-shifted1; bit4 is native selected and bit5 is native active. Seek selection
-cycles PLAY,-10,+10,-30,+30 seconds; targets clamp to media duration. Applying
+shifted 1; bit 4 is native selected and bit 5 is native active. Seek selection
+cycles PLAY, -10, +10, -30, +30 seconds; targets clamp to media duration.
+Applying
 PLAY resumes. Other selections publish a PC source seek request; the supplied
 PlaybackController performs RESET/restoration/preroll on its single writer.
 Paused EOF retains the preview until explicit resume rather than silently STOP.
 
-The existing raw20px bitmap font draws position/duration and selection into
-the bottom48px letterbox, clipped to that band. Menu-only tagged copies retain
+The existing raw 20 px bitmap font draws position/duration and selection into
+the bottom 48 px letterbox, clipped to that band. Menu-only tagged copies retain
 the frozen video and do not change media counts, copy time or SHOWN records.
 Scale is latched on the common frame trigger; retry keeps that frame's scale.
 There is no radio entry, physical-input hook or independent gesture route.
 
 ## Selected Radio Policy
 
-Advanced capability bit128 advertises RADIO_POLICY21. A12-byte request contains
-the control header and u32 value:0 Off,1 Video-only,UINT32_MAX query. Video-only
-is the unconfigured default. Its24-byte frozen reply contains version/op/result/
+Advanced capability bit 128 advertises RADIO_POLICY 21. A 12-byte request
+contains
+the control header and u32 value: 0 Off, 1 Video-only, UINT32_MAX query.
+Video-only
+is the unconfigured default. Its 24-byte frozen reply contains
+version/op/result/
 lens, then selected policy, active policy (UINT32_MAX while stopped), pending,
-wire-fed peer and reserved0. These describe policy, not negotiated PHY speed.
+wire-fed peer and reserved 0. These describe policy, not negotiated PHY speed.
 
 Changing the field while active only selects the next START/seek generation;
 it does not pause, drain, restore or recreate the current owner. Resume is not
@@ -853,7 +862,7 @@ a boundary. Legacy explicit START Off still forces that generation Off. The
 normal retirement path restores every actual owner's original pair unchanged.
 A validated wire-fed peer makes no PHY READ/SET request, even with a bound
 lease-only host; non-changing epoch ownership still tracks host loss and
-grants no2M permission. Locally delivered ingress/direct owners keep read-before-
+grants no 2M permission. Locally delivered ingress/direct owners keep read-before-
 set, finite WSF handoff, refusal reporting and all existing exit restoration.
 
 ## Luma Range
@@ -861,7 +870,7 @@ set, finite WSF handoff, refusal reporting and all existing exit restoration.
 Each completed picture retains the active SPS range, including explicit versus
 inferred TV signalling. Owned FIFO slots keep those flags beside their copied
 pixels. A4 is quantized once before publication; Y8 stays original until packing.
-Changing an SPS does not retag queued pictures. SHOWN flags8 and16 indicate TV
+Changing an SPS does not retag queued pictures. SHOWN flags 8 and 16 indicate TV
 and unsignalled TV respectively; decoded Y and evidence CRCs remain unchanged.
 
 The rescale curve uses f=TV?normalize(Y):Y, then
@@ -870,22 +879,23 @@ Y<=16 to 0 and Y>=235 to 255. A level table avoids hot-path division.
 The alternative decoded-luma curve uses max(1,Y>>4) regardless of the SPS
 range flag. Neither curve changes decoder bytes, evidence CRCs or margins.
 
-Advanced capability byte 7 bit 3 advertises development GRAY_CURVE23.
-A 12-byte request carries the usual header then selected0=rescale(default),
+Advanced capability byte 7 bit 3 advertises development GRAY_CURVE 23.
+A 12-byte request carries the usual header then selected 0=rescale (default),
 1=decoded-luma, or UINT32_MAX=query. Its frozen 24-byte response contains
 version/op/result/lens followed by selected, active(UINT32_MAX while idle),
 pending, and two reserved zeros. It latches at START or fresh seek, never
 switches live and is not a glasses-menu or public settings entry. Old images
-do not advertise it. Paired picture wire byte23 binds the latched curve;
+do not advertise it. Paired picture wire byte 23 binds the latched curve;
 mixed curves refuse rather than present inconsistent pictures.
 
 ## Optional Dithering
 
-Advanced capability byte7 bit1 advertises owned Y8 dithering; bit0 remains the
-seek contract version1. START bit16 selects it for the whole generation and
-requires queued presentation. Default off keeps two30720-byte A4 snapshots;
-on admits two61440-byte original Y8 snapshots under a separate139264-byte
-presenter cap (A4 cap77824). Heap reserves, decoder cap and cache ownership
+Advanced capability byte 7 bit 1 advertises owned Y8 dithering; bit 0 remains
+the
+seek contract version 1. START bit 16 selects it for the whole generation and
+requires queued presentation. Default off keeps two 30720-byte A4 snapshots;
+on admits two 61440-byte original Y8 snapshots under a separate 139264-byte
+presenter cap (A4 cap 77824). Heap reserves, decoder cap and cache ownership
 are unchanged. Refusal is explicit; no automatic depth or representation change.
 
 The immutable quarter-level table uses t=4+(f*56+127)/255, linear between
@@ -895,8 +905,8 @@ Final panel coordinates choose the 2x2 thresholds [0,2;3,1], base=t>>2
 and exactly t&3 one-level promotions. Cell sums remain t and each output
 is monotonic in Y. Picture margins remain off. Both physical rows
 of doubled video are evaluated separately; native uses the same panel phase.
-No low bits are reconstructed from A4. SHOWN flag32 records on-mode. Picture
-wire records use byte22 for the generation's mode; mixed paired modes refuse.
+No low bits are reconstructed from A4. SHOWN flag 32 records on-mode. Picture
+wire records use byte 22 for the generation's mode; mixed paired modes refuse.
 The supplied PC seek/controller retains the choice in a fresh generation.
 
 At 2x scale an immutable 2048-byte cell table performs one lookup per source
