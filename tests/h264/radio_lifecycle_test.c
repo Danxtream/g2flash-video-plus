@@ -49,6 +49,11 @@ int main(void) {
     assert(!sets && l->after.valid && l->after.tx == 2);
     fresh(1, 1); assert(video_radio_acquire(1, 1)); video_radio_release(1); settle();
     assert(!sets && !reads && l->after.valid);
+    fresh(1, 1); assert(video_radio_acquire(1, 1));
+    assert(!reads && !sets && !l->owners && !l->permission && !video_radio_generation_lost(1));
+    event(VIDEO_RADIO_DM_CLOSE, 1, 0x123, 0, 0, 0);
+    assert(video_radio_generation_lost(1));
+    video_radio_release(1); settle(); assert(!reads && !sets);
     fresh(1, 1); assert(video_radio_acquire(1, 0) && video_radio_acquire(2, 1));
     video_radio_release(2); settle(); assert(sets == 1 && l->owners == 1);
     video_radio_release(1); settle(); assert(sets == 2 && l->after.tx == 1);

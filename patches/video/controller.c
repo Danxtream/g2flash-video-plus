@@ -166,6 +166,7 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
         int retiring = (reasons & VIDEO_CONTROLLER_STOP) || current || s->stop_generation;
         if (retiring) s->stop_generation = s->control_generation;
         uint32_t stop_generation = s->stop_generation;
+        int host_video = s->owner_here == s->owner_origin;
         video_control_give(ctx);
         int stopped = 1;
         if (!deferred && retiring)
@@ -180,7 +181,9 @@ static void video_controller_entry(uint32_t app, const uint8_t *data,
         }
         if (!deferred && retiring) video_radio_release(stop_generation);
         if (stopped && guard && reasons & VIDEO_CONTROLLER_START) {
-            radio = video_radio_acquire(guard, !!(s->options & VIDEO_RADIO_OFF));
+            /* Keep non-changing epoch ownership for lease-only host loss,
+             * but wire provenance must never grant a changing PHY owner. */
+            radio = video_radio_acquire(guard, !host_video || !!(s->options & VIDEO_RADIO_OFF));
             if (radio) power = video_power_acquire(guard);
             if (radio && power) started = video_worker_start_guarded(0, guard);
             if (!started) {

@@ -96,6 +96,16 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
                                uint32_t n, uint8_t here, uint8_t origin, uint8_t targets) {
     video_control_state *s = &ctx->video_control;
     uint8_t op = p[1];
+    if (op == VIDEO_CONTROL_RADIO_POLICY) {
+        if (n != 12) return VIDEO_CONTROL_FORMAT;
+        uint32_t value = video_read32(p + 8);
+        if (value > 1 && value != UINT32_MAX) return VIDEO_CONTROL_FORMAT;
+        if (s->start_guard && origin != s->owner_origin) return VIDEO_CONTROL_STALE;
+        if (value != UINT32_MAX)
+            s->options = (s->options & ~VIDEO_RADIO_POLICY_MASK) | VIDEO_RADIO_POLICY_CONFIGURED |
+                (value ? 0 : VIDEO_RADIO_POLICY_OFF);
+        return VIDEO_CONTROL_ACCEPTED;
+    }
     if (op == VIDEO_CONTROL_TIMELINE) {
         if (n != VIDEO_TIMELINE_BYTES) return VIDEO_CONTROL_FORMAT;
         if (s->start_guard || s->stop_generation || s->controller_job ||
@@ -167,7 +177,10 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
             return VIDEO_CONTROL_FORMAT;
         s->stream = s->stream_high = stream;
         s->interval = interval;
-        s->options = p[18] | (uint32_t)p[19] << VIDEO_PREROLL_SHIFT;
+        uint32_t policy = s->options & VIDEO_RADIO_POLICY_MASK;
+        s->options = p[18] | (uint32_t)p[19] << VIDEO_PREROLL_SHIFT | policy;
+        if ((policy & VIDEO_RADIO_POLICY_CONFIGURED) && (policy & VIDEO_RADIO_POLICY_OFF))
+            s->options |= VIDEO_RADIO_OFF;
         s->owner_origin = origin;
         s->owner_here = here;
         s->owner_targets = targets;
@@ -268,6 +281,18 @@ int video_control_received(const uint8_t *data, uint16_t size,
         memcpy(entry->command, data, size);
         entry->result = video_control_apply(ctx, data, size, route->here, route->origin, route->targets);
         video_snapshot(ctx, entry);
+        if (data[1] == VIDEO_CONTROL_RADIO_POLICY) {
+            bzero(entry->snapshot, VIDEO_RADIO_POLICY_BYTES);
+            entry->snapshot_bytes = VIDEO_RADIO_POLICY_BYTES;
+            uint32_t selected = !(s->options & VIDEO_RADIO_POLICY_CONFIGURED) || !(s->options & VIDEO_RADIO_POLICY_OFF);
+            uint32_t active = s->start_guard ? !(s->options & VIDEO_RADIO_OFF) : UINT32_MAX;
+            entry->snapshot[0] = VIDEO_PROTOCOL_VERSION;
+            entry->snapshot[1] = VIDEO_CONTROL_RADIO_POLICY;
+            entry->snapshot[2] = entry->result; entry->snapshot[3] = route->here;
+            video_write32(entry->snapshot + 4, selected); video_write32(entry->snapshot + 8, active);
+            video_write32(entry->snapshot + 12, active != UINT32_MAX && active != selected);
+            video_write32(entry->snapshot + 16, s->start_guard && s->owner_here != s->owner_origin);
+        }
         if (data[1] == VIDEO_CONTROL_MENU || data[1] == VIDEO_CONTROL_SCALE) {
             bzero(entry->snapshot, VIDEO_MENU_STATE_BYTES);
             entry->snapshot_bytes = VIDEO_MENU_STATE_BYTES;
@@ -304,7 +329,7 @@ int video_control_received(const uint8_t *data, uint16_t size,
             entry->result = VIDEO_CONTROL_ACCEPTED;
             entry->snapshot[0] = VIDEO_PROTOCOL_VERSION;
             entry->snapshot[1] = VIDEO_PLAYBACK_CAPABILITIES;
-            entry->snapshot[3] = VIDEO_PLAYBACK_QUEUE | VIDEO_PLAYBACK_PAIRED | VIDEO_PLAYBACK_METADATA | VIDEO_PLAYBACK_SHOWN | VIDEO_PLAYBACK_CONTROLS | VIDEO_PLAYBACK_SEEK | VIDEO_PLAYBACK_MENU;
+            entry->snapshot[3] = VIDEO_PLAYBACK_QUEUE | VIDEO_PLAYBACK_PAIRED | VIDEO_PLAYBACK_METADATA | VIDEO_PLAYBACK_SHOWN | VIDEO_PLAYBACK_CONTROLS | VIDEO_PLAYBACK_SEEK | VIDEO_PLAYBACK_MENU | VIDEO_PLAYBACK_POLICY;
             entry->snapshot[4] = VIDEO_DECODED_DEPTH;
             entry->snapshot[5] = VIDEO_TIMELINE_FPS;
             entry->snapshot[6] = 255; /* Maximum explicit decoded seek prefix. */

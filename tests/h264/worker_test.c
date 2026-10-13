@@ -1446,6 +1446,7 @@ static void exercise_pause(void) {
     }
     for (uint32_t i = 0; i < 150; ++i) { display_pump(); pool_drain(); delay(1); }
     assert(copied_frames == frozen && !context.video.fault && radio_active);
+    if (context.video_control.owner_here != context.video_control.owner_origin) assert(radio_off);
     if (playback_pause_fixture == 3) {
         assert(physical_frame[434 * VIDEO_PANEL_STRIDE + 48] == 0xff);
         menu_fixture_command(VIDEO_CONTROL_MENU, VIDEO_MENU_NEXT, 3);
@@ -2264,6 +2265,47 @@ static void radio_disconnect(void) {
     assert(!context.video_control.start_guard);
 }
 
+static void policy_contract(void) {
+    configure(); request_next = 0;
+    uint8_t p[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
+    control_command(p, VIDEO_CONTROL_RADIO_POLICY, 0); video_write32(p + 8, UINT32_MAX);
+    assert(!control_response(p, 12, report, VIDEO_RADIO_POLICY_BYTES));
+    assert(video_read32(report + 4) == 1 && video_read32(report + 8) == UINT32_MAX && !video_read32(report + 12));
+    control_command(p, VIDEO_CONTROL_RADIO_POLICY, 0); video_write32(p + 8, 2);
+    assert(control_response(p, 12, report, VIDEO_RADIO_POLICY_BYTES) == VIDEO_CONTROL_FORMAT);
+    control_command(p, VIDEO_CONTROL_RADIO_POLICY, 0); video_write32(p + 8, 0);
+    assert(!control_response(p, 12, report, VIDEO_RADIO_POLICY_BYTES));
+    assert(!control_response(p, 12, report, VIDEO_RADIO_POLICY_BYTES) && !radio_acquires);
+    control_command(p, VIDEO_CONTROL_START, 1);
+    assert(!control_snapshot(p, 24, report)); pool_drain(); await_ready();
+    assert(radio_off && radio_acquires == 1 && (context.video_control.options & VIDEO_RADIO_OFF));
+    control_command(p, VIDEO_CONTROL_RADIO_POLICY, 0); video_write32(p + 8, 1);
+    assert(!control_response(p, 12, report, VIDEO_RADIO_POLICY_BYTES));
+    assert(video_read32(report + 4) == 1 && !video_read32(report + 8) && video_read32(report + 12) == 1);
+    assert(radio_off && radio_acquires == 1 && (context.video_control.options & VIDEO_RADIO_OFF));
+    control_command(p, VIDEO_CONTROL_RESET, 1); assert(!control_snapshot(p, 12, report)); pool_drain(); finish();
+    control_command(p, VIDEO_CONTROL_START, 2); assert(!control_snapshot(p, 24, report)); pool_drain(); await_ready();
+    assert(!radio_off && radio_acquires == 2 && !(context.video_control.options & VIDEO_RADIO_OFF));
+    control_command(p, VIDEO_CONTROL_STOP, 2); assert(!control_snapshot(p, 12, report)); pool_drain(); finish();
+    assert(radio_releases == 2);
+    puts("default/query/invalid/replay policy, pending selection and next generation latch PASS");
+}
+
+static void radio_provenance(void) {
+    for (uint32_t origin = 1; origin <= 2; ++origin) for (uint32_t here = 1; here <= 2; ++here) {
+        configure(); request_next = 0;
+        cfw_message_route route = control_route;
+        route.here = here; route.origin = origin; route.targets = CFW_MESSAGE_BOTH;
+        uint8_t p[VIDEO_START_BYTES]; control_command(p, VIDEO_CONTROL_START, 1);
+        assert(!video_control_received(p, 24, &route)); pool_drain(); await_ready();
+        assert(state() == VIDEO_READY && radio_acquires == 1 && radio_active && radio_off == (here != origin));
+        control_command(p, VIDEO_CONTROL_STOP, 1);
+        assert(!video_control_received(p, 12, &route)); pool_drain(); finish();
+        assert(radio_releases == 1);
+    }
+    puts("both bridge ingress choices and locally delivered owners exclude lease-only peer PHY PASS");
+}
+
 static void radio_contract(void) {
     configure(); request_next = 0;
     uint8_t p[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
@@ -2328,6 +2370,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "handback")) handback();
     else if (!strcmp(argv[1], "radio-disconnect")) radio_disconnect();
     else if (!strcmp(argv[1], "radio-contract")) radio_contract();
+    else if (!strcmp(argv[1], "policy-contract")) policy_contract();
+    else if (!strcmp(argv[1], "radio-provenance")) radio_provenance();
     else assert(0);
     assert(!allocations_live && !task_live && !image_depth);
     printf("worker %s PASS\n", argv[1]);

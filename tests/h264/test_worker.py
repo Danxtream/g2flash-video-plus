@@ -153,6 +153,12 @@ class WorkerTests(unittest.TestCase):
     def test_radio_options_replay_reserved_bits_refusal_and_partial_start_release(self):
         self.check_case("radio-contract")
 
+    def test_policy_selection_does_not_switch_live_and_latches_next_generation(self):
+        self.check_case("policy-contract")
+
+    def test_each_ingress_and_direct_owner_requests_phy_but_wire_peer_does_not(self):
+        self.check_case("radio-provenance")
+
     def test_host_disconnect_posts_without_waiting_and_cancels_only_its_generation(self):
         self.check_case("radio-disconnect")
 

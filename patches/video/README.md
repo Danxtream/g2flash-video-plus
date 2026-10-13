@@ -777,3 +777,20 @@ the bottom48px letterbox, clipped to that band. Menu-only tagged copies retain
 the frozen video and do not change media counts, copy time or SHOWN records.
 Scale is latched on the common frame trigger; retry keeps that frame's scale.
 There is no radio entry, physical-input hook or independent gesture route.
+
+## Selected Radio Policy
+
+Advanced capability bit128 advertises RADIO_POLICY21. A12-byte request contains
+the control header and u32 value:0 Off,1 Video-only,UINT32_MAX query. Video-only
+is the unconfigured default. Its24-byte frozen reply contains version/op/result/
+lens, then selected policy, active policy (UINT32_MAX while stopped), pending,
+wire-fed peer and reserved0. These describe policy, not negotiated PHY speed.
+
+Changing the field while active only selects the next START/seek generation;
+it does not pause, drain, restore or recreate the current owner. Resume is not
+a boundary. Legacy explicit START Off still forces that generation Off. The
+normal retirement path restores every actual owner's original pair unchanged.
+A validated wire-fed peer makes no PHY READ/SET request, even with a bound
+lease-only host; non-changing epoch ownership still tracks host loss and
+grants no2M permission. Locally delivered ingress/direct owners keep read-before-
+set, finite WSF handoff, refusal reporting and all existing exit restoration.
