@@ -198,7 +198,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
                q->slots[(q->head + ready_depth) % q->depth].state == VIDEO_DECODED_READY) ++ready_depth;
         /* Prebuffer two pictures, except an explicitly timed terminal picture.
          * After starvation re-anchor, never run a catch-up presentation burst. */
-        int terminal = available && ctx->video_control.timeline.duration - q->slots[q->head].media.pts <= 63;
+        int terminal = available && ctx->video_control.timeline.duration - q->slots[q->head].media.pts <= VIDEO_PRESENT_PERIOD_CEIL_MS;
         uint32_t ready_pts = available ? q->slots[q->head].media.pts : 0;
         int advertise = 0;
         if (p->paired && available) {
@@ -305,9 +305,9 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         p->done_pts = media.pts;
         /* Copy/decode overrun holds the cadence instead of showing overdue
          * pictures back-to-back. RIGHT paired coordination extends this later. */
-        if ((int32_t)(VIDEO_TICK - deadline) >= 63) {
+        if ((int32_t)(VIDEO_TICK - deadline) >= VIDEO_PRESENT_PERIOD_CEIL_MS) {
             ++p->holds;
-            video_pacing_anchor(&p->pacing, p->generation, ordinal + 1, VIDEO_TICK + 63);
+            video_pacing_anchor(&p->pacing, p->generation, ordinal + 1, VIDEO_TICK + VIDEO_PRESENT_PERIOD_CEIL_MS);
         }
         VIDEO_OS_EVENT_SET(owner->wake, VIDEO_WAKE_INPUT);
         video_control_give(ctx);
