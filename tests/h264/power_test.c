@@ -58,6 +58,9 @@ static video_pool_item pending_bootstrap;
 static int pool(const video_pool_item *item) { assert(item && item->callback); pending_bootstrap = *item; ++schedules; return 1; }
 
 #ifdef POWER_ADAPTER
+static int owner_mode;
+static int *mode_lookup(void *context) { return context ? &owner_mode : 0; }
+#define VIDEO_POWER_MODE_LOOKUP mode_lookup
 static uint32_t allocations, released, fail_alloc, fail_put, queue_puts;
 static void *allocate(uint32_t size) {
     assert(!locks && !service); ++allocations; return allocations == fail_alloc ? 0 : malloc(size);
@@ -118,6 +121,23 @@ int main(void) {
     *(uint32_t *)0x20076770 = 2; *(uint32_t *)0x20076778 = 1;
     assert(!video_power_platform_ready());
     assert(video_power_platform_step() == VIDEO_POWER_STEP_LOCAL_APP);
+    *(void **)0x20076768 = &owner_mode;
+    owner_mode = 0xe0;
+    assert(!video_power_platform_ready()); /* No Faceclaw lease. */
+    for (here = 0; here < 2; ++here) {
+        contexts[here].direct_lease_deadline = now + 1000;
+        assert(video_power_platform_ready());
+        assert(!allocations && !queue_puts && !starts[here]);
+        owner_mode = 2; assert(!video_power_platform_ready()); owner_mode = 0xe0;
+        contexts[here].direct_lease_deadline = now;
+        assert(!video_power_platform_ready());
+        contexts[here].direct_lease_deadline = 0;
+    }
+    here = 0;
+    *(void **)0x20076768 = 0;
+    contexts[0].direct_lease_deadline = now + 1000;
+    assert(!video_power_platform_ready());
+    contexts[0].direct_lease_deadline = 0;
     *(uint32_t *)0x20076770 = 1;
     *(uint8_t *)0x20077298 = 0; assert(!video_power_platform_ready());
     assert(video_power_platform_step() == VIDEO_POWER_STEP_LOCAL_UI);

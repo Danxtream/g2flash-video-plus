@@ -6,6 +6,9 @@
 #pragma clang section text=".text.video"
 
 #ifndef VIDEO_POWER_PLATFORM_READY
+#ifndef VIDEO_POWER_MODE_LOOKUP
+#define VIDEO_POWER_MODE_LOOKUP ((int *(*)(void *))0x004622d7U)
+#endif
 /* UI state is published before INIT reaches the driver. Require both, and
  * never treat a framebuffer copy as evidence that the panel was powered up. */
 /* Shared by the readiness and diagnostic paths. Kept out of line because
@@ -16,7 +19,14 @@ __attribute__((noinline)) static uint32_t video_power_platform_step(void) {
     if (*(const volatile uint32_t *)0x20076784U != 1) return VIDEO_POWER_STEP_LOCAL_DRIVER;
     /* Stock refresh at 0x445c80 reads the active app here when no app is
      * pending. The separate pending-app word at 0x20076778 may be zero. */
-    if (*(const volatile uint32_t *)0x20076770U != 1) return VIDEO_POWER_STEP_LOCAL_APP;
+    if (*(const volatile uint32_t *)0x20076770U != 1) {
+        customCfwContext *ctx = peekCustomCfwContext();
+        /* Match the existing gesture forwarder's leased EvenHub ownership.
+         * It uses the UI mode lookup, not the separate active-app word. */
+        if (!ctx || !video_lease_valid(ctx)) return VIDEO_POWER_STEP_LOCAL_APP;
+        int *mode = VIDEO_POWER_MODE_LOOKUP(*(void *volatile *)0x20076768U);
+        if (!mode || *mode != 0xe0) return VIDEO_POWER_STEP_LOCAL_APP;
+    }
     return VIDEO_POWER_STEP_NONE;
 }
 static int video_power_platform_ready(void) { return video_power_platform_step() == VIDEO_POWER_STEP_NONE; }
