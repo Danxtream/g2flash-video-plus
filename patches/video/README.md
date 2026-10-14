@@ -880,6 +880,12 @@ Rescale is the only mapping. Decoder bytes, evidence CRCs and off margins
 remain unchanged. Retired development command 23 is refused; advanced
 capability byte 7 bit 3 and paired picture wire byte 23 are reserved zeros.
 
+Plain doubled A4 expands each packed pair through a 512-byte immutable
+table, writing both physical rows directly: 30720 lookups for a 320x192
+picture. Borrowed Y8 similarly quantizes each source pixel once for both
+rows. Native packing, already-quantized A4 levels, margins and source/
+destination bounds remain unchanged; neither path needs extra frame RAM.
+
 ## Optional Dithering
 
 Advanced capability byte 7 bit 1 advertises owned Y8 dithering; bit 0 remains

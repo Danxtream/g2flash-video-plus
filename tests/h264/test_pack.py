@@ -41,6 +41,9 @@ class PackTests(unittest.TestCase):
     def test_double_dither_cells_match_scalar_for_every_range_and_row_phase(self):
         subprocess.run([str(self.exe), "cells"], check=True)
 
+    def test_double_plain_cells_match_every_packed_pair_with_odd_geometry_padding_and_guards(self):
+        subprocess.run([str(self.exe), "plain-cells"], check=True)
+
     def test_margins_only_clear_survives_scale_mode_odd_centering_and_old_menu(self):
         subprocess.run([str(self.exe), "margins"], check=True)
 

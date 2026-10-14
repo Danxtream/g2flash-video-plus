@@ -181,6 +181,29 @@ static void mode_changes(void) {
     free(source); free(storage);
 }
 
+static void plain_cells(void) {
+    uint8_t source[16], guarded[VIDEO_PANEL_BYTES + 2];
+    for (uint32_t sample = 0; sample < 256; ++sample) {
+        uint32_t first = (sample >> 4) * 17, second = (sample & 15) * 17;
+        assert(video_plain_cells[sample] == (first << 8 | second));
+        for (uint32_t height = 1; height <= 3; ++height) for (uint32_t tv = 0; tv < 2; ++tv) {
+            memset(source, sample, sizeof(source));
+            memset(guarded, 0xcd, sizeof(guarded));
+            uint8_t *shadow = guarded + 1; /* Also permit unaligned destinations. */
+            video_frame_descriptor frame = {1, 1, 1, 4, height, 3, sizeof(source),
+                VIDEO_SOURCE_A4 | (tv ? VIDEO_SOURCE_TV : 0), VIDEO_SCALE_DOUBLE, source};
+            assert(video_pack_frame(shadow, VIDEO_PANEL_BYTES, &frame));
+            uint32_t y = 240 - height;
+            for (uint32_t row = 0; row < 2 * height; ++row) {
+                uint8_t *out = shadow + (y + row) * VIDEO_PANEL_STRIDE;
+                assert(out[158] == first && out[159] == second && out[160] == first && out[161] == second);
+                assert(!out[157] && !out[162]);
+            }
+            assert(guarded[0] == 0xcd && guarded[VIDEO_PANEL_BYTES + 1] == 0xcd);
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (!strcmp(argv[1], "pixels")) {
@@ -205,6 +228,7 @@ int main(int argc, char **argv) {
         for (uint32_t y = 0; y < 256; ++y)
             printf("%u %u %u\n", y, video_gray_level(y, 0), video_gray_level(y, 1));
     } else if (!strcmp(argv[1], "margins")) mode_changes();
+    else if (!strcmp(argv[1], "plain-cells")) plain_cells();
     else if (!strcmp(argv[1], "cells")) dither_cells();
     else if (!strcmp(argv[1], "dither")) dithered();
     else if (!strcmp(argv[1], "reject")) rejected();

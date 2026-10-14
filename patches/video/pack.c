@@ -2,6 +2,7 @@
 #include "present.h"
 #include "brightness.h"
 #include "dither_cells.h"
+#include "plain_cells.h"
 #include <stddef.h>
 
 #pragma clang section text=".text.video.pack"
@@ -86,16 +87,18 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
             }
         } else {
             if (type == VIDEO_SOURCE_Y8) {
-                for (uint32_t col = 0; col < frame->width; ++col)
-                    out[col] = (uint8_t)(video_gray_level(in[col], tv) * 0x11);
+                for (uint32_t col = 0; col < frame->width; ++col) {
+                    uint8_t doubled = (uint8_t)(video_gray_level(in[col], tv) * 0x11);
+                    out[col] = out[VIDEO_PANEL_STRIDE + col] = doubled;
+                }
             } else {
+                /* One packed pair expands directly into both physical rows. */
                 for (uint32_t col = 0; col < row_bytes; ++col) {
-                    out[col * 2] = (uint8_t)((in[col] >> 4) * 0x11);
-                    out[col * 2 + 1] = (uint8_t)((in[col] & 15) * 0x11);
+                    uint16_t cell = video_plain_cells[in[col]];
+                    out[col * 2] = out[VIDEO_PANEL_STRIDE + col * 2] = cell >> 8;
+                    out[col * 2 + 1] = out[VIDEO_PANEL_STRIDE + col * 2 + 1] = cell;
                 }
             }
-            for (uint32_t col = 0; col < frame->width; ++col)
-                out[VIDEO_PANEL_STRIDE + col] = out[col];
         }
     }
     return 1;
