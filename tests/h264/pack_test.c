@@ -11,7 +11,6 @@ static uint8_t brightness(uint32_t x, uint32_t y) {
 static void check_pixels(uint32_t format, uint32_t scale, uint32_t width, uint32_t height) {
     uint32_t type = format & VIDEO_SOURCE_TYPE_MASK;
     int tv = (format & VIDEO_SOURCE_TV) != 0;
-    int raw = (format & VIDEO_SOURCE_RAW_GRAY) != 0;
     uint32_t stride = (type == VIDEO_SOURCE_Y8 ? width : width / 2) + 17;
     uint32_t bytes = stride * height;
     uint8_t *source = malloc(bytes), *storage = malloc(VIDEO_PANEL_BYTES + 64);
@@ -22,8 +21,8 @@ static void check_pixels(uint32_t format, uint32_t scale, uint32_t width, uint32
             for (uint32_t x = 0; x < width; ++x) source[y * stride + x] = brightness(x, y);
         } else {
             for (uint32_t x = 0; x < width; x += 2)
-                source[y * stride + x / 2] = (video_gray_curve(brightness(x, y), tv, raw) << 4) |
-                                             video_gray_curve(brightness(x + 1, y), tv, raw);
+                source[y * stride + x / 2] = (video_gray_level(brightness(x, y), tv) << 4) |
+                                             video_gray_level(brightness(x + 1, y), tv);
         }
     }
     video_frame_descriptor frame = {3, 9, 17, width, height, stride, bytes, format, scale, source};
@@ -36,7 +35,7 @@ static void check_pixels(uint32_t format, uint32_t scale, uint32_t width, uint32
             actual = x % 2 ? actual & 15 : actual >> 4;
             uint8_t expected = x >= ox && x < ox + width * scale &&
                 y >= oy && y < oy + height * scale ?
-                video_gray_curve(brightness((x - ox) / scale, (y - oy) / scale), tv, raw) : 0;
+                video_gray_level(brightness((x - ox) / scale, (y - oy) / scale), tv) : 0;
             assert(actual == expected);
         }
     for (uint32_t i = 0; i < 32; ++i)
@@ -48,7 +47,7 @@ static void rejected(void) {
     assert(shadow && source); memset(shadow, 0xaa, VIDEO_PANEL_BYTES);
     video_frame_descriptor valid = {1, 1, 1, 320, 192, 320, 320 * 192,
                                     VIDEO_SOURCE_Y8, VIDEO_SCALE_DOUBLE, source};
-    for (uint32_t variant = 0; variant < 15; ++variant) {
+    for (uint32_t variant = 0; variant < 16; ++variant) {
         video_frame_descriptor f = valid;
         switch (variant) {
             case 0: f.width = 0; break;
@@ -66,6 +65,7 @@ static void rejected(void) {
             case 12: f.format |= VIDEO_SOURCE_UNSIGNALLED; break;
             case 13: f.format = VIDEO_SOURCE_MENU; break;
             case 14: f.format = VIDEO_SOURCE_A4 | VIDEO_SOURCE_DITHER; break;
+            case 15: f.format |= 32; break; /* Retired development curve bit. */
         }
         assert(!video_pack_frame(shadow, VIDEO_PANEL_BYTES, &f));
     }
@@ -80,24 +80,22 @@ static void dithered(void) {
     const uint32_t threshold[2][2] = {{0, 2}, {3, 1}};
     for (uint32_t sample = 0; sample < 256; ++sample) {
         assert(video_quarter[sample] == 4 + (sample * 56 + 127) / 255);
-        for (uint32_t tv = 0; tv <= 1; ++tv) for (uint32_t raw = 0; raw <= 1; ++raw) {
-            uint32_t full = tv && !raw ? video_tv_full[sample] : sample;
+        for (uint32_t tv = 0; tv <= 1; ++tv) {
+            uint32_t full = tv ? video_tv_full[sample] : sample;
             uint32_t t = 4 + (full * 56 + 127) / 255, sum = 0;
             for (uint32_t y = 0; y < 2; ++y) for (uint32_t x = 0; x < 2; ++x) {
                 uint32_t expected = (t >> 2) + ((t & 3) > threshold[y][x]);
                 if (!expected) expected = 1;
-                assert(video_dither_curve(sample, tv, raw, x, y) == expected);
+                assert(video_dither_level(sample, tv, x, y) == expected);
                 sum += expected;
             }
             assert(sum == (t < 4 ? 4 : t));
         }
     }
-    for (uint32_t scale = 1; scale <= 2; ++scale) for (uint32_t tv = 0; tv <= 1; ++tv)
-        for (uint32_t raw = 0; raw <= 1; ++raw) {
+    for (uint32_t scale = 1; scale <= 2; ++scale) for (uint32_t tv = 0; tv <= 1; ++tv) {
         for (uint32_t i = 0; i < sizeof(source); ++i) source[i] = i;
         video_frame_descriptor f = {1, 1, 1, 320, 192, 320, sizeof(source),
-            VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER | (tv ? VIDEO_SOURCE_TV : 0) |
-                (raw ? VIDEO_SOURCE_RAW_GRAY : 0), scale, source};
+            VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER | (tv ? VIDEO_SOURCE_TV : 0), scale, source};
         assert(video_pack_frame(shadow, sizeof(shadow), &f));
         uint32_t ox = (640 - 320 * scale) / 2, oy = (480 - 192 * scale) / 2;
         for (uint32_t y = 0; y < 480; ++y) for (uint32_t x = 0; x < 640; ++x) {
@@ -105,7 +103,7 @@ static void dithered(void) {
             uint32_t expected = 0;
             if (x >= ox && x < ox + 320 * scale && y >= oy && y < oy + 192 * scale) {
                 uint32_t full = source[((y - oy) / scale) * 320 + (x - ox) / scale];
-                if (tv && !raw) full = video_tv_full[full];
+                if (tv) full = video_tv_full[full];
                 uint32_t t = 4 + (full * 56 + 127) / 255;
                 expected = (t >> 2) + ((t & 3) > threshold[y & 1][x & 1]);
                 if (!expected) expected = 1;
@@ -116,17 +114,16 @@ static void dithered(void) {
 }
 static void dither_cells(void) {
     uint8_t source[8], shadow[VIDEO_PANEL_BYTES];
-    for (uint32_t tv = 0; tv <= 1; ++tv) for (uint32_t raw = 0; raw <= 1; ++raw)
+    for (uint32_t tv = 0; tv <= 1; ++tv)
         for (uint32_t phase = 0; phase < 2; ++phase) for (uint32_t sample = 0; sample < 256; ++sample) {
             uint16_t expected = 0;
             for (uint32_t row = 0; row < 2; ++row) for (uint32_t x = 0; x < 2; ++x)
-                expected = (expected << 4) | video_dither_curve(sample, tv, raw, x, phase + row);
-            assert(video_dither_cells[tv && !raw][phase][sample] == expected);
+                expected = (expected << 4) | video_dither_level(sample, tv, x, phase + row);
+            assert(video_dither_cells[tv][phase][sample] == expected);
             memset(source, sample, sizeof(source));
             uint32_t height = phase ? 1 : 2;
             video_frame_descriptor f = {1, 1, 1, 4, height, 4, sizeof(source),
-                VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER | (tv ? VIDEO_SOURCE_TV : 0) |
-                    (raw ? VIDEO_SOURCE_RAW_GRAY : 0), VIDEO_SCALE_DOUBLE, source};
+                VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER | (tv ? VIDEO_SOURCE_TV : 0), VIDEO_SCALE_DOUBLE, source};
             assert(video_pack_frame(shadow, sizeof(shadow), &f));
             uint32_t y = 240 - height;
             for (uint32_t row = 0; row < height * 2; ++row) for (uint32_t col = 0; col < 4; ++col)
@@ -142,16 +139,15 @@ static void mode_changes(void) {
     memset(storage, 0xa5, VIDEO_PANEL_BYTES + 64);
     uint8_t *shadow = storage + 32;
     const uint32_t geometry[6][3] = {{320,192,2},{320,192,1},{4,1,1},{4,2,2},{640,384,1},{320,191,2}};
-    for (uint32_t raw = 0; raw <= 1; ++raw)
-        for (uint32_t tv = 0; tv <= 1; ++tv) for (uint32_t type = 1; type <= 3; ++type)
+    for (uint32_t tv = 0; tv <= 1; ++tv) for (uint32_t type = 1; type <= 3; ++type)
             for (uint32_t mode = 0; mode < 6; ++mode) {
                 uint32_t width = geometry[mode][0], height = geometry[mode][1], scale = geometry[mode][2];
                 uint32_t sample = (mode * 37 + type * 17) & 255;
-                uint32_t f = tv && !raw ? (sample <= 16 ? 0 : sample >= 235 ? 255 :
+                uint32_t f = tv ? (sample <= 16 ? 0 : sample >= 235 ? 255 :
                     ((sample - 16) * 255 + 109) / 219) : sample;
-                uint32_t level = raw ? (sample < 16 ? 1 : sample >> 4) : (16 + (f * 239 + 127) / 255) >> 4;
+                uint32_t level = (16 + (f * 239 + 127) / 255) >> 4;
                 uint32_t format = (type == 2 ? VIDEO_SOURCE_A4 : VIDEO_SOURCE_Y8) |
-                    (tv ? VIDEO_SOURCE_TV : 0) | (raw ? VIDEO_SOURCE_RAW_GRAY : 0) |
+                    (tv ? VIDEO_SOURCE_TV : 0) |
                     (type == 3 ? VIDEO_SOURCE_DITHER : 0);
                 uint32_t stride = type == 2 ? width / 2 : width;
                 memset(source, type == 2 ? level * 17 : sample, 640 * 384);
@@ -191,20 +187,15 @@ int main(int argc, char **argv) {
             assert(video_tv_full[y] == expected);
             assert(video_gray_level(y, 0) == ((16 + (y * 239 + 127) / 255) >> 4));
             assert(video_gray_level(y, 1) == ((16 + (expected * 239 + 127) / 255) >> 4));
-            assert(video_gray_curve(y, 0, 1) == (y < 16 ? 1 : y >> 4));
-            assert(video_gray_curve(y, 1, 1) == (y < 16 ? 1 : y >> 4));
         }
         for (uint32_t type = VIDEO_SOURCE_Y8; type <= VIDEO_SOURCE_A4; ++type)
             for (uint32_t scale = 1; scale <= 2; ++scale) {
                 check_pixels(type | VIDEO_SOURCE_TV, scale, 320, 192);
                 check_pixels(type | VIDEO_SOURCE_TV | VIDEO_SOURCE_UNSIGNALLED, scale, 320, 192);
-                check_pixels(type | VIDEO_SOURCE_RAW_GRAY, scale, 320, 192);
-                check_pixels(type | VIDEO_SOURCE_TV | VIDEO_SOURCE_RAW_GRAY, scale, 320, 192);
             }
     } else if (!strcmp(argv[1], "dump-gray")) {
         for (uint32_t y = 0; y < 256; ++y)
-            printf("%u %u %u %u %u\n", y, video_gray_curve(y, 0, 0), video_gray_curve(y, 1, 0),
-                   video_gray_curve(y, 0, 1), video_gray_curve(y, 1, 1));
+            printf("%u %u %u\n", y, video_gray_level(y, 0), video_gray_level(y, 1));
     } else if (!strcmp(argv[1], "margins")) mode_changes();
     else if (!strcmp(argv[1], "cells")) dither_cells();
     else if (!strcmp(argv[1], "dither")) dithered();

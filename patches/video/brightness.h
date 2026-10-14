@@ -22,7 +22,7 @@ static const uint8_t video_tv_full[256] = {
     255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
 };
 
-/* Development curves share visible endpoints, without changing decoded Y. */
+/* Rescale into the visible panel range without changing decoded Y. */
 static const uint8_t video_rescale[256] = {
     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
     1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
@@ -62,23 +62,13 @@ static const uint8_t video_quarter[256] = {
     57, 57, 57, 57, 58, 58, 58, 58, 58, 59, 59, 59, 59, 60, 60, 60,
 };
 
-/* Raw mode deliberately uses decoded Y even when its SPS signals TV range. */
-static inline uint8_t video_gray_curve(uint8_t y, int tv, int raw) {
-    if (raw) return y < 16 ? 1 : y >> 4;
+static inline uint8_t video_gray_level(uint8_t y, int tv) {
     return video_rescale[tv ? video_tv_full[y] : y];
 }
 
-static inline uint8_t video_gray_level(uint8_t y, int tv) {
-    return video_gray_curve(y, tv, 0);
-}
-
 /* Anchor the Bayer phase to final physical panel coordinates. */
-static inline uint8_t video_dither_curve(uint8_t y, int tv, int raw, uint32_t x, uint32_t row) {
-    uint32_t t = video_quarter[tv && !raw ? video_tv_full[y] : y];
+static inline uint8_t video_dither_level(uint8_t y, int tv, uint32_t x, uint32_t row) {
+    uint32_t t = video_quarter[tv ? video_tv_full[y] : y];
     uint32_t threshold = (row & 1) ? ((x & 1) ? 1 : 3) : ((x & 1) ? 2 : 0);
     return (t >> 2) + ((t & 3) > threshold);
-}
-
-static inline uint8_t video_dither_level(uint8_t y, int tv, uint32_t x, uint32_t row) {
-    return video_dither_curve(y, tv, 0, x, row);
 }

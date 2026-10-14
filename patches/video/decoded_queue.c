@@ -11,7 +11,7 @@ int video_decoded_init(video_decoded_queue *q, uint32_t generation, uint32_t tok
                     type == VIDEO_SOURCE_Y8 ? VIDEO_DECODED_Y8_BYTES : 0;
     if (!q || !generation || !token || !pixels || !slot || !depth ||
         depth > VIDEO_DECODED_DEPTH || bytes < depth * slot ||
-        (format & ~(VIDEO_SOURCE_TYPE_MASK | VIDEO_SOURCE_DITHER | VIDEO_SOURCE_RAW_GRAY)) ||
+        (format & ~(VIDEO_SOURCE_TYPE_MASK | VIDEO_SOURCE_DITHER)) ||
         ((format & VIDEO_SOURCE_DITHER) && type != VIDEO_SOURCE_Y8)) return 0;
     *q = (video_decoded_queue){.generation = generation, .token = token,
                                 .format = format, .depth = depth, .slot_bytes = slot};
@@ -72,8 +72,8 @@ int video_decoded_copy_range(video_decoded_queue *q, uint32_t generation, uint32
         uint8_t *dst = slot->pixels + row * ((q->format & VIDEO_SOURCE_TYPE_MASK) == VIDEO_SOURCE_A4 ? 160 : 320);
         if ((q->format & VIDEO_SOURCE_TYPE_MASK) == VIDEO_SOURCE_A4) {
             for (uint32_t col = 0; col < 160; ++col)
-                dst[col] = (video_gray_curve(src[2 * col], range & VIDEO_SOURCE_TV, q->format & VIDEO_SOURCE_RAW_GRAY) << 4) |
-                            video_gray_curve(src[2 * col + 1], range & VIDEO_SOURCE_TV, q->format & VIDEO_SOURCE_RAW_GRAY);
+                dst[col] = (video_gray_level(src[2 * col], range & VIDEO_SOURCE_TV) << 4) |
+                            video_gray_level(src[2 * col + 1], range & VIDEO_SOURCE_TV);
         } else {
             for (uint32_t col = 0; col < 320; ++col) dst[col] = src[col];
         }

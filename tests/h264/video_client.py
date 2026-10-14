@@ -25,7 +25,6 @@ PAUSE, RESUME, PLAYBACK = 16, 17, 18
 MENU, SCALE = 19, 20
 RADIO_POLICY = 21
 TRIGGER_TIMING = 22
-GRAY_CURVE = 23
 MENU_ACTIONS = {'open': 0, 'close': 1, 'next': 2, 'previous': 3, 'apply': 4, 'query': 5}
 RADIO_OFF = 2
 BASE_STATUS_BYTES, STATUS_BYTES, FRAME_BYTES, ACK_BYTES = 128, 192, 80, 16
@@ -217,18 +216,6 @@ def radio_policy_state(raw):
     return dict(result=raw[2], lens=raw[3], selected=selected, active=None if active == 0xffffffff else active,
                 pending=bool(pending), wire_fed=bool(wire))
 
-def gray_curve_state(raw):
-    """Read the selected and latched development gray curve without a live switch."""
-    if len(raw) != 24 or raw[:2] != bytes((VERSION, GRAY_CURVE)) or raw[3] not in (1, 2):
-        raise ValueError('invalid gray curve header')
-    selected, active, pending, reserved, extra = struct.unpack_from('<5I', raw, 4)
-    if not raw[2] and (selected > 1 or active not in (0, 1, 0xffffffff) or pending > 1 or
-            reserved or extra or bool(pending) != (active != 0xffffffff and active != selected)):
-        raise ValueError('invalid selected or latched gray curve')
-    return dict(result=raw[2], lens=raw[3], selected=selected,
-                active=None if active == 0xffffffff else active, pending=bool(pending))
-
-
 class VideoClient(VideoLink):
     def playback_capabilities(self):
         """Query explicit queued support without enabling playback."""
@@ -242,7 +229,7 @@ class VideoClient(VideoLink):
                     (not raw[3] & 32 and raw[6:8] != bytes((0, 0)))):
                 raise ValueError('unsupported queued playback capability')
         self.shown_bytes = {lens: 72 if raw[7] & 4 else 64 for lens, raw in replies.items()}
-        return {lens: dict(profiling=bool(raw[7] & 16), gray_curve=bool(raw[7] & 8), trigger_timing=bool(raw[7] & 4), dither=bool(raw[7] & 2), policy=bool(raw[3] & 128), menu=bool(raw[3] & 64), seek=bool(raw[3] & 32), max_preroll=raw[6], controls=bool(raw[3] & 16), shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
+        return {lens: dict(profiling=bool(raw[7] & 16), trigger_timing=bool(raw[7] & 4), dither=bool(raw[7] & 2), policy=bool(raw[3] & 128), menu=bool(raw[3] & 64), seek=bool(raw[3] & 32), max_preroll=raw[6], controls=bool(raw[3] & 16), shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
                            stack_bytes=struct.unpack_from('<I', raw, 12)[0]) for lens, raw in replies.items()}
 
     def configure_timeline(self, stream, duration_ms, start_pts_ms=0):
@@ -342,17 +329,6 @@ class VideoClient(VideoLink):
         replies = {lens: radio_policy_state(raw) for lens, raw in self.raw_replies(payload, 24).items()}
         if any(row['lens'] != lens for lens, row in replies.items()):
             raise ValueError('radio policy source differs from its lens')
-        return replies
-
-    def gray_curve(self, mode=None):
-        """Select a development curve for the next START/seek; query by default."""
-        if mode not in (None, 'rescale', 'raw'):
-            raise ValueError('gray curve must be rescale or raw')
-        payload = struct.pack('<BBBBII', MESSAGE, GRAY_CURVE, VERSION, 0, self.counter.reserve(),
-                              0xffffffff if mode is None else int(mode == 'raw'))
-        replies = {lens: gray_curve_state(raw) for lens, raw in self.raw_replies(payload, 24).items()}
-        if any(row['lens'] != lens for lens, row in replies.items()):
-            raise ValueError('gray curve source differs from its lens')
         return replies
 
     """Forwarded paired delivery and bounded frozen replies on a supplied link."""
@@ -506,9 +482,6 @@ class DirectPairClient:
 
     def radio_policy(self, mode=None):
         return {side: client.radio_policy(mode)[side] for side, client in self.clients.items()}
-
-    def gray_curve(self, mode=None):
-        return {side: client.gray_curve(mode)[side] for side, client in self.clients.items()}
 
 
     def send_window(self, payloads):

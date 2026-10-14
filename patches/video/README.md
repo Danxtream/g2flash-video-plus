@@ -876,17 +876,9 @@ and unsignalled TV respectively; decoded Y and evidence CRCs remain unchanged.
 The rescale curve uses f=TV?normalize(Y):Y, then
 level=(16+(f*239+127)/255)>>4. The immutable normalization table clamps
 Y<=16 to 0 and Y>=235 to 255. A level table avoids hot-path division.
-The alternative decoded-luma curve uses max(1,Y>>4) regardless of the SPS
-range flag. Neither curve changes decoder bytes, evidence CRCs or margins.
-
-Advanced capability byte 7 bit 3 advertises development GRAY_CURVE 23.
-A 12-byte request carries the usual header then selected 0=rescale (default),
-1=decoded-luma, or UINT32_MAX=query. Its frozen 24-byte response contains
-version/op/result/lens followed by selected, active(UINT32_MAX while idle),
-pending, and two reserved zeros. It latches at START or fresh seek, never
-switches live and is not a glasses-menu or public settings entry. Old images
-do not advertise it. Paired picture wire byte 23 binds the latched curve;
-mixed curves refuse rather than present inconsistent pictures.
+Rescale is the only mapping. Decoder bytes, evidence CRCs and off margins
+remain unchanged. Retired development command 23 is refused; advanced
+capability byte 7 bit 3 and paired picture wire byte 23 are reserved zeros.
 
 ## Optional Dithering
 
@@ -899,8 +891,7 @@ presenter cap (A4 cap 77824). Heap reserves, decoder cap and cache ownership
 are unchanged. Refusal is explicit; no automatic depth or representation change.
 
 The immutable quarter-level table uses t=4+(f*56+127)/255, linear between
-visible endpoints 1 and 15. Rescale normalizes TV luma before that lookup;
-the decoded-luma curve uses raw Y and deliberately ignores the range flag.
+visible endpoints 1 and 15. TV luma is normalized before that lookup.
 Final panel coordinates choose the 2x2 thresholds [0,2;3,1], base=t>>2
 and exactly t&3 one-level promotions. Cell sums remain t and each output
 is monotonic in Y. Picture margins remain off. Both physical rows

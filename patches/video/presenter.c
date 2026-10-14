@@ -359,8 +359,7 @@ static int video_presenter_prepare(video_owner *owner) {
         VIDEO_PRESENTER_STACK_BYTES + 2 * VIDEO_STACK_GUARD_BYTES);
     if (!p->pixels || !p->stack_allocation ||
         !video_decoded_init(&p->queue, p->generation, p->token,
-                            (dither ? VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER : VIDEO_SOURCE_A4) |
-                                (owner->context->video_control.options & VIDEO_GRAY_ACTIVE_RAW ? VIDEO_SOURCE_RAW_GRAY : 0),
+                            dither ? VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER : VIDEO_SOURCE_A4,
                             VIDEO_DECODED_DEPTH, p->pixels, pixels_bytes) ||
         !video_decoded_skip_prefix(&p->queue, p->generation, p->preroll)) return 0;
     uint8_t *base = p->stack_allocation;

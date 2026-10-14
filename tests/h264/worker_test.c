@@ -2442,26 +2442,23 @@ static void policy_contract(void) {
 static void gray_contract(void) {
     configure(); request_next = 0;
     uint8_t p[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
-    control_command(p, VIDEO_CONTROL_GRAY_CURVE, 0); video_write32(p + 8, UINT32_MAX);
-    assert(!control_response(p, 12, report, VIDEO_GRAY_CURVE_BYTES));
-    assert(!video_read32(report + 4) && video_read32(report + 8) == UINT32_MAX);
-    control_command(p, VIDEO_CONTROL_GRAY_CURVE, 0); video_write32(p + 8, 2);
-    assert(control_response(p, 12, report, VIDEO_GRAY_CURVE_BYTES) == VIDEO_CONTROL_FORMAT);
-    control_command(p, VIDEO_CONTROL_GRAY_CURVE, 0); video_write32(p + 8, 1);
-    assert(!control_response(p, 12, report, VIDEO_GRAY_CURVE_BYTES));
-    assert(!control_response(p, 12, report, VIDEO_GRAY_CURVE_BYTES));
+    enum { RETIRED_GRAY_CONTROL = 23 };
+    const uint32_t selections[] = {0, 1, UINT32_MAX};
+    for (uint32_t i = 0; i < 3; ++i) {
+        control_command(p, RETIRED_GRAY_CONTROL, 0); video_write32(p + 8, selections[i]);
+        assert(control_snapshot(p, 12, report) == VIDEO_CONTROL_FORMAT);
+        assert(control_snapshot(p, 12, report) == VIDEO_CONTROL_FORMAT);
+        assert(!context.video_control.options && !context.video_control.stream_high);
+    }
+    control_command(p, 13, 0);
+    assert(!control_response(p, 8, report, 16) && !(report[7] & 8));
     control_command(p, VIDEO_CONTROL_START, 1);
     assert(!control_snapshot(p, 24, report)); pool_drain(); await_ready();
-    assert(context.video_control.options & VIDEO_GRAY_ACTIVE_RAW);
-    control_command(p, VIDEO_CONTROL_GRAY_CURVE, 0); video_write32(p + 8, 0);
-    assert(!control_response(p, 12, report, VIDEO_GRAY_CURVE_BYTES));
-    assert(!video_read32(report + 4) && video_read32(report + 8) == 1 && video_read32(report + 12));
-    assert(context.video_control.options & VIDEO_GRAY_ACTIVE_RAW);
-    control_command(p, VIDEO_CONTROL_RESET, 1); assert(!control_snapshot(p, 12, report)); pool_drain(); finish();
-    control_command(p, VIDEO_CONTROL_START, 2); assert(!control_snapshot(p, 24, report)); pool_drain(); await_ready();
-    assert(!(context.video_control.options & VIDEO_GRAY_ACTIVE_RAW));
-    control_command(p, VIDEO_CONTROL_STOP, 2); assert(!control_snapshot(p, 12, report)); pool_drain(); finish();
-    puts("gray development default/query/invalid/replay/pending/reset/fresh latch PASS");
+    control_command(p, RETIRED_GRAY_CONTROL, 0); video_write32(p + 8, 1);
+    assert(control_snapshot(p, 12, report) == VIDEO_CONTROL_FORMAT);
+    assert(!context.video_control.options && context.video_control.stream == 1);
+    control_command(p, VIDEO_CONTROL_STOP, 1); assert(!control_snapshot(p, 12, report)); pool_drain(); finish();
+    puts("retired gray selections/query/replay refused; capability reserved; playback unchanged PASS");
 }
 
 static void radio_provenance(void) {

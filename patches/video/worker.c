@@ -206,8 +206,7 @@ static int video_worker_consume(video_owner *owner) {
             owner->queue.pictures, frame.width, frame.height, frame.stride,
             frame.stride * frame.height, VIDEO_SOURCE_Y8 |
                 (frame.range_flags & G2_H264_RANGE_FULL ? 0u : VIDEO_SOURCE_TV) |
-                (frame.range_flags & G2_H264_RANGE_SIGNALLED ? 0u : VIDEO_SOURCE_UNSIGNALLED) |
-                (ctx->video_control.options & VIDEO_GRAY_ACTIVE_RAW ? VIDEO_SOURCE_RAW_GRAY : 0u),
+                (frame.range_flags & G2_H264_RANGE_SIGNALLED ? 0u : VIDEO_SOURCE_UNSIGNALLED),
             ctx->video_control.options & VIDEO_PRESENT_NATIVE ? VIDEO_SCALE_NATIVE : VIDEO_SCALE_DOUBLE,
             frame.y};
         int presented = owner->presenter ? video_presenter_produce(owner, &descriptor, view.sequence) :
