@@ -890,8 +890,10 @@ on admits two 61440-byte original Y8 snapshots under a separate 139264-byte
 presenter cap (A4 cap 77824). Heap reserves, decoder cap and cache ownership
 are unchanged. Refusal is explicit; no automatic depth or representation change.
 
-The immutable quarter-level table uses t=4+(f*56+127)/255, linear between
-visible endpoints 1 and 15. TV luma is normalized before that lookup.
+The immutable quarter-level table uses t=clamp((f*239+510)/1020+2,4,60),
+with integer division, centered half a level below the continuous rescale.
+This follows the truncated plain mapping within half a level per cell
+average, retaining exact endpoints 1 and 15. TV luma is normalized first.
 Final panel coordinates choose the 2x2 thresholds [0,2;3,1], base=t>>2
 and exactly t&3 one-level promotions. Cell sums remain t and each output
 is monotonic in Y. Picture margins remain off. Both physical rows

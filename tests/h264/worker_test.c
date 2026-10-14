@@ -2178,11 +2178,13 @@ static void display_pump(void) {
                 if (context.video_presentation.ordinal || y < 432) {
                     uint32_t gray = 0x88;
                     if (context.video_control.options & VIDEO_DITHER_PRESENTATION) {
-                        /* Synthetic Y128 is unsignalled TV: normalized130 gives
-                         * rescaled quarter-level33, with one Bayer promotion. */
+                        /* Synthetic unsignalled TV Y128 normalizes to130. The
+                         * centered rescale yields quarter32, with no promotion. */
                         const uint32_t threshold[2][2] = {{0, 2}, {3, 1}};
-                        gray = ((8 + (1 > threshold[y & 1][(x * 2) & 1])) << 4) |
-                               (8 + (1 > threshold[y & 1][(x * 2 + 1) & 1]));
+                        uint32_t t = (130 * 239 + 510) / 1020 + 2;
+                        assert(t == 32);
+                        gray = (((t >> 2) + ((t & 3) > threshold[y & 1][(x * 2) & 1])) << 4) |
+                               ((t >> 2) + ((t & 3) > threshold[y & 1][(x * 2 + 1) & 1]));
                     }
                     assert(physical_frame[y * VIDEO_PANEL_STRIDE + x] ==
                         ((native ? y >= 144 && y < 336 && x >= 80 && x < 240 : y >= 48 && y < 432) ? gray : 0));

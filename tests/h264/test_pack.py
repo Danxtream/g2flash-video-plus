@@ -35,6 +35,9 @@ class PackTests(unittest.TestCase):
     def test_dither_quarter_levels_and_final_panel_phase_native_and_double(self):
         subprocess.run([str(self.exe), "dither"], check=True)
 
+    def test_dither_average_tracks_plain_with_monotonic_pixels_and_exact_endpoints(self):
+        subprocess.run([str(self.exe), "dither"], check=True)
+
     def test_double_dither_cells_match_scalar_for_every_range_and_row_phase(self):
         subprocess.run([str(self.exe), "cells"], check=True)
 

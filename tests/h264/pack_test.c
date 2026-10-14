@@ -75,21 +75,29 @@ static void rejected(void) {
     for (uint32_t i = 0; i < VIDEO_PANEL_BYTES; ++i) assert(shadow[i] == 0xaa);
     free(source); free(shadow);
 }
+static uint32_t expected_quarter(uint32_t full) {
+    uint32_t t = (full * 239 + 510) / 1020 + 2;
+    return t < 4 ? 4 : t > 60 ? 60 : t;
+}
 static void dithered(void) {
     uint8_t source[320 * 192], shadow[VIDEO_PANEL_BYTES];
     const uint32_t threshold[2][2] = {{0, 2}, {3, 1}};
     for (uint32_t sample = 0; sample < 256; ++sample) {
-        assert(video_quarter[sample] == 4 + (sample * 56 + 127) / 255);
+        assert(video_quarter[sample] == expected_quarter(sample));
         for (uint32_t tv = 0; tv <= 1; ++tv) {
             uint32_t full = tv ? video_tv_full[sample] : sample;
-            uint32_t t = 4 + (full * 56 + 127) / 255, sum = 0;
+            uint32_t t = expected_quarter(full), sum = 0;
             for (uint32_t y = 0; y < 2; ++y) for (uint32_t x = 0; x < 2; ++x) {
                 uint32_t expected = (t >> 2) + ((t & 3) > threshold[y][x]);
                 if (!expected) expected = 1;
                 assert(video_dither_level(sample, tv, x, y) == expected);
+                if (sample) assert(expected >= video_dither_level(sample - 1, tv, x, y));
+                if (!full || full == 255) assert(expected == (!full ? 1 : 15));
                 sum += expected;
             }
-            assert(sum == (t < 4 ? 4 : t));
+            assert(sum == t);
+            uint32_t plain = (16 + (full * 239 + 127) / 255) >> 4;
+            assert(sum + 2 >= plain * 4 && sum <= plain * 4 + 2);
         }
     }
     for (uint32_t scale = 1; scale <= 2; ++scale) for (uint32_t tv = 0; tv <= 1; ++tv) {
@@ -104,7 +112,7 @@ static void dithered(void) {
             if (x >= ox && x < ox + 320 * scale && y >= oy && y < oy + 192 * scale) {
                 uint32_t full = source[((y - oy) / scale) * 320 + (x - ox) / scale];
                 if (tv) full = video_tv_full[full];
-                uint32_t t = 4 + (full * 56 + 127) / 255;
+                uint32_t t = expected_quarter(full);
                 expected = (t >> 2) + ((t & 3) > threshold[y & 1][x & 1]);
                 if (!expected) expected = 1;
             }
@@ -158,7 +166,7 @@ static void mode_changes(void) {
                 assert(video_pack_frame(shadow, VIDEO_PANEL_BYTES, &frame));
                 uint32_t ox = (640 - width * scale) / 2, oy = (480 - height * scale) / 2;
                 const uint32_t thresholds[2][2] = {{0,2},{3,1}};
-                uint32_t t = 4 + (f * 56 + 127) / 255;
+                uint32_t t = expected_quarter(f);
                 for (uint32_t y = 0; y < 480; ++y) for (uint32_t x = 0; x < 640; ++x) {
                     uint32_t expected = 0;
                     if (x >= ox && x < ox + width * scale && y >= oy && y < oy + height * scale)
