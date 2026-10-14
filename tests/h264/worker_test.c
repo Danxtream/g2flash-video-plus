@@ -367,6 +367,7 @@ static int test_menu_text(uint8_t *shadow, const uint8_t *text, uint32_t bytes, 
     assert(picture_thread && image_depth && display_gate && bytes == 6u + text[5] && rectangles);
     uint32_t x = text[0] | (uint32_t)text[1] << 8, y = text[2] | (uint32_t)text[3] << 8;
     assert(x < VIDEO_PANEL_WIDTH && y < VIDEO_MENU_HEIGHT && text[5] < 34);
+    assert(text[4] == VIDEO_MENU_TEXT_LEVEL);
     shadow[y * VIDEO_PANEL_STRIDE + x / 2] = 0xff;
     return 0;
 }

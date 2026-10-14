@@ -23,7 +23,7 @@ static int video_menu_draw(uint8_t *shadow, uint32_t view, uint32_t position, ui
     uint8_t *band = shadow + (VIDEO_PANEL_HEIGHT - VIDEO_MENU_HEIGHT) * VIDEO_PANEL_STRIDE;
     bzero(band, VIDEO_MENU_HEIGHT * VIDEO_PANEL_STRIDE);
     if (!view) return 1;
-    uint8_t text[40] = {96, 0, 2, 0, 0, 0};
+    uint8_t text[40] = {96, 0, 2, 0, VIDEO_MENU_TEXT_LEVEL, 0};
     uint32_t n = video_menu_time(text + 6, position);
     text[6 + n++] = ' '; text[6 + n++] = '/'; text[6 + n++] = ' ';
     n += video_menu_time(text + 6 + n, duration); text[5] = n;

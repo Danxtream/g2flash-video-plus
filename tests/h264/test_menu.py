@@ -18,6 +18,33 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class MenuTests(unittest.TestCase):
+    def test_real_text_lut_lights_time_and_every_menu_choice_without_touching_picture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            source = (ROOT / 'patches/texture_cache.c').read_text()
+            bindings = {
+                '#define CFW_FONT_GET_DSC ((cfw_font_dsc_fn)0x004e64fdU)':
+                    '#define CFW_FONT_GET_DSC test_font_dsc',
+                '#define CFW_FONT_GET_BITMAP ((cfw_font_bitmap_fn)0x004e644fU)':
+                    '#define CFW_FONT_GET_BITMAP test_font_bitmap',
+                '#define CFW_FONT_RELEASE ((cfw_font_release_fn)0x004e64a1U)':
+                    '#define CFW_FONT_RELEASE test_font_release',
+                '#define CFW_FONT20_ROOT (*(const uint8_t * volatile *)0x200769acU)':
+                    '#define CFW_FONT20_ROOT test_font',
+            }
+            for original, fixture in bindings.items():
+                self.assertEqual(source.count(original), 1)
+                source = source.replace(original, fixture)
+            (folder / 'menu_texture_fixture.h').write_text(source)
+            executable = folder / 'menu-render-test'
+            subprocess.run(['clang', '-std=c11', '-D_DEFAULT_SOURCE', '-O2', '-g',
+                            '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
+                            '-Wno-undefined-internal', '-Wno-unknown-pragmas',
+                            '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+                            '-I', str(folder), '-I', str(ROOT / 'patches'),
+                            str(ROOT / 'tests/h264/menu_render_test.c'), '-o', str(executable)], check=True)
+            subprocess.run([str(executable)], check=True, timeout=30)
+
     def test_paused_eof_waits_for_explicit_resume_instead_of_stopping_preview(self):
         nals, reference = synthetic_reference(1)
         clock = FakeClock()
