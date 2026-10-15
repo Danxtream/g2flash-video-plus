@@ -3,6 +3,7 @@
 
 #define CFW_MESSAGE_SID 0xf0u
 #define CFW_VIDEO_REPLY_MAX_PAGES 128u
+#define CFW_VIDEO_REPLY_MAX_SIZE 200u
 #define CFW_MESSAGE_LEFT 1u
 #define CFW_MESSAGE_RIGHT 2u
 #define CFW_MESSAGE_BOTH (CFW_MESSAGE_LEFT | CFW_MESSAGE_RIGHT)
@@ -28,6 +29,7 @@ typedef struct {
     uint8_t flags, context_valid;
     uint8_t ack_count, ack_capacity, packet_capacity;
     uint8_t ack_history[CFW_ACK_HISTORY][CFW_ACK_ENTRY_SIZE];
+    uint8_t video_capacity; /* Uses existing tail padding on the firmware ABI. */
 } cfw_message_stream;
 /* Record metadata is copied by value; no transport storage escapes dispatch. */
 typedef struct {
@@ -39,6 +41,9 @@ int cfw_message_received_routed(const uint8_t *, uint16_t, uint16_t,
                                 const cfw_message_route *);
 /* Send a bounded video page through the ingress lens's copied reply path. */
 int cfw_message_video_reply(const cfw_message_route *, const uint8_t *, uint16_t);
+/* Reserve-checked temporary reply storage; allocate/free outside image locks. */
+void *cfw_message_video_reply_allocate(uint32_t);
+void cfw_message_video_reply_free(void *);
 uint32_t cfw_receive_packet(uint8_t pipe, const uint8_t *packet, uint16_t length);
 uint32_t cfw_message_bridge_received(uint32_t app_id, const uint8_t *data,
                                      uint32_t length, uint16_t event);

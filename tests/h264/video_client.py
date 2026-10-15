@@ -11,7 +11,7 @@ from video_link import VideoLink, ACK_WINDOW, sources
 from phy_client import PHY_DIAGNOSTICS, RADIO_REFUSAL_DIAGNOSTICS, phy_report, radio_refusal_report
 from receive_client import (control, diagnostics, diagnostic_alerts,
                             MESSAGE, VERSION, START, STOP, RESET, STATUS, CAPABILITIES,
-                            DIAGNOSTICS, PAGE, nal)
+                            DIAGNOSTICS, PAGE, nal, page_request)
 
 FRAME_READ, FRAME_ACK, CREDITS, VERIFY_FRAMES, NATIVE = 8, 9, 10, 128, 1
 TIMELINE, FRAME_TIME = 11, 12
@@ -345,7 +345,7 @@ class VideoClient(VideoLink):
                 raise ValueError('inconsistent frozen result page count')
             raw = bytearray(first)
             for page in range(1, count):
-                message = struct.pack('<BBBBIB', MESSAGE, PAGE, VERSION, 0, request, page)
+                message = page_request(request, page)
                 if not self.send(message, (request, page), targets=lens):
                     raise ValueError('frozen result page refused')
                 pages, content = self.pages[(lens, request, page)]

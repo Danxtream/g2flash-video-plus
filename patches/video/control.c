@@ -23,7 +23,7 @@ static int video_route_valid(const cfw_message_route *r) {
     return r && (r->here == CFW_MESSAGE_LEFT || r->here == CFW_MESSAGE_RIGHT) &&
         (r->origin == CFW_MESSAGE_LEFT || r->origin == CFW_MESSAGE_RIGHT) &&
         !(r->targets & ~CFW_MESSAGE_BOTH) && (r->targets & r->here) &&
-        r->reply_capacity > VIDEO_REPLY_HEADER_BYTES && r->reply_capacity <= 30;
+        r->reply_capacity > VIDEO_REPLY_HEADER_BYTES && r->reply_capacity <= VIDEO_PAGE_REPLY_CAPACITY;
 }
 
 static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
@@ -220,8 +220,8 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
     return VIDEO_CONTROL_FORMAT;
 }
 
-int video_control_received(const uint8_t *data, uint16_t size,
-                            const cfw_message_route *route) {
+static int video_control_command(const uint8_t *data, uint16_t size,
+                                  const cfw_message_route *route, uint8_t *reply) {
     if (data && size >= 2 && data[0] == VIDEO_MESSAGE_ID &&
         data[1] == VIDEO_CONTROL_NAL) {
         if (size <= VIDEO_NAL_HEADER_BYTES || size > VIDEO_RECORD_LIMIT ||
@@ -255,7 +255,7 @@ int video_control_received(const uint8_t *data, uint16_t size,
         if (s->replay[origin][i].request == request) entry = &s->replay[origin][i];
     uint32_t page = 0;
     if (data[1] == VIDEO_CONTROL_PAGE) {
-        if (size != VIDEO_CONTROL_HEADER_BYTES + 1 || !entry) {
+        if (size < VIDEO_CONTROL_HEADER_BYTES + 1 || !entry) {
             video_control_give(ctx); return -1;
         }
         page = data[8];
@@ -274,8 +274,7 @@ int video_control_received(const uint8_t *data, uint16_t size,
         *entry = (video_control_replay){0};
         entry->request = s->request_high[origin] = request;
         entry->length = size;
-        /* A shorter PAGE resets the transport's inferred reply budget. Freeze
-         * the stride to fit that query too, or its pages will be refused. */
+        /* Freeze the stride even when a later packet proves a larger budget. */
         entry->capacity = route->reply_capacity < VIDEO_PAGE_REPLY_CAPACITY ?
             route->reply_capacity : VIDEO_PAGE_REPLY_CAPACITY;
         memcpy(entry->command, data, size);
@@ -375,7 +374,7 @@ int video_control_received(const uint8_t *data, uint16_t size,
              * receive publication lock. Revalidate the reserved replay after
              * sampling: another request may have evicted it meanwhile. */
             video_control_give(ctx);
-            uint8_t snapshot[VIDEO_DIAGNOSTICS_BYTES];
+            uint8_t *snapshot = reply;
             int sampled = radio ? data[8] == VIDEO_RADIO_REFUSAL_DIAGNOSTICS ?
                 VIDEO_RADIO_REFUSAL_SNAPSHOT(snapshot) : VIDEO_RADIO_SNAPSHOT(snapshot) :
                 video_diagnostics_snapshot(snapshot);
@@ -385,12 +384,12 @@ int video_control_received(const uint8_t *data, uint16_t size,
             }
             entry->pending = 0;
             entry->result = sampled ? VIDEO_CONTROL_ACCEPTED : VIDEO_CONTROL_BUSY;
-            if (!sampled) bzero(snapshot, sizeof(snapshot));
+            if (!sampled) bzero(snapshot, VIDEO_DIAGNOSTICS_BYTES);
             snapshot[0] = VIDEO_PROTOCOL_VERSION;
             snapshot[1] = VIDEO_CONTROL_DIAGNOSTICS;
             snapshot[2] = entry->result;
             if (!radio && video_read32(snapshot + 8) != ctx->video.generation) snapshot[3] |= 32;
-            memcpy(entry->snapshot, snapshot, sizeof(snapshot));
+            memcpy(entry->snapshot, snapshot, VIDEO_DIAGNOSTICS_BYTES);
             entry->snapshot_bytes = VIDEO_DIAGNOSTICS_BYTES;
         }
     }
@@ -400,7 +399,7 @@ int video_control_received(const uint8_t *data, uint16_t size,
     if (page >= pages || route->reply_capacity < entry->capacity) {
         video_control_give(ctx); return -1;
     }
-    uint8_t reply[30] = {VIDEO_MESSAGE_ID, route->here};
+    reply[0] = VIDEO_MESSAGE_ID; reply[1] = route->here;
     video_write32(reply + 2, request);
     reply[6] = page; reply[7] = pages;
     uint32_t offset = page * count;
@@ -409,9 +408,23 @@ int video_control_received(const uint8_t *data, uint16_t size,
     int accepted = data[1] == VIDEO_CONTROL_PAGE || entry->result == VIDEO_CONTROL_ACCEPTED;
     video_control_give(ctx);
     /* Both transport send services copy before return; no owner pointer is
-     * retained and this stack reply remains valid through the enqueue. */
+     * retained and the owned reply remains valid through the enqueue. */
     int sent = cfw_message_video_reply(route, reply, VIDEO_REPLY_HEADER_BYTES + count);
     return !sent && accepted ? 0 : -1;
+}
+
+int video_control_received(const uint8_t *data, uint16_t size,
+                            const cfw_message_route *route) {
+    if (data && size >= 2 && data[0] == VIDEO_MESSAGE_ID && data[1] == VIDEO_CONTROL_NAL)
+        return video_control_command(data, size, route, 0);
+    if (!data || size < VIDEO_CONTROL_HEADER_BYTES || !video_route_valid(route)) return -1;
+    /* Receive tasks can overlap. Own each buffer through the copied enqueue,
+     * without increasing the task stack or holding the image lock in malloc. */
+    uint8_t *reply = cfw_message_video_reply_allocate(VIDEO_PAGE_REPLY_CAPACITY);
+    if (!reply) return -1;
+    int result = video_control_command(data, size, route, reply);
+    cfw_message_video_reply_free(reply);
+    return result;
 }
 
 int video_control_blocks_custom(const uint8_t *p, uint32_t n) {

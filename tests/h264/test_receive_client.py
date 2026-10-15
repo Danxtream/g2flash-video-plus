@@ -129,7 +129,7 @@ class ReceiveClientTests(unittest.TestCase):
                 parse_page(frame(body))
 
     def test_minimum_and_larger_mtu_pagination_and_ack_order(self):
-        for page_bytes in (1, 22):
+        for page_bytes in (1, 22, 192):
             for first in (False, True):
                 transport = MockTransport(page_bytes=page_bytes, ack_first=first)
                 client = ReceiveClient(transport, 1, Counter())

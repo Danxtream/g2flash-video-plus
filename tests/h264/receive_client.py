@@ -18,6 +18,12 @@ MESSAGE, VERSION = 31, 1
 CAPABILITIES, START, STOP, RESET, STATUS, PAGE, NAL = range(7)
 DIAGNOSTICS, DIAGNOSTICS_BYTES = 7, 128
 STATUS_BYTES, REPLY_HEADER_BYTES, RECORD_BYTES = 80, 8, 4096
+VIDEO_REPLY_MAX_BYTES = 200
+
+
+def page_request(request, page):
+    """Prove the video reply budget while preserving the exact PAGE tuple."""
+    return struct.pack('<BBBBIB', MESSAGE, PAGE, VERSION, 0, request, page) + bytes(186)
 
 
 def control(op, request, stream=0):
@@ -68,7 +74,7 @@ def parse_page(frame):
     body = frame[8:-2]
     if not body or body[0] != MESSAGE:
         return None
-    if (frame[3] != len(frame) - 8 or not 9 <= len(body) <= 30 or
+    if (frame[3] != len(frame) - 8 or not 9 <= len(body) <= VIDEO_REPLY_MAX_BYTES or
             crc16(body) != frame[-2:] or body[1] not in (1, 2) or
             not 0 < body[7] <= 192 or body[6] >= body[7]):
         raise ValueError('invalid video reply envelope')
@@ -248,7 +254,7 @@ class ReceiveClient:
             raise ValueError('inconsistent bounded snapshot page count')
         raw = bytearray(first)
         for page in range(1, count):
-            message = struct.pack('<BBBBIB', MESSAGE, PAGE, VERSION, 0, request, page)
+            message = page_request(request, page)
             if not self.send(message, (request, page)):
                 raise ValueError('cached snapshot page refused')
             pages, content = self.pages[(self.lens, request, page)]

@@ -49,8 +49,8 @@ enum {
     VIDEO_STATUS_BYTES = VIDEO_BASE_STATUS_BYTES + VIDEO_STATUS_EXTENSION_UNIT,
     VIDEO_DIAGNOSTICS_BYTES = 128,
     VIDEO_REPLY_HEADER_BYTES = 8,
-    /* Nine-byte PAGE plus its five-byte transport record header. */
-    VIDEO_PAGE_REPLY_CAPACITY = 14,
+    /* Video-only bound; each replay freezes the proven ingress budget. */
+    VIDEO_PAGE_REPLY_CAPACITY = CFW_VIDEO_REPLY_MAX_SIZE,
     VIDEO_RECORD_LIMIT = 4096,
     VIDEO_NAL_LIMIT = VIDEO_RECORD_LIMIT - 10,
     VIDEO_FRAME_WIDTH = 320,

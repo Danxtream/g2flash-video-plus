@@ -51,7 +51,16 @@ static uint32_t cached_used, cached_peak;
 static video_pool_item pool_jobs[8];
 static pthread_mutex_t pool_mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t pool_count, fail_pool, pool_calls;
-static uint8_t control_reply[30];
+static uint8_t control_reply[CFW_VIDEO_REPLY_MAX_SIZE];
+static uint32_t fail_reply, reply_live;
+void *cfw_message_video_reply_allocate(uint32_t size) {
+    assert(!image_depth && size <= CFW_VIDEO_REPLY_MAX_SIZE);
+    if (fail_reply) return 0;
+    ++reply_live; return malloc(size);
+}
+void cfw_message_video_reply_free(void *reply) {
+    assert(!image_depth && reply && reply_live); --reply_live; free(reply);
+}
 static uint32_t control_reply_size;
 static void (*heap_sample_hook)(void);
 static const uint32_t shadow_present = 1;
@@ -835,7 +844,7 @@ static uint8_t control_variable_pages(const uint8_t *p, uint32_t n, uint8_t *sna
     uint32_t pages = (length + count - 1) / count;
     assert(control_reply[7] == pages);
     memcpy(snapshot, control_reply + VIDEO_REPLY_HEADER_BYTES, count);
-    uint8_t page[9] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_PAGE, VIDEO_PROTOCOL_VERSION};
+    uint8_t page[195] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_PAGE, VIDEO_PROTOCOL_VERSION};
     memcpy(page + 4, p + 4, 4); route.reply_capacity = page_capacity;
     for (uint32_t i = 1; i < pages; ++i) {
         page[8] = i; control_reply_size = 0;
@@ -943,34 +952,48 @@ static void credits(void) {
 }
 static void control_paging(void) {
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES], retry[VIDEO_STATUS_BYTES];
-    /* Uncompressed records add five bytes. At a large MTU the transport
-     * infers capacity 29 for START, but only 14 for each nine-byte PAGE.
-     * MTU23 fragmentation instead leaves all these capacities at nine. */
+    /* Padded PAGE proves room without changing a previously frozen stride. */
     for (uint8_t lens = 1; lens <= 2; ++lens) {
-        for (uint32_t large_mtu = 0; large_mtu <= 1; ++large_mtu) {
+        for (uint32_t large_mtu = 0; large_mtu <= 2; ++large_mtu) {
             configure(); request_next = 0;
-            uint8_t page_capacity = large_mtu ? 14 : 9;
+            uint8_t page_capacity = large_mtu ? 200 : 9;
             control_command(p, VIDEO_CONTROL_CAPABILITIES, 0);
             assert(control_variable_pages(p, 8, snapshot, sizeof(snapshot), lens,
-                large_mtu ? 13 : 9, page_capacity) == VIDEO_CONTROL_ACCEPTED);
+                large_mtu == 2 ? 200 : large_mtu ? 13 : 9, page_capacity) == VIDEO_CONTROL_ACCEPTED);
             assert(snapshot[3] == VIDEO_IDLE);
             control_command(p, VIDEO_CONTROL_START, 1);
             assert(control_variable_pages(p, 24, snapshot, sizeof(snapshot), lens,
-                large_mtu ? 29 : 9, page_capacity) == VIDEO_CONTROL_ACCEPTED);
+                large_mtu == 2 ? 200 : large_mtu ? 29 : 9, page_capacity) == VIDEO_CONTROL_ACCEPTED);
             assert(snapshot[3] == VIDEO_STARTING && pool_calls == 1 && !allocations_live);
             assert(control_variable_pages(p, 24, retry, sizeof(retry), lens,
-                large_mtu ? 29 : 9, page_capacity) == VIDEO_CONTROL_ACCEPTED);
+                large_mtu == 2 ? 200 : large_mtu ? 29 : 9, page_capacity) == VIDEO_CONTROL_ACCEPTED);
             assert(!memcmp(snapshot, retry, sizeof(snapshot)) && pool_calls == 1);
             control_command(p, VIDEO_CONTROL_FRAME_READ, 1);
             control_variable_pages(p, 20, snapshot, VIDEO_FRAME_RESULT_BYTES, lens,
-                large_mtu ? 25 : 9, page_capacity);
+                large_mtu == 2 ? 200 : large_mtu ? 25 : 9, page_capacity);
             control_command(p, VIDEO_CONTROL_STOP, 1);
             assert(control_variable_pages(p, 12, snapshot, sizeof(snapshot), lens,
-                large_mtu ? 17 : 9, page_capacity) == VIDEO_CONTROL_ACCEPTED);
+                large_mtu == 2 ? 200 : large_mtu ? 17 : 9, page_capacity) == VIDEO_CONTROL_ACCEPTED);
             pool_drain(); finish();
         }
     }
-    puts("request-sized replies, smaller PAGE budgets, exact START retries and both lenses PASS");
+    configure(); request_next = 0;
+    control_command(p, VIDEO_CONTROL_STATUS, 0);
+    cfw_message_route route = {1, 1, 1, 200, 0};
+    fail_reply = 1;
+    assert(video_control_received(p, 8, &route) && !context.video_control.request_high[0]);
+    fail_reply = 0;
+    assert(!video_control_received(p, 8, &route) && control_reply_size == 200 && control_reply[7] == 1);
+    uint8_t page[195] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_PAGE, VIDEO_PROTOCOL_VERSION};
+    memcpy(page + 4, p + 4, 4);
+    assert(!video_control_received(page, sizeof(page), &route));
+    route.reply_capacity = 199;
+    assert(video_control_received(page, sizeof(page), &route));
+    route.reply_capacity = 200; page[8] = 1;
+    assert(video_control_received(page, sizeof(page), &route));
+    page[8] = 0; page[4]++;
+    assert(video_control_received(page, sizeof(page), &route) && !reply_live);
+    puts("frozen bounded pages, padded fetches, allocation failure and both lenses PASS");
 }
 static void controls(void) {
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];

@@ -242,7 +242,7 @@ class VideoClientTests(unittest.TestCase):
         self.assertEqual(client.stops, 1)
 
     def test_full_and_minimum_mtu_all_status_result_and_diagnostic_pages(self):
-        for size in (1, 22):
+        for size in (1, 22, 192):
             for lens in (1, 2):
                 client = VideoClient(PlaybackWire(lens=lens, page_bytes=size), lens, Counter())
                 self.assertEqual(client.command(CAPABILITIES)['stage'], 7)

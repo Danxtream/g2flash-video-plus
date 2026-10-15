@@ -49,6 +49,13 @@ static void *cfw_video_message_allocate(uint32_t size) {
 
 #include "transport_compression.c"
 
+void *cfw_message_video_reply_allocate(uint32_t size) {
+    return size <= CFW_VIDEO_REPLY_MAX_SIZE ? CFW_MESSAGE_MALLOC(size) : 0;
+}
+void cfw_message_video_reply_free(void *reply) {
+    CFW_MESSAGE_FREE(reply);
+}
+
 static uint16_t cfw_message_crc(const uint8_t *data, uint16_t size) {
     uint16_t crc = 0xffffu;
     for (uint16_t i = 0; i < size; ++i) {
@@ -92,7 +99,7 @@ static int cfw_message_bridge_send(uint8_t kind, uint8_t origin,
 int cfw_message_video_reply(const cfw_message_route *route,
                              const uint8_t *reply, uint16_t length) {
     if (!route || !reply || length < 9 || length > route->reply_capacity ||
-        length > CFW_ACK_MAX_SIZE || reply[0] != 31 || reply[1] != route->here ||
+        length > CFW_VIDEO_REPLY_MAX_SIZE || reply[0] != 31 || reply[1] != route->here ||
         (route->origin != CFW_MESSAGE_LEFT && route->origin != CFW_MESSAGE_RIGHT) ||
         (route->here != CFW_MESSAGE_LEFT && route->here != CFW_MESSAGE_RIGHT) ||
         !reply[7] || reply[7] > CFW_VIDEO_REPLY_MAX_PAGES || reply[6] >= reply[7]) return -1;
@@ -156,15 +163,20 @@ static uint32_t cfw_message_complete(cfw_message_stream *stream, uint8_t here,
     uint32_t size = stream->size;
     int valid = !(stream->flags & ~(CFW_MESSAGE_BOTH | CFW_MESSAGE_COMPRESSED | CFW_MESSAGE_RESET_CONTEXT))
         && (stream->flags & CFW_MESSAGE_BOTH) == stream->options;
+    uint8_t ack_capacity = stream->packet_capacity < CFW_ACK_MAX_SIZE ?
+        stream->packet_capacity : CFW_ACK_MAX_SIZE;
     if (stream->flags & CFW_MESSAGE_RESET_CONTEXT) {
         cfw_inflate_reset(stream);
         /* Also bounds history across reconnects, retries and target changes. */
         stream->ack_count = 0;
-        stream->ack_capacity = stream->packet_capacity;
+        stream->ack_capacity = ack_capacity;
+        stream->video_capacity = stream->packet_capacity;
         stream->context_valid = 1;
     }
-    if (stream->ack_capacity < stream->packet_capacity)
-        stream->ack_capacity = stream->packet_capacity;
+    if (stream->ack_capacity < ack_capacity)
+        stream->ack_capacity = ack_capacity;
+    if (stream->video_capacity < stream->packet_capacity)
+        stream->video_capacity = stream->packet_capacity;
     valid = valid && stream->context_valid;
     if (stream->flags & CFW_MESSAGE_COMPRESSED) {
         decoded = CFW_MESSAGE_MALLOC(CFW_MESSAGE_MAX + 1u);
@@ -174,7 +186,7 @@ static uint32_t cfw_message_complete(cfw_message_stream *stream, uint8_t here,
     uint16_t crc = valid ? cfw_message_crc(data, (uint16_t)size) : 0;
     valid = valid && crc == stream->checksum;
     cfw_message_route route = {here, origin, stream->options,
-                               stream->ack_capacity, stream->message_id};
+                               stream->video_capacity, stream->message_id};
     if (valid && cfw_message_received_routed(data, (uint16_t)size, crc, &route) != 0) valid = 0;
     if (!valid) {
         cfw_inflate_reset(stream);
@@ -214,11 +226,12 @@ static uint32_t cfw_message_process(const uint8_t *packet, uint16_t length,
     ++stream->next_sequence; /* uint8 wrap is intentional. */
     /* Replies must still fit one ATT notification, including on MTU 23 links.
      * An observed request proves the ingress can carry that many bytes. Track
-     * this per compression context (reset on reconnect), capped at 40 bytes
-     * including the reply envelope. The bridge sees the same request sizes. */
+     * this per compression context (reset on reconnect). Ordinary ACKs retain
+     * their 40-byte envelope bound; video has its own 200-byte body bound.
+     * The bridge sees the same request sizes. */
     /* Stock TPL reserves 11 bytes per fragment, including its CRC allowance. */
     unsigned capacity = length - 11;
-    if (capacity > CFW_ACK_MAX_SIZE) capacity = CFW_ACK_MAX_SIZE;
+    if (capacity > CFW_VIDEO_REPLY_MAX_SIZE) capacity = CFW_VIDEO_REPLY_MAX_SIZE;
     if (capacity > stream->packet_capacity) stream->packet_capacity = capacity;
     uint32_t status = 0;
     uint16_t end = length - 2, cursor = 9;
@@ -321,7 +334,7 @@ uint32_t cfw_message_bridge_received(uint32_t app_id, const uint8_t *data,
     }
     if (data[0] == CFW_BRIDGE_VIDEO_RETURN) {
         if (here != origin) return 0;
-        if (length < 11 || length > CFW_ACK_MAX_SIZE + 2) return 0xbu;
+        if (length < 11 || length > CFW_VIDEO_REPLY_MAX_SIZE + 2) return 0xbu;
         if (data[2] != 31 || data[3] != (origin ^ CFW_MESSAGE_BOTH) ||
             !data[9] || data[9] > CFW_VIDEO_REPLY_MAX_PAGES || data[8] >= data[9]) return 0xau;
         return CFW_BLE_SEND(1, CFW_MESSAGE_SID, data + 2, length - 2) == 0 ? 0 : 6;

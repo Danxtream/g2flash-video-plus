@@ -243,10 +243,16 @@ Request IDs increase separately per ingress; older uncached IDs or conflicting
 duplicates refuse. Each reply freezes its bounded snapshot. A page query
 has the original request ID and one page byte, and never executes the control.
 One response per query fits the proven notification capacity, including MTU23.
-The frozen page width also fits the shorter nine-byte page request: its
-five-byte transport record header gives a 14-byte reply budget at a large MTU.
-Longer controls cannot widen pages beyond that budget; MTU23 retains one
-snapshot byte per page. Retrying a control keeps the original page width.
+The frozen page width uses the largest proven ingress packet capacity in
+its compression context, capped at 200 bytes including the reply header.
+Ordinary ACK sizes and history remain unchanged. PAGE accepts at least nine
+bytes, ignoring trailing padding. Pad PAGE to 195 bytes so its five-byte
+record header proves room for a 200-byte reply; compressed senders need fresh
+incompressible padding. A context reset starts with the new packet's budget,
+and a short first command can still freeze a narrow reply. Retrying a control
+or proving a larger budget later does not change its original page width.
+MTU23 retains its small inferred budget. Replies use owned temporary heap
+storage, reused for diagnostic sampling, instead of a page-sized stack array.
 Replies are ID31, source lens bit, LE32 request ID, page/count and snapshot bytes.
 The distinct bridge video-return envelope leaves upstream ACK/NACK validation
 unchanged. Send services copy each bounded stack reply before return.

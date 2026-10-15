@@ -32,7 +32,8 @@ static uint32_t test_stock_bridge(uint32_t app, const uint8_t *p, uint32_t n, ui
 }
 static uint32_t test_side(void) { return side; }
 static int test_ble(uint8_t pipe, uint8_t sid, const uint8_t *p, uint16_t n) {
-    assert(pipe == 1 && sid == CFW_MESSAGE_SID && n <= 30 && ble_count < 2048);
+    assert(pipe == 1 && sid == CFW_MESSAGE_SID && n <= CFW_VIDEO_REPLY_MAX_SIZE && ble_count < 2048);
+    if (p[0] != 31) assert(n <= 30);
     ble[ble_count].size = n; memcpy(ble[ble_count++].bytes, p, n); return 0;
 }
 static int test_bridge(uint16_t app, const uint8_t *p, uint16_t n, void *argument) {
@@ -121,6 +122,34 @@ static void cleanup(void) {
     received = refused = ble_count = bridge_count = 0; side = 2;
 }
 int main(void) {
+    /* Video budgets follow observed packets, independently of ACK history. */
+    for (uint8_t lens = 1; lens <= 2; ++lens) {
+        for (uint32_t chunk = 9; chunk <= 233; chunk += 224) {
+            side = lens == 1 ? 2 : 1;
+            uint8_t padded[195] = {7};
+            send_record_chunks(padded, sizeof(padded), lens, CFW_MESSAGE_RESET_CONTEXT, 1, 0, chunk);
+            assert(last_route.reply_capacity == (chunk == 9 ? 9 : 200));
+            uint8_t reply[201] = {31, lens, 1, 0, 0, 0, 0, 1, 1};
+            assert(!cfw_message_video_reply(&last_route, reply, last_route.reply_capacity));
+            assert(cfw_message_video_reply(&last_route, reply, last_route.reply_capacity + 1));
+            padded[0] = 7;
+            send_record_chunks(padded, 8, lens, 0, 20, 0, chunk);
+            assert(last_route.reply_capacity == (chunk == 9 ? 9 : 200));
+            send_record_chunks(padded, 8, lens, CFW_MESSAGE_RESET_CONTEXT, 40, 0, chunk);
+            assert(last_route.reply_capacity == (chunk == 9 ? 9 : 13));
+            cleanup();
+        }
+        side = lens == 1 ? 1 : 2;
+        cfw_message_route route = {3 - lens, lens, 3, 200, 0};
+        uint8_t reply[200] = {31, 3 - lens, 1, 0, 0, 0, 0, 1, 1};
+        assert(!cfw_message_video_reply(&route, reply, sizeof(reply)) && bridge[0].size == 202);
+        side = lens == 1 ? 2 : 1;
+        assert(!cfw_message_bridge_received(CFW_MESSAGE_SID, bridge[0].bytes, 202, 0));
+        assert(ble[0].size == 200 && !memcmp(ble[0].bytes, reply, 200));
+        bridge[0].bytes[0] = CFW_BRIDGE_RETURN;
+        assert(cfw_message_bridge_received(CFW_MESSAGE_SID, bridge[0].bytes, 202, 0));
+        cleanup();
+    }
     uint8_t body[24] = {31, 0, 1};
     /* One BLE query forwards to its peer; the peer returns its own ACK and
      * compact page. Ingress acceptance must not stand in for peer acceptance. */
