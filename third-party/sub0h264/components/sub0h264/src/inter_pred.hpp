@@ -189,11 +189,10 @@ inline void lumaMotionComp(const Frame& ref,
     }
 
     // ─── L3.1 reference prefetch ────────────────────────────────────────
-    // All remaining positions (quarter-pel + 9 diagonal cases) call
-    // getSample 6–36× per output pixel. On ESP32-P4 each call lands in
+    // All remaining positions (quarter-pel + 9 diagonal cases) read up to
+    // 36 reference samples per output pixel. On ESP32-P4 each read lands in
     // PSRAM. Copy the (width+5) × (height+5) reference window into a
-    // stack scratch buffer once, then shadow getSample to read from L1-
-    // resident memory for the remainder of this function.
+    // stack scratch buffer once and filter from L1-resident memory.
     //
     // Layout: scratch[(y - refY + 2) * 21 + (x - refX + 2)] = ref(x, y)
     // clamped to frame bounds. The +2 offset reserves the 6-tap filter's
@@ -243,155 +242,111 @@ inline void lumaMotionComp(const Frame& ref,
         }
     }
 
-    // Shadow the outer getSample lambda. From this point on, every
-    // call (including those captured by hFilter / vFilterClip / j2D
-    // below) reads from the L1-resident scratch buffer.
-    auto getSample = [&](int32_t x, int32_t y) -> uint8_t {
-        const int32_t sx = x - refX + 2;
-        const int32_t sy = y - refY + 2;
-        // Internal callers stay within the (-2, -2) .. (w+2, h+2) window
-        // by construction (6-tap filter range). Defensive clamp guards
-        // against unforeseen callers and accepts a 1-cycle hit.
-        const int32_t sxC = (sx < 0) ? 0 :
-            (sx >= static_cast<int32_t>(kScratchStride) ? static_cast<int32_t>(kScratchStride) - 1 : sx);
-        const int32_t syC = (sy < 0) ? 0 :
-            (sy >= static_cast<int32_t>(kScratchStride) ? static_cast<int32_t>(kScratchStride) - 1 : sy);
-        return scratch[syC * kScratchStride + sxC];
-    };
+    // Every remaining output is one half-pel plane or the rounded average of
+    // two inputs (Table 8-12): the integer samples G, b (horizontal half-pel),
+    // h (vertical half-pel), j (centre), s = b one row down and m = h one
+    // column right. Each plane is filtered once per block here, instead of
+    // re-running 6-36 taps per output pixel; the integer arithmetic is the
+    // same, so the result is bit-identical.
+    const int32_t st = static_cast<int32_t>(kScratchStride);
+    const uint8_t* org = scratch + 2U * kScratchStride + 2U;  // integer sample (0, 0)
+    const int32_t bw = static_cast<int32_t>(width);
+    const int32_t bh = static_cast<int32_t>(height);
+    const bool needJ = dx == 2U || dy == 2U;
+    const bool needB = dx != 0U && dy != 2U;
+    const bool needH = dy != 0U && dx != 2U;
 
-    // Quarter-pel horizontal (dx=1 or 3, dy=0):
-    // a=(G+b+1)>>1 for dx=1, c=(H+b+1)>>1 for dx=3. §8.4.2.2.1
-    if (dy == 0U)
+    // hs[r]: unclipped horizontal 6-tap of block row r - 2; j needs rows -2 .. bh + 2.
+    int16_t hs[kScratchStride][16];
+    uint8_t bPlane[17][16];  // rows 0 .. bh, so s can read one row down
+    uint8_t hPlane[16][17];  // columns 0 .. bw, so m can read one column right
+    uint8_t jPlane[16][16];
+    if (needB || needJ)
     {
-        for (uint32_t row = 0U; row < height; ++row)
-            for (uint32_t col = 0U; col < width; ++col)
-            {
-                // b = horizontal half-pel between col and col+1
-                int32_t sum = 0;
-                for (int32_t k = -2; k <= 3; ++k)
-                    sum += cLumaFilter6Tap[k + 2] * getSample(refX + col + k, refY + row);
-                int32_t b = clipU8((sum + 16) >> 5);
-                // Integer sample: G for dx=1, H (col+1) for dx=3
-                int32_t full = getSample(refX + col + (dx == 3U ? 1 : 0), refY + row);
-                dst[row * dstStride + col] = static_cast<uint8_t>((full + b + 1) >> 1);
-            }
-        return;
-    }
-
-    // Quarter-pel vertical (dx=0, dy=1 or 3):
-    // d=(G+h+1)>>1 for dy=1, n=(J+h+1)>>1 for dy=3. §8.4.2.2.1
-    if (dx == 0U)
-    {
-        for (uint32_t row = 0U; row < height; ++row)
-            for (uint32_t col = 0U; col < width; ++col)
-            {
-                // h = vertical half-pel between row and row+1
-                int32_t sum = 0;
-                for (int32_t k = -2; k <= 3; ++k)
-                    sum += cLumaFilter6Tap[k + 2] * getSample(refX + col, refY + row + k);
-                int32_t h = clipU8((sum + 16) >> 5);
-                // Integer sample: G for dy=1, J (row+1) for dy=3
-                int32_t full = getSample(refX + col, refY + row + (dy == 3U ? 1 : 0));
-                dst[row * dstStride + col] = static_cast<uint8_t>((full + h + 1) >> 1);
-            }
-        return;
-    }
-
-    // ── Diagonal fractional positions (dx!=0, dy!=0) ────────────────
-    // ITU-T H.264 §8.4.2.2.1: requires computing intermediate half-pel
-    // values b, h, j, m, s and then averaging per Table 8-12.
-
-    // Helper: horizontal 6-tap producing UNCLIPPED intermediate (for j computation).
-    auto hFilter = [&](int32_t x, int32_t y) -> int32_t {
-        int32_t sum = 0;
-        for (int32_t k = -2; k <= 3; ++k)
-            sum += cLumaFilter6Tap[k + 2] * getSample(x + k, y);
-        return sum; // NOT clipped — intermediate for 2D filter
-    };
-
-    // Helper: horizontal 6-tap, clipped (for b, s values).
-    auto hFilterClip = [&](int32_t x, int32_t y) -> int32_t {
-        return clipU8((hFilter(x, y) + 16) >> 5);
-    };
-
-    // Helper: vertical 6-tap, clipped (for h, m values).
-    auto vFilterClip = [&](int32_t x, int32_t y) -> int32_t {
-        int32_t sum = 0;
-        for (int32_t k = -2; k <= 3; ++k)
-            sum += cLumaFilter6Tap[k + 2] * getSample(x, y + k);
-        return clipU8((sum + 16) >> 5);
-    };
-
-    // Helper: j = 2D 6-tap at (x, y). Vertical 6-tap on horizontal intermediates.
-    // §8.4.2.2.1: j = clip((vFilter(hFilter_unclipped) + 512) >> 10)
-    auto j2D = [&](int32_t x, int32_t y) -> int32_t {
-        int32_t sum = 0;
-        for (int32_t k = -2; k <= 3; ++k)
-            sum += cLumaFilter6Tap[k + 2] * hFilter(x, y + k);
-        return clipU8((sum + 512) >> 10);
-    };
-
-    // Compute per-pixel based on fractional position — Table 8-12:
-    //   (1,1)=e: (b+h+1)>>1     (2,1)=f: (b+j+1)>>1     (3,1)=g: (b+m+1)>>1
-    //   (1,2)=i: (h+j+1)>>1     (2,2)=j: 2D filter       (3,2)=k: (j+m+1)>>1
-    //   (1,3)=p: (h+s+1)>>1     (2,3)=q: (j+s+1)>>1     (3,3)=r: (m+s+1)>>1
-    // Where: b=hHalf@row, h=vHalf@col, j=2D@(col,row),
-    //        m=vHalf@(col+1), s=hHalf@(row+1)
-    for (uint32_t row = 0U; row < height; ++row)
-    {
-        for (uint32_t col = 0U; col < width; ++col)
+        const int32_t first = needJ ? -2 : 0;
+        const int32_t last = needJ ? bh + 2 : bh;
+        for (int32_t y = first; y <= last; ++y)
         {
-            int32_t x = refX + static_cast<int32_t>(col);
-            int32_t y = refY + static_cast<int32_t>(row);
-            int32_t val;
+            const uint8_t* p = org + y * st;
+            int16_t* sums = hs[y + 2];
+            for (int32_t x = 0; x < bw; ++x)
+                sums[x] = static_cast<int16_t>(p[x - 2] - 5 * p[x - 1] + 20 * p[x]
+                                               + 20 * p[x + 1] - 5 * p[x + 2] + p[x + 3]);
+            if (needB && y >= 0 && y <= bh)
+                for (int32_t x = 0; x < bw; ++x)
+                    bPlane[y][x] = static_cast<uint8_t>(clipU8((sums[x] + 16) >> 5));
+        }
+    }
+    if (needH)
+    {
+        const int32_t last = dx == 3U ? bw : bw - 1;
+        for (int32_t y = 0; y < bh; ++y)
+        {
+            const uint8_t* p = org + y * st;
+            for (int32_t x = 0; x <= last; ++x)
+            {
+                const int32_t sum = p[x - 2 * st] - 5 * p[x - st] + 20 * p[x]
+                                  + 20 * p[x + st] - 5 * p[x + 2 * st] + p[x + 3 * st];
+                hPlane[y][x] = static_cast<uint8_t>(clipU8((sum + 16) >> 5));
+            }
+        }
+    }
+    if (needJ)
+    {
+        // §8.4.2.2.1: vertical 6-tap over the unclipped horizontal intermediates.
+        for (int32_t y = 0; y < bh; ++y)
+            for (int32_t x = 0; x < bw; ++x)
+            {
+                const int32_t sum = hs[y][x] - 5 * hs[y + 1][x] + 20 * hs[y + 2][x]
+                                  + 20 * hs[y + 3][x] - 5 * hs[y + 4][x] + hs[y + 5][x];
+                jPlane[y][x] = static_cast<uint8_t>(clipU8((sum + 512) >> 10));
+            }
+    }
 
-            if (dx == 2U && dy == 2U)
-            {
-                // j = 2D 6-tap — §8.4.2.2.1 Eq. 8-239/8-240
-                val = j2D(x, y);
-            }
-            else if (dx == 1U && dy == 1U)
-            {
-                // e = (b + h + 1) >> 1
-                val = (hFilterClip(x, y) + vFilterClip(x, y) + 1) >> 1;
-            }
-            else if (dx == 3U && dy == 1U)
-            {
-                // g = (b + m + 1) >> 1 — m is vertical half at col+1
-                val = (hFilterClip(x, y) + vFilterClip(x + 1, y) + 1) >> 1;
-            }
-            else if (dx == 1U && dy == 3U)
-            {
-                // p = (h + s + 1) >> 1 — s is horizontal half at row+1
-                val = (vFilterClip(x, y) + hFilterClip(x, y + 1) + 1) >> 1;
-            }
-            else if (dx == 3U && dy == 3U)
-            {
-                // r = (m + s + 1) >> 1
-                val = (vFilterClip(x + 1, y) + hFilterClip(x, y + 1) + 1) >> 1;
-            }
-            else if (dx == 2U && dy == 1U)
-            {
-                // f = (b + j + 1) >> 1
-                val = (hFilterClip(x, y) + j2D(x, y) + 1) >> 1;
-            }
-            else if (dx == 2U && dy == 3U)
-            {
-                // q = (j + s + 1) >> 1
-                val = (j2D(x, y) + hFilterClip(x, y + 1) + 1) >> 1;
-            }
-            else if (dx == 1U && dy == 2U)
-            {
-                // i = (h + j + 1) >> 1
-                val = (vFilterClip(x, y) + j2D(x, y) + 1) >> 1;
-            }
-            else // dx == 3U && dy == 2U
-            {
-                // k = (j + m + 1) >> 1
-                val = (j2D(x, y) + vFilterClip(x + 1, y) + 1) >> 1;
-            }
-
-            dst[row * dstStride + col] = static_cast<uint8_t>(val);
+    const uint8_t* first = org;
+    int32_t firstStride = st;
+    const uint8_t* second = nullptr;
+    int32_t secondStride = 0;
+    auto pick = [](const uint8_t* plane, int32_t stride, const uint8_t*& out, int32_t& outStride) {
+        out = plane; outStride = stride;
+    };
+    switch (dy * 4U + dx)
+    {
+    case 1U: pick(&bPlane[0][0], 16, second, secondStride); break;                    // a
+    case 3U: first = org + 1; pick(&bPlane[0][0], 16, second, secondStride); break;   // c
+    case 4U: pick(&hPlane[0][0], 17, second, secondStride); break;                    // d
+    case 12U: first = org + st; pick(&hPlane[0][0], 17, second, secondStride); break; // n
+    case 5U: pick(&bPlane[0][0], 16, first, firstStride);                             // e
+             pick(&hPlane[0][0], 17, second, secondStride); break;
+    case 7U: pick(&bPlane[0][0], 16, first, firstStride);                             // g
+             pick(&hPlane[0][1], 17, second, secondStride); break;
+    case 13U: pick(&hPlane[0][0], 17, first, firstStride);                            // p
+              pick(&bPlane[1][0], 16, second, secondStride); break;
+    case 15U: pick(&hPlane[0][1], 17, first, firstStride);                            // r
+              pick(&bPlane[1][0], 16, second, secondStride); break;
+    case 6U: pick(&bPlane[0][0], 16, first, firstStride);                             // f
+             pick(&jPlane[0][0], 16, second, secondStride); break;
+    case 14U: pick(&jPlane[0][0], 16, first, firstStride);                            // q
+              pick(&bPlane[1][0], 16, second, secondStride); break;
+    case 9U: pick(&hPlane[0][0], 17, first, firstStride);                             // i
+             pick(&jPlane[0][0], 16, second, secondStride); break;
+    case 11U: pick(&jPlane[0][0], 16, first, firstStride);                            // k
+              pick(&hPlane[0][1], 17, second, secondStride); break;
+    case 10U: pick(&jPlane[0][0], 16, first, firstStride); break;                     // j
+    case 2U: pick(&bPlane[0][0], 16, first, firstStride); break;                      // b at an edge
+    default: pick(&hPlane[0][0], 17, first, firstStride); break;                      // h at an edge
+    }
+    for (int32_t y = 0; y < bh; ++y)
+    {
+        const uint8_t* p = first + y * firstStride;
+        uint8_t* out = dst + static_cast<uint32_t>(y) * dstStride;
+        if (second == nullptr)
+            std::memcpy(out, p, width);
+        else
+        {
+            const uint8_t* q = second + y * secondStride;
+            for (int32_t x = 0; x < bw; ++x)
+                out[x] = static_cast<uint8_t>((p[x] + q[x] + 1) >> 1);
         }
     }
     }  // close L3.1 prefetch+slow-path scope (shadowed getSample ends here)

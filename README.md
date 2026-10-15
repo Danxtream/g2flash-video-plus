@@ -379,6 +379,10 @@ parsing and entropy contexts needed to decode Y correctly.
 omits structured event calls and callback storage; `SUB0H264_TRACE` still
 controls printf tracing independently.
 
+Quarter-pel and diagonal luma motion compensation filters each half-pel plane
+once per block instead of once per output pixel; decoded pictures are
+unchanged.
+
 > **Patent Notice:** H.264/AVC may be covered by patents in some jurisdictions.
 > The patent portfolio is administered by [Via Licensing Alliance](https://via-la.com/licensing-programs/avc-h-264/)
 > (formerly MPEG LA). Most patents have expired; the last known US patents expire
