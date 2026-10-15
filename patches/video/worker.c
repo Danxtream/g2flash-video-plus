@@ -161,6 +161,8 @@ static int video_worker_consume(video_owner *owner) {
     int claimed = !video_lifecycle_cancelled(&ctx->video, owner->token) &&
         video_evidence_space(owner) &&
         video_queue_claim(&owner->queue, owner->token, &view);
+    video_rate_post_worker(&ctx->video_rate, VIDEO_TICK, claimed ? VIDEO_RATE_DECODE :
+        owner->queue.count ? VIDEO_RATE_OUTPUT : VIDEO_RATE_INPUT);
     if (claimed) {
         if (!video_lifecycle_pin(&ctx->video, owner->token, 0)) {
             video_control_give(ctx); video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
@@ -191,6 +193,9 @@ static int video_worker_consume(video_owner *owner) {
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
     ctx->video_decode_last = owner->timing.totals;
     int released = decoded != G2_H264_ERROR && video_queue_release(&owner->queue, &view);
+    if (decoded == G2_H264_FRAME_READY) video_rate_post_worker(&ctx->video_rate, VIDEO_TICK, VIDEO_RATE_FRAME);
+    video_rate_post_worker(&ctx->video_rate, VIDEO_TICK,
+        owner->queue.count ? VIDEO_RATE_OUTPUT : VIDEO_RATE_INPUT);
     int unpinned = video_lifecycle_unpin(&ctx->video, owner->token, 0);
     owner->decode_pin = 0;
     uint32_t fault = decoded == G2_H264_ERROR ? VIDEO_FAULT_FORMAT :

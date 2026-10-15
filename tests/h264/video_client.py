@@ -225,7 +225,7 @@ class VideoClient(VideoLink):
         for raw in replies.values():
             if (raw[:3] != bytes((VERSION, PLAYBACK_CAPABILITIES, 0)) or raw[3] not in (1, 3, 7, 15, 31, 63, 127, 255) or
                     raw[4:6] != bytes((2, 16)) or
-                    (raw[3] & 32 and (raw[6] != 255 or raw[7] not in tuple(range(1, 64, 2)))) or
+                    (raw[3] & 32 and (raw[6] != 255 or raw[7] not in tuple(range(1, 128, 2)))) or
                     (not raw[3] & 32 and raw[6:8] != bytes((0, 0)))):
                 raise ValueError('unsupported queued playback capability')
         self.shown_bytes = {lens: 72 if raw[7] & 4 else 64 for lens, raw in replies.items()}

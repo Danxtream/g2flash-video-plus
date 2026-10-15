@@ -127,6 +127,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_presenter_fault(owner, VIDEO_FAULT_OWNERSHIP);
     video_profile_start_locked(p);
     video_clock_start_locked(ctx);
+    video_rate_start(&ctx->video_rate, ctx->video_control.stream, p->generation, p->token);
     video_control_give(ctx);
     while (!video_lifecycle_cancelled(&ctx->video, p->token)) {
         video_presenter_resources(p);
@@ -137,6 +138,8 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         video_profile_fold_locked(&ctx->video_profile);
         video_clock_step_locked(ctx);
         uint32_t control_now = VIDEO_TICK;
+        video_rate_present(&ctx->video_rate, control_now,
+            p->queue.count && p->queue.slots[p->queue.head].state == VIDEO_DECODED_READY, p->paused);
         int coordinator = !p->paired || p->sync.side == CFW_MESSAGE_RIGHT;
         int boundary = !p->paired || !p->sync.inflight ||
             (p->sync.completed == p->sync.inflight && p->sync.peer_completed == p->sync.inflight);
@@ -189,6 +192,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
             continue;
         }
         if (p->paused || (coordinator && p->control_ack != p->control_serial)) {
+            video_rate_present(&ctx->video_rate, VIDEO_TICK, 0, p->paused);
             buffering = 1;
             video_control_give(ctx);
             if (control_op && !video_presenter_sync_send(p, control_op, control_serial, control_boundary, 0, p->control_menu))
@@ -251,6 +255,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
                 &frame, &media);
         if (claim) {
             p->claim_tick = VIDEO_TICK;
+            video_rate_present(&ctx->video_rate, p->claim_tick, 0, 0);
             ctx->video_control.options = (ctx->video_control.options & ~VIDEO_PRESENT_NATIVE) |
                 (frame.scale == VIDEO_SCALE_NATIVE ? VIDEO_PRESENT_NATIVE : 0);
         }
@@ -296,6 +301,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
             p->paired && p->sync.side == CFW_MESSAGE_LEFT ? p->wire_capture : p->trigger_tick,
             p->queued_ticks[q->head], p->paired ? VIDEO_SHOWN_PAIRED | VIDEO_SHOWN_UNCERTAIN : 0u,
             p->claim_tick, p->submit_tick};
+        video_rate_copy(&ctx->video_rate, shown.copy_tick, media.ordinal, terminal);
         if (frame.format & VIDEO_SOURCE_TV) shown.flags |= VIDEO_SHOWN_TV;
         if (frame.format & VIDEO_SOURCE_UNSIGNALLED) shown.flags |= VIDEO_SHOWN_UNSIGNALLED;
         if (frame.format & VIDEO_SOURCE_DITHER) shown.flags |= VIDEO_SHOWN_DITHER;
@@ -325,6 +331,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
     if (video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) {
         video_profile_fold_locked(&ctx->video_profile);
         video_clock_stop_locked(ctx, p->generation);
+        video_rate_stop(&ctx->video_rate, VIDEO_TICK);
         video_control_give(ctx);
     }
     video_presenter_park(p);
@@ -398,6 +405,7 @@ static int video_presenter_produce(video_owner *owner, const video_frame_descrip
         int room = p->queue.count < p->queue.depth;
         int matched = room && video_timeline_take(&ctx->video_control.timeline,
             p->generation, frame->ordinal, nal_sequence, &media);
+        video_rate_post_worker(&ctx->video_rate, VIDEO_TICK, matched ? VIDEO_RATE_DECODE : VIDEO_RATE_OUTPUT);
         if (matched) {
             if (media.ordinal <= p->preroll) {
                 if (owner->evidence) owner->evidence->building = (video_frame_result){0};
@@ -424,6 +432,8 @@ static int video_presenter_produce(video_owner *owner, const video_frame_descrip
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) return 0;
     int published = copied && video_decoded_publish(&p->queue, p->generation, serial);
     if (published) p->queued_ticks[slot] = VIDEO_TICK;
+    if (published && p->queue.slots[p->queue.head].state == VIDEO_DECODED_READY)
+        video_rate_post_worker(&ctx->video_rate, VIDEO_TICK, VIDEO_RATE_READY);
     video_presenter_wake_locked(owner);
     video_control_give(ctx);
     return published;

@@ -344,7 +344,7 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             entry->snapshot[4] = VIDEO_DECODED_DEPTH;
             entry->snapshot[5] = VIDEO_TIMELINE_FPS;
             entry->snapshot[6] = 255; /* Maximum explicit decoded seek prefix. */
-            entry->snapshot[7] = 55; /* Seek, Y8, copy/trigger, profiling and receive/clock evidence. */
+            entry->snapshot[7] = 119; /* Includes bounded cadence-window evidence. */
             video_write32(entry->snapshot + 8, VIDEO_PRESENTER_A4_LIMIT);
             video_write32(entry->snapshot + 12, VIDEO_PRESENTER_STACK_BYTES);
         }
@@ -386,6 +386,18 @@ static int video_control_command(const uint8_t *data, uint16_t size,
         int radio = size == VIDEO_CONTROL_HEADER_BYTES + 4 &&
             (data[8] == VIDEO_RADIO_DIAGNOSTICS || data[8] == VIDEO_RADIO_REFUSAL_DIAGNOSTICS) &&
             !data[9] && !data[10] && !data[11];
+        if (data[1] == VIDEO_CONTROL_DIAGNOSTICS && size == 24 &&
+            data[8] == VIDEO_RATE_DIAGNOSTICS && data[9] < 3 && !data[10] && !data[11]) {
+            entry->snapshot_bytes = data[9] ? VIDEO_DIAGNOSTICS_BYTES : 144;
+            bzero(entry->snapshot, entry->snapshot_bytes);
+            entry->result = route->origin == s->owner_origin &&
+                video_read32(data + 12) == ctx->video_rate.stream &&
+                video_rate_snapshot(&ctx->video_rate, data[9],
+                    video_read32(data + (route->here == 1 ? 16 : 20)), route->here, entry->snapshot) ?
+                VIDEO_CONTROL_ACCEPTED : VIDEO_CONTROL_STALE;
+            entry->snapshot[0] = 1; entry->snapshot[1] = VIDEO_CONTROL_DIAGNOSTICS;
+            entry->snapshot[2] = entry->result;
+        }
         if (data[1] == VIDEO_CONTROL_DIAGNOSTICS &&
             (size == VIDEO_CONTROL_HEADER_BYTES || radio)) {
             entry->pending = 1;

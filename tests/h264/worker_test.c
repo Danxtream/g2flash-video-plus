@@ -324,6 +324,7 @@ static uint32_t mock_clock_reg(uint32_t address) { return address == 0xe0001000U
 #define VIDEO_CLOCK_CACHED() 2
 #define VIDEO_CLOCK_CYCLES (tick() * 250000u)
 #include "../../patches/video/telemetry.c"
+#include "../../patches/video/rate.c"
 #include "../../patches/video/timeline.c"
 #include "../../patches/video/decoded_queue.c"
 #include "../../patches/video/pacing.c"
@@ -1045,6 +1046,25 @@ static void receive_evidence(void) {
     wrapped.tick = wrapped.after = VIDEO_TICK - 1001;
     video_clock_capture(&context, 1, wrapped); assert(!(s->rows[1][7] & VIDEO_CLOCK_LONG));
     puts("per-origin refusal evidence, contention drops, read-only bracketed clocks and heap-free replies PASS");
+}
+static void rate_contract(void) {
+    configure(); request_next = 0;
+    uint8_t command[24], out[144];
+    context.video_control.owner_origin = 1;
+    video_rate_start(&context.video_rate, 42, 7, 3);
+    video_rate_copy(&context.video_rate, 100, 1, 0);
+    video_rate_present(&context.video_rate, 1100, 0, 0);
+    control_command(command, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_RATE_DIAGNOSTICS);
+    video_write32(command + 12, 42); video_write32(command + 16, 1); video_write32(command + 20, 1);
+    assert(!control_response(command, 24, out, 144));
+    assert(out[3] == 6 && out[4] == 1 && out[6] == 1 && out[28] == 1 && out[29] == 56);
+    assert(video_read32(out + 32) == 1 && video_read32(out + 40) == 1 && !allocation_calls);
+    command[9] = 1; video_write32(command + 4, ++request_next);
+    assert(!control_response(command, 24, out, 128) && out[29] == 32);
+    video_write32(command + 12, 41); video_write32(command + 4, ++request_next);
+    assert(control_response(command, 24, out, 128) == VIDEO_CONTROL_STALE);
+    assert(!context.video_telemetry.reply_busy[0] && !allocations_live);
+    puts("bounded owner-scoped window diagnostics and stale stream refusal PASS");
 }
 static void controls(void) {
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
@@ -2593,6 +2613,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "controls")) controls();
     else if (!strcmp(argv[1], "control-paging")) control_paging();
     else if (!strcmp(argv[1], "receive-evidence")) receive_evidence();
+    else if (!strcmp(argv[1], "rate-contract")) rate_contract();
     else if (!strcmp(argv[1], "credits")) credits();
     else if (!strcmp(argv[1], "diagnostics")) diagnostics();
     else if (!strcmp(argv[1], "control-preparation")) control_preparation();

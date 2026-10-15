@@ -144,6 +144,9 @@ class WorkerTests(unittest.TestCase):
     def test_profile_bounded_posts_wrap_loss_stale_generation_and_frozen_pages(self):
         self.check_case("profile")
 
+    def test_cadence_window_identity_frozen_pages_and_no_heap(self):
+        self.check_case("rate-contract")
+
     def test_ordinary_image_overlay_lease_and_stock_fallback_remain_unchanged(self):
         self.check_case("original-display")
 

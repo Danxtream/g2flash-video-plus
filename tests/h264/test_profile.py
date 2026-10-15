@@ -17,11 +17,11 @@ class ProfileCapabilityTests(unittest.TestCase):
         return client
 
     def test_new_and_old_capabilities_are_explicit(self):
-        for bits in range(1, 64, 2):
+        for bits in range(1, 128, 2):
             self.assertEqual(self.client(bits).playback_capabilities()[1]['profiling'], bool(bits & 16))
             self.assertEqual(self.client(bits).playback_capabilities()[1]['receive_evidence'], bool(bits & 32))
 
     def test_unknown_or_missing_seek_schema_is_rejected(self):
-        for bits in (0, 16, 32, 64, 65, 255):
+        for bits in (0, 16, 32, 64, 128, 129, 255):
             with self.assertRaises(ValueError):
                 self.client(bits).playback_capabilities()

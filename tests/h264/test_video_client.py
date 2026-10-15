@@ -188,15 +188,15 @@ def synthetic_reference(count=32):
 
 class VideoClientTests(unittest.TestCase):
     def test_receive_evidence_capability_preserves_old_flags_and_rejects_unknown_bits(self):
-        for flags in (23, 55, 87):
+        for flags in (23, 55, 119, 151):
             client = VideoClient.__new__(VideoClient)
             client.counter = Counter()
             raw = bytes((1, 13, 0, 255, 2, 16, 255, flags)) + bytes(8)
             client.raw_replies = lambda *_: {1: raw}
-            if flags == 87:
+            if flags == 151:
                 with self.assertRaises(ValueError): client.playback_capabilities()
             else:
-                self.assertEqual(client.playback_capabilities()[1]['receive_evidence'], flags == 55)
+                self.assertEqual(client.playback_capabilities()[1]['receive_evidence'], bool(flags & 32))
 
     def test_presentation_rate_uses_copy_ticks_and_exposes_short_or_missing_windows(self):
         samples = [dict(presented=30, copy_tick=2100), dict(presented=32, copy_tick=2225)]
