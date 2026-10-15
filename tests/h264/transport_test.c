@@ -8,12 +8,14 @@
 #include <zlib.h>
 #include "../../patches/message_transport.h"
 
-static cfw_message_stream streams[2];
+static cfw_message_stream streams[2][2];
 static uint32_t side = 2, received, refused, stock_calls, live;
 static cfw_message_route last_route;
 static uint8_t last_payload[4096];
 static uint16_t last_size;
-typedef struct { uint16_t size; uint8_t bytes[265]; } test_packet;
+static uint32_t connection_epoch = 1;
+#define CFW_CONNECTION_EPOCH() connection_epoch
+typedef struct { uint16_t size; uint8_t bytes[269]; } test_packet;
 static test_packet ble[2048], bridge[2048];
 static uint32_t ble_count, bridge_count;
 
@@ -22,7 +24,7 @@ static void *test_alloc(uint32_t n) {
 }
 static void test_free(void *p) { if (p) { assert(live); --live; free(p); } }
 static cfw_message_stream *test_stream(uint8_t origin) {
-    assert(origin == 1 || origin == 2); return &streams[origin - 1];
+    assert(origin == 1 || origin == 2); return &streams[side == 1 ? 1 : 0][origin - 1];
 }
 static uint32_t test_stock(uint8_t pipe, const uint8_t *p, uint16_t n) {
     (void)pipe; (void)p; (void)n; ++stock_calls; return 17;
@@ -37,7 +39,7 @@ static int test_ble(uint8_t pipe, uint8_t sid, const uint8_t *p, uint16_t n) {
     ble[ble_count].size = n; memcpy(ble[ble_count++].bytes, p, n); return 0;
 }
 static int test_bridge(uint16_t app, const uint8_t *p, uint16_t n, void *argument) {
-    assert(app == CFW_MESSAGE_SID && !argument && n <= 265 && bridge_count < 2048);
+    assert(app == CFW_MESSAGE_SID && !argument && n <= 269 && bridge_count < 2048);
     bridge[bridge_count].size = n; memcpy(bridge[bridge_count++].bytes, p, n); return 0;
 }
 #define CFW_STOCK_RECEIVE test_stock
@@ -114,14 +116,32 @@ static void send_record(const uint8_t *p, uint16_t n, uint8_t targets,
     send_record_chunks(p, n, targets, flags, sequence, z, 9);
 }
 static void cleanup(void) {
-    for (uint32_t i = 0; i < 2; ++i) {
-        cfw_message_discard(&streams[i]); cfw_inflate_reset(&streams[i]);
+    for (uint32_t lens = 0; lens < 2; ++lens) for (uint32_t origin = 0; origin < 2; ++origin) {
+        cfw_message_discard(&streams[lens][origin]); cfw_inflate_reset(&streams[lens][origin]);
     }
     assert(!live);
     memset(streams, 0, sizeof(streams));
     received = refused = ble_count = bridge_count = 0; side = 2;
+    connection_epoch = 1;
 }
 int main(void) {
+    /* Distinct lens contexts: peer proof follows the ingress BLE epoch, not
+     * the unrelated lease-only host connection on the peer. */
+    for (uint8_t ingress = 1; ingress <= 2; ++ingress) {
+        uint8_t data[195] = {7};
+        for (uint32_t turn = 0; turn < 3; ++turn) {
+            side = ingress == 1 ? 2 : 1; bridge_count = 0;
+            if (turn == 2) ++connection_epoch;
+            send_record_chunks(data, turn ? 8 : sizeof(data), 3, CFW_MESSAGE_RESET_CONTEXT, turn * 10, 0, 233);
+            uint32_t requests = bridge_count;
+            side = ingress == 1 ? 1 : 2;
+            for (uint32_t i = 0; i < requests; ++i)
+                assert(!cfw_message_bridge_received(CFW_MESSAGE_SID, bridge[i].bytes, bridge[i].size, 0));
+            assert(last_route.origin == ingress && last_route.here == 3 - ingress);
+            assert(last_route.reply_capacity == (turn == 2 ? 13 : 200));
+        }
+        cleanup();
+    }
     /* Video budgets follow observed packets, independently of ACK history. */
     for (uint8_t lens = 1; lens <= 2; ++lens) {
         for (uint32_t chunk = 9; chunk <= 233; chunk += 224) {
@@ -136,6 +156,9 @@ int main(void) {
             send_record_chunks(padded, 8, lens, 0, 20, 0, chunk);
             assert(last_route.reply_capacity == (chunk == 9 ? 9 : 200));
             send_record_chunks(padded, 8, lens, CFW_MESSAGE_RESET_CONTEXT, 40, 0, chunk);
+            assert(last_route.reply_capacity == (chunk == 9 ? 9 : 200));
+            ++connection_epoch;
+            send_record_chunks(padded, 8, lens, CFW_MESSAGE_RESET_CONTEXT, 60, 0, chunk);
             assert(last_route.reply_capacity == (chunk == 9 ? 9 : 13));
             cleanup();
         }
@@ -218,8 +241,7 @@ int main(void) {
         }
     }
     body[1] = 0;
-    /* RESET_CONTEXT on each record makes capacity depend on that request,
-     * even when the negotiated MTU has room for much larger packets. */
+    /* Compression/record resets retain proof until the BLE epoch changes. */
     for (uint8_t lens = 1; lens <= 2; ++lens) {
         side = lens == CFW_MESSAGE_LEFT ? 2 : 1;
         send_record_chunks(body, 8, lens, CFW_MESSAGE_RESET_CONTEXT, 1, 0, 233);
@@ -230,7 +252,7 @@ int main(void) {
         assert(last_route.reply_capacity == 29);
         body[1] = 5;
         send_record_chunks(body, 9, lens, CFW_MESSAGE_RESET_CONTEXT, 3, 0, 233);
-        assert(last_route.reply_capacity == 14);
+        assert(last_route.reply_capacity == 29);
         assert(received == 3 && ble_count == 6 && !bridge_count);
         cleanup(); body[1] = 0;
     }
@@ -267,7 +289,7 @@ int main(void) {
     assert(received == 2 && !memcmp(body, last_payload, 24));
     refused = 1;
     send_record(body, 24, 1, 0, 40, &z);
-    assert(ble[ble_count - 1].bytes[0] == CFW_MESSAGE_NACK && !streams[0].context_valid);
+    assert(ble[ble_count - 1].bytes[0] == CFW_MESSAGE_NACK && !streams[0][0].context_valid);
     refused = 0;
     send_record(body, 24, 1, 0, 60, &z);
     assert(received == 3 && ble[ble_count - 1].bytes[0] == CFW_MESSAGE_NACK);

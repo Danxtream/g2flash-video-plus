@@ -95,6 +95,9 @@ typedef struct {
     video_radio_link links[VIDEO_RADIO_LINKS];
     video_radio_owner owners[VIDEO_RADIO_OWNERS];
     uint32_t permission_serial;
+    volatile uint32_t transport_epoch;
+    uint32_t transport_link_epoch;
+    uint8_t transport_connection;
     uint32_t serial, completed, epoch;
     uint32_t permission;
     uint8_t connection, operation, tx, rx;
@@ -107,6 +110,8 @@ typedef struct {
 /* Bind only the actual peripheral connection supplied by the stock EUS write
  * callback. No connection enumeration or global current-phone handle is used. */
 void video_radio_bind(uint8_t connection);
+/* Connection identity only; no allocation or context creation in DM callbacks. */
+uint32_t video_radio_transport_epoch(void);
 /* Chain the original registered callbacks exactly once. The DM observer only
  * copies fixed state; it never allocates, waits, or issues a PHY command. */
 void video_radio_dm_event(void *event);

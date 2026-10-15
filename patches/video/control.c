@@ -225,23 +225,26 @@ static int video_control_command(const uint8_t *data, uint16_t size,
     if (data && size >= 2 && data[0] == VIDEO_MESSAGE_ID &&
         data[1] == VIDEO_CONTROL_NAL) {
         if (size <= VIDEO_NAL_HEADER_BYTES || size > VIDEO_RECORD_LIMIT ||
-            !video_route_valid(route)) return -1;
+            !video_route_valid(route)) return video_refused(peekCustomCfwContext(), data, size, route, VIDEO_REFUSAL_FORMAT, 0, 0, 0);
         customCfwContext *ctx = peekCustomCfwContext();
-        if (!ctx || !ctx->image_mutex || !video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) return -1;
+        if (!ctx || !ctx->image_mutex || !video_control_wait(ctx, VIDEO_STOP_LIMIT_MS))
+            return video_refused(ctx, data, size, route, VIDEO_REFUSAL_LOCK, 0, 0, 0);
         video_fold_signals(ctx);
         int copied = video_worker_receive_nal_locked(video_read32(data + 2),
             video_read32(data + 6), data + VIDEO_NAL_HEADER_BYTES,
             size - VIDEO_NAL_HEADER_BYTES, route->origin);
         video_control_give(ctx);
-        return copied > 0 ? 0 : -1;
+        return copied > 0 ? 0 : video_refused(ctx, data, size, route, VIDEO_REFUSAL_COMMAND, 0, 0, (uint32_t)copied);
     }
     if (!data || size < VIDEO_CONTROL_HEADER_BYTES || data[0] != VIDEO_MESSAGE_ID ||
-        data[2] != VIDEO_PROTOCOL_VERSION || data[3] || !video_route_valid(route)) return -1;
+        data[2] != VIDEO_PROTOCOL_VERSION || data[3] || !video_route_valid(route))
+        return video_refused(peekCustomCfwContext(), data, size, route, VIDEO_REFUSAL_FORMAT, 0, 0, 0);
     uint32_t request = video_read32(data + 4);
-    if (!request) return -1;
-    if (!video_worker_ensure_mutex()) return -1;
+    if (!request) return video_refused(peekCustomCfwContext(), data, size, route, VIDEO_REFUSAL_FORMAT, 0, 0, 1);
+    if (!video_worker_ensure_mutex()) return video_refused(peekCustomCfwContext(), data, size, route, VIDEO_REFUSAL_LOCK, 0, 0, 2);
     customCfwContext *ctx = peekCustomCfwContext();
-    if (!ctx || !ctx->image_mutex || !video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) return -1;
+    if (!ctx || !ctx->image_mutex || !video_control_wait(ctx, VIDEO_STOP_LIMIT_MS))
+        return video_refused(ctx, data, size, route, VIDEO_REFUSAL_LOCK, 0, 0, 0);
     video_fold_signals(ctx);
     video_control_state *s = &ctx->video_control;
     if (__atomic_exchange_n(&s->controller_failed, 0, __ATOMIC_ACQ_REL)) {
@@ -256,18 +259,19 @@ static int video_control_command(const uint8_t *data, uint16_t size,
     uint32_t page = 0;
     if (data[1] == VIDEO_CONTROL_PAGE) {
         if (size < VIDEO_CONTROL_HEADER_BYTES + 1 || !entry) {
-            video_control_give(ctx); return -1;
+            video_control_give(ctx);
+            return video_refused(ctx, data, size, route, entry ? VIDEO_REFUSAL_FORMAT : VIDEO_REFUSAL_MISSING, 0, 0, 0);
         }
         page = data[8];
     } else if (entry) {
         int equal = size == entry->length;
         for (uint32_t i = 0; equal && i < size; ++i) equal = data[i] == entry->command[i];
         if (!equal) {
-            video_control_give(ctx); return -1;
+            video_control_give(ctx); return video_refused(ctx, data, size, route, VIDEO_REFUSAL_REPLAY, 0, 0, 0);
         }
     } else {
         if (request <= s->request_high[origin] || size > VIDEO_START_BYTES) {
-            video_control_give(ctx); return -1;
+            video_control_give(ctx); return video_refused(ctx, data, size, route, VIDEO_REFUSAL_REPLAY, 0, 0, s->request_high[origin]);
         }
         entry = &s->replay[origin][s->replay_next[origin]];
         s->replay_next[origin] = (s->replay_next[origin] + 1) % VIDEO_CONTROL_REPLAYS;
@@ -340,7 +344,7 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             entry->snapshot[4] = VIDEO_DECODED_DEPTH;
             entry->snapshot[5] = VIDEO_TIMELINE_FPS;
             entry->snapshot[6] = 255; /* Maximum explicit decoded seek prefix. */
-            entry->snapshot[7] = 23; /* Seek, Y8, copy/trigger and bounded profiling. */
+            entry->snapshot[7] = 55; /* Seek, Y8, copy/trigger, profiling and receive/clock evidence. */
             video_write32(entry->snapshot + 8, VIDEO_PRESENTER_A4_LIMIT);
             video_write32(entry->snapshot + 12, VIDEO_PRESENTER_STACK_BYTES);
         }
@@ -364,6 +368,21 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             entry->snapshot[0] = VIDEO_PROTOCOL_VERSION; entry->snapshot[1] = VIDEO_CONTROL_DIAGNOSTICS;
             entry->snapshot[2] = entry->result;
         }
+        if (data[1] == VIDEO_CONTROL_DIAGNOSTICS && size == 12 && !data[10] && !data[11] &&
+            (data[8] == VIDEO_REFUSAL_DIAGNOSTICS || data[8] == VIDEO_CLOCK_DIAGNOSTICS)) {
+            bzero(entry->snapshot, VIDEO_DIAGNOSTICS_BYTES);
+            entry->snapshot_bytes = VIDEO_DIAGNOSTICS_BYTES;
+            if (data[8] == VIDEO_REFUSAL_DIAGNOSTICS)
+                entry->result = data[9] < 2 ? video_refusal_snapshot(ctx, data[9] + 1, route->here, entry->snapshot) : VIDEO_CONTROL_FORMAT;
+            else {
+                entry->result = data[9] < 3 ? VIDEO_CONTROL_ACCEPTED : VIDEO_CONTROL_FORMAT;
+                if (data[9] < 3) memcpy(entry->snapshot, ctx->video_telemetry.clock.rows[data[9]], VIDEO_DIAGNOSTICS_BYTES);
+                entry->snapshot[3] = VIDEO_CLOCK_DIAGNOSTICS; entry->snapshot[4] = data[9];
+                entry->snapshot[5] = 1; entry->snapshot[6] = route->here;
+            }
+            entry->snapshot[0] = VIDEO_PROTOCOL_VERSION; entry->snapshot[1] = VIDEO_CONTROL_DIAGNOSTICS;
+            entry->snapshot[2] = entry->result;
+        }
         int radio = size == VIDEO_CONTROL_HEADER_BYTES + 4 &&
             (data[8] == VIDEO_RADIO_DIAGNOSTICS || data[8] == VIDEO_RADIO_REFUSAL_DIAGNOSTICS) &&
             !data[9] && !data[10] && !data[11];
@@ -378,9 +397,10 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             int sampled = radio ? data[8] == VIDEO_RADIO_REFUSAL_DIAGNOSTICS ?
                 VIDEO_RADIO_REFUSAL_SNAPSHOT(snapshot) : VIDEO_RADIO_SNAPSHOT(snapshot) :
                 video_diagnostics_snapshot(snapshot);
-            if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) return -1;
+            if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS))
+                return video_refused(ctx, data, size, route, VIDEO_REFUSAL_LOCK, 0, 0, 1);
             if (entry->request != request || !entry->pending) {
-                video_control_give(ctx); return -1;
+                video_control_give(ctx); return video_refused(ctx, data, size, route, VIDEO_REFUSAL_MISSING, 0, 0, 1);
             }
             entry->pending = 0;
             entry->result = sampled ? VIDEO_CONTROL_ACCEPTED : VIDEO_CONTROL_BUSY;
@@ -393,11 +413,15 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             entry->snapshot_bytes = VIDEO_DIAGNOSTICS_BYTES;
         }
     }
-    if (entry->pending) { video_control_give(ctx); return -1; }
+    if (entry->pending) {
+        video_control_give(ctx); return video_refused(ctx, data, size, route, VIDEO_REFUSAL_PENDING, 0, 0, 0);
+    }
     uint32_t count = entry->capacity - VIDEO_REPLY_HEADER_BYTES;
     uint32_t pages = (entry->snapshot_bytes + count - 1) / count;
     if (page >= pages || route->reply_capacity < entry->capacity) {
-        video_control_give(ctx); return -1;
+        uint8_t capacity = entry->capacity;
+        video_control_give(ctx);
+        return video_refused(ctx, data, size, route, page >= pages ? VIDEO_REFUSAL_PAGE : VIDEO_REFUSAL_CAPACITY, capacity, pages, 0);
     }
     reply[0] = VIDEO_MESSAGE_ID; reply[1] = route->here;
     video_write32(reply + 2, request);
@@ -406,10 +430,13 @@ static int video_control_command(const uint8_t *data, uint16_t size,
     if (count > entry->snapshot_bytes - offset) count = entry->snapshot_bytes - offset;
     memcpy(reply + VIDEO_REPLY_HEADER_BYTES, entry->snapshot + offset, count);
     int accepted = data[1] == VIDEO_CONTROL_PAGE || entry->result == VIDEO_CONTROL_ACCEPTED;
+    uint8_t frozen_capacity = entry->capacity, result = entry->result;
     video_control_give(ctx);
     /* Both transport send services copy before return; no owner pointer is
      * retained and the owned reply remains valid through the enqueue. */
     int sent = cfw_message_video_reply(route, reply, VIDEO_REPLY_HEADER_BYTES + count);
+    if (sent || !accepted)
+        return video_refused(ctx, data, size, route, sent ? VIDEO_REFUSAL_SEND : VIDEO_REFUSAL_COMMAND, frozen_capacity, pages, sent ? (uint32_t)sent : result);
     return !sent && accepted ? 0 : -1;
 }
 
@@ -418,12 +445,17 @@ int video_control_received(const uint8_t *data, uint16_t size,
     if (data && size >= 2 && data[0] == VIDEO_MESSAGE_ID && data[1] == VIDEO_CONTROL_NAL)
         return video_control_command(data, size, route, 0);
     if (!data || size < VIDEO_CONTROL_HEADER_BYTES || !video_route_valid(route)) return -1;
-    /* Receive tasks can overlap. Own each buffer through the copied enqueue,
-     * without increasing the task stack or holding the image lock in malloc. */
-    uint8_t *reply = cfw_message_video_reply_allocate(VIDEO_PAGE_REPLY_CAPACITY);
-    if (!reply) return -1;
+    customCfwContext *ctx = peekCustomCfwContext();
+    if (!ctx) return -1;
+    uint32_t origin = route->origin - 1, empty = 0;
+    /* Fixed per-origin scratch survives unlocked diagnostic sampling and the
+     * copied enqueue. A nested same-origin request refuses, never overwrites. */
+    if (!__atomic_compare_exchange_n(&ctx->video_telemetry.reply_busy[origin], &empty, 1, 0,
+                                      __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+        return video_refused(ctx, data, size, route, VIDEO_REFUSAL_PENDING, 0, 0, 1);
+    uint8_t *reply = ctx->video_telemetry.reply[origin];
     int result = video_control_command(data, size, route, reply);
-    cfw_message_video_reply_free(reply);
+    __atomic_store_n(&ctx->video_telemetry.reply_busy[origin], 0, __ATOMIC_RELEASE);
     return result;
 }
 

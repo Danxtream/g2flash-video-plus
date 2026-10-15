@@ -87,6 +87,9 @@ class WorkerTests(unittest.TestCase):
     def test_control_pages_fit_smaller_query_budgets_without_reexecuting_start(self):
         self.check_case("control-paging")
 
+    def test_heap_free_replies_refusal_rings_and_read_only_clock_brackets(self):
+        self.check_case("receive-evidence")
+
     def test_compact_credits_bind_each_lens_token_and_preserve_frozen_replays(self):
         self.check_case("credits")
 

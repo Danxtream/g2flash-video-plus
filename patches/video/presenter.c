@@ -126,6 +126,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
     }
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_presenter_fault(owner, VIDEO_FAULT_OWNERSHIP);
     video_profile_start_locked(p);
+    video_clock_start_locked(ctx);
     video_control_give(ctx);
     while (!video_lifecycle_cancelled(&ctx->video, p->token)) {
         video_presenter_resources(p);
@@ -134,6 +135,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
             video_presenter_fault(owner, VIDEO_FAULT_OWNERSHIP);
         uint32_t control_op = 0, control_serial = 0, control_boundary = 0;
         video_profile_fold_locked(&ctx->video_profile);
+        video_clock_step_locked(ctx);
         uint32_t control_now = VIDEO_TICK;
         int coordinator = !p->paired || p->sync.side == CFW_MESSAGE_RIGHT;
         int boundary = !p->paired || !p->sync.inflight ||
@@ -322,6 +324,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
     }
     if (video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) {
         video_profile_fold_locked(&ctx->video_profile);
+        video_clock_stop_locked(ctx, p->generation);
         video_control_give(ctx);
     }
     video_presenter_park(p);

@@ -43,6 +43,9 @@ static int video_shown_snapshot_locked(customCfwContext *, const uint8_t *, uint
 static int video_prepare_shadow(video_owner *);
 static int video_menu_draw(uint8_t *, uint32_t, uint32_t, uint32_t);
 static int video_profile_pack(uint8_t *, uint32_t, const video_frame_descriptor *);
+static int video_refused(customCfwContext *, const uint8_t *, uint16_t,
+                         const cfw_message_route *, uint8_t, uint8_t, uint8_t, uint32_t);
+static int video_refusal_snapshot(customCfwContext *, uint8_t, uint8_t, uint8_t *);
 
 static void video_decode_before(video_owner *, uint32_t, uint8_t);
 static void video_decode_after(video_owner *, g2_h264_result);

@@ -54,12 +54,10 @@ static uint32_t pool_count, fail_pool, pool_calls;
 static uint8_t control_reply[CFW_VIDEO_REPLY_MAX_SIZE];
 static uint32_t fail_reply, reply_live;
 void *cfw_message_video_reply_allocate(uint32_t size) {
-    assert(!image_depth && size <= CFW_VIDEO_REPLY_MAX_SIZE);
-    if (fail_reply) return 0;
-    ++reply_live; return malloc(size);
+    (void)size; assert(0 && "Reply pages must not allocate"); return 0;
 }
 void cfw_message_video_reply_free(void *reply) {
-    assert(!image_depth && reply && reply_live); --reply_live; free(reply);
+    (void)reply; assert(0 && "Reply pages must not free temporary heap storage");
 }
 static uint32_t control_reply_size;
 static void (*heap_sample_hook)(void);
@@ -159,7 +157,7 @@ static int pool_dispatch(const video_pool_item *item) {
 int cfw_message_video_reply(const cfw_message_route *route, const uint8_t *p, uint16_t n) {
     assert(!image_depth && route && n >= 9 && n <= route->reply_capacity &&
            n <= sizeof(control_reply) && p[0] == VIDEO_MESSAGE_ID && p[1] == route->here);
-    memcpy(control_reply, p, n); control_reply_size = n; return 0;
+    memcpy(control_reply, p, n); control_reply_size = n; return fail_reply ? -1 : 0;
 }
 static uint32_t new_thread(void (*fn)(void *), void *arg, const video_thread_attr *attr);
 static int terminate(uint32_t id);
@@ -321,6 +319,11 @@ static int worker_radio_refusal_snapshot(uint8_t *out) {
 }
 #define VIDEO_RADIO_REFUSAL_SNAPSHOT worker_radio_refusal_snapshot
 #include "../../patches/video/control.c"
+static uint32_t mock_clock_reg(uint32_t address) { return address == 0xe0001000U ? 1 : address; }
+#define VIDEO_CLOCK_READ32 mock_clock_reg
+#define VIDEO_CLOCK_CACHED() 2
+#define VIDEO_CLOCK_CYCLES (tick() * 250000u)
+#include "../../patches/video/telemetry.c"
 #include "../../patches/video/timeline.c"
 #include "../../patches/video/decoded_queue.c"
 #include "../../patches/video/pacing.c"
@@ -981,7 +984,8 @@ static void control_paging(void) {
     control_command(p, VIDEO_CONTROL_STATUS, 0);
     cfw_message_route route = {1, 1, 1, 200, 0};
     fail_reply = 1;
-    assert(video_control_received(p, 8, &route) && !context.video_control.request_high[0]);
+    assert(video_control_received(p, 8, &route) && context.video_control.request_high[0]);
+    assert(context.video_telemetry.refusals[0].rows[0][14] == VIDEO_REFUSAL_SEND);
     fail_reply = 0;
     assert(!video_control_received(p, 8, &route) && control_reply_size == 200 && control_reply[7] == 1);
     uint8_t page[195] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_PAGE, VIDEO_PROTOCOL_VERSION};
@@ -993,7 +997,54 @@ static void control_paging(void) {
     assert(video_control_received(page, sizeof(page), &route));
     page[8] = 0; page[4]++;
     assert(video_control_received(page, sizeof(page), &route) && !reply_live);
-    puts("frozen bounded pages, padded fetches, allocation failure and both lenses PASS");
+    puts("heap-free frozen pages, padded fetches, send failure and both lenses PASS");
+}
+static void receive_evidence(void) {
+    configure(); request_next = 0;
+    uint8_t command[VIDEO_START_BYTES], out[128], page[9] = {31, 5, 1};
+    cfw_message_route route = {1, 1, 1, 200, 0};
+    control_command(command, VIDEO_CONTROL_STATUS, 0);
+    assert(!video_control_received(command, 8, &route));
+    memcpy(page + 4, command + 4, 4);
+    page[8] = 1; assert(video_control_received(page, 9, &route));
+    page[8] = 0; route.reply_capacity = 199; assert(video_control_received(page, 9, &route));
+    route.reply_capacity = 200; page[4]++; assert(video_control_received(page, 9, &route));
+    context.video_telemetry.reply_busy[0] = 1;
+    assert(video_control_received(command, 8, &route));
+    context.video_telemetry.reply_busy[0] = 0;
+    control_command(command, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_REFUSAL_DIAGNOSTICS);
+    assert(!control_response(command, 12, out, sizeof(out)));
+    assert(out[3] == 4 && out[4] == 1 && out[5] == 1 && out[7] == 4 && out[16] == 24);
+    uint8_t expected[] = {VIDEO_REFUSAL_PENDING, VIDEO_REFUSAL_MISSING, VIDEO_REFUSAL_CAPACITY, VIDEO_REFUSAL_PAGE};
+    for (uint32_t i = 0; i < 4; ++i) assert(out[32 + i * 24 + 14] == expected[i]);
+    assert(!allocation_calls && !allocations_live && !context.video_telemetry.reply_busy[0]);
+    video_refusal_ring *ring = &context.video_telemetry.refusals[1];
+    ring->busy = 1; route.origin = 2;
+    assert(video_refused(&context, page, 9, &route, VIDEO_REFUSAL_LOCK, 0, 0, 0));
+    assert(ring->dropped == 1); ring->busy = 0;
+    assert(video_refused(&context, page, 9, &route, VIDEO_REFUSAL_LOCK, 0, 0, 0));
+    assert(!video_refusal_snapshot(&context, 2, 1, out) && out[7] == 1 && video_read32(out + 12) == 1);
+
+    context.video_control.stream = 42; context.video_control.control_generation = 7;
+    context.video_control.owner_here = 1;
+    uint32_t inits = clock_inits;
+    video_clock_start_locked(&context);
+    video_clock_state *s = &context.video_telemetry.clock;
+    assert(s->rows[0][7] & VIDEO_CLOCK_VALID);
+    s->anchor.tick -= 300; s->anchor.after -= 300; s->anchor.cycles -= 75000000u;
+    video_clock_step_locked(&context);
+    assert((s->rows[1][7] & (VIDEO_CLOCK_VALID | VIDEO_CLOCK_LONG | VIDEO_CLOCK_COUNTER)) == 7);
+    video_clock_stop_locked(&context, 6); assert(!s->rows[2][7]);
+    video_clock_stop_locked(&context, 7); assert(s->rows[2][7] & VIDEO_CLOCK_LONG);
+    assert(video_read32(s->rows[1] + 40) == 0x40021000 && video_read32(s->rows[1] + 76) == 2);
+    assert(clock_inits == inits); /* Sampling never enables or changes a clock. */
+    control_command(command, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_CLOCK_DIAGNOSTICS); command[9] = 2;
+    assert(!control_response(command, 12, out, sizeof(out)) && out[3] == 5 && out[4] == 2 && video_read32(out + 8) == 42);
+    video_clock_pair wrapped = {VIDEO_TICK - 300, (uint32_t)VIDEO_CLOCK_CYCLES - 75000000u, VIDEO_TICK - 300, 0};
+    video_clock_capture(&context, 1, wrapped); assert(s->rows[1][7] & VIDEO_CLOCK_CHANGED);
+    wrapped.tick = wrapped.after = VIDEO_TICK - 1001;
+    video_clock_capture(&context, 1, wrapped); assert(!(s->rows[1][7] & VIDEO_CLOCK_LONG));
+    puts("per-origin refusal evidence, contention drops, read-only bracketed clocks and heap-free replies PASS");
 }
 static void controls(void) {
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
@@ -1078,7 +1129,7 @@ static void evict_diagnostics(void) {
     uint8_t request[VIDEO_START_BYTES];
     for (uint32_t i = 0; i < VIDEO_CONTROL_REPLAYS; ++i) {
         control_command(request, VIDEO_CONTROL_STATUS, 0);
-        assert(!video_control_received(request, 8, &control_route));
+        assert(video_control_received(request, 8, &control_route));
     }
 }
 static void sleep_during_heap_sample(void) { diagnostic_display_state = 0; }
@@ -1143,7 +1194,7 @@ static void diagnostics(void) {
            video_read32(last->snapshot + 124) == 4096);
     control_command(request, VIDEO_CONTROL_DIAGNOSTICS, 0);
     heap_sample_hook = evict_diagnostics;
-    assert(video_control_received(request, 8, &control_route) == -1);
+    assert(!video_control_received(request, 8, &control_route));
     assert(!allocation_calls && !creates && !image_depth);
     heap_sample_hook = 0; radio_samples = 0;
     control_command(request, VIDEO_CONTROL_DIAGNOSTICS, 0); request[8] = VIDEO_RADIO_DIAGNOSTICS;
@@ -2541,6 +2592,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "preparation")) preparation_cancel();
     else if (!strcmp(argv[1], "controls")) controls();
     else if (!strcmp(argv[1], "control-paging")) control_paging();
+    else if (!strcmp(argv[1], "receive-evidence")) receive_evidence();
     else if (!strcmp(argv[1], "credits")) credits();
     else if (!strcmp(argv[1], "diagnostics")) diagnostics();
     else if (!strcmp(argv[1], "control-preparation")) control_preparation();

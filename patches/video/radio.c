@@ -119,9 +119,22 @@ void video_radio_bind(uint8_t id) {
     const uint8_t *ccb = video_radio_live(id);
     if (!ccb) return;
     VIDEO_RADIO_LOCK();
-    if (video_radio_attach(&ctx->video_radio.links[id - 1], ccb))
+    if (video_radio_attach(&ctx->video_radio.links[id - 1], ccb)) {
         ctx->video_radio.links[id - 1].bound = 1;
+        video_radio_state *s = &ctx->video_radio;
+        if (s->transport_connection != id || s->transport_link_epoch != s->links[id - 1].epoch) {
+            uint32_t epoch = __atomic_load_n(&s->transport_epoch, __ATOMIC_RELAXED);
+            if (epoch != UINT32_MAX) __atomic_store_n(&s->transport_epoch, epoch + 1, __ATOMIC_RELEASE);
+            s->transport_connection = id; s->transport_link_epoch = s->links[id - 1].epoch;
+        }
+    }
     VIDEO_RADIO_UNLOCK();
+}
+
+uint32_t video_radio_transport_epoch(void) {
+    customCfwContext *ctx = VIDEO_RADIO_CONTEXT();
+    uint32_t epoch = ctx ? __atomic_load_n(&ctx->video_radio.transport_epoch, __ATOMIC_ACQUIRE) : 0;
+    return epoch == UINT32_MAX ? 0 : epoch;
 }
 
 #ifndef VIDEO_RADIO_NOTIFY
@@ -142,6 +155,11 @@ void video_radio_dm_event(void *event) {
                 const uint8_t *ccb = video_radio_live(id);
                 if (ccb) video_radio_attach(link, ccb);
             } else if (data[2] == VIDEO_RADIO_DM_CLOSE) {
+                if (s->transport_connection == id) {
+                    uint32_t epoch = __atomic_load_n(&s->transport_epoch, __ATOMIC_RELAXED);
+                    if (epoch != UINT32_MAX) __atomic_store_n(&s->transport_epoch, epoch + 1, __ATOMIC_RELEASE);
+                    s->transport_connection = 0; s->transport_link_epoch = 0;
+                }
                 link->connected = link->bound = link->valid = 0;
                 link->permission = 0;
                 link->before.valid = link->after.valid = 0;

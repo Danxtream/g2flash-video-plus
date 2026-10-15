@@ -244,18 +244,29 @@ duplicates refuse. Each reply freezes its bounded snapshot. A page query
 has the original request ID and one page byte, and never executes the control.
 One response per query fits the proven notification capacity, including MTU23.
 The frozen page width uses the largest proven ingress packet capacity in
-its compression context, capped at 200 bytes including the reply header.
+its BLE connection epoch, capped at 200 bytes including the reply header.
 Ordinary ACK sizes and history remain unchanged. PAGE accepts at least nine
 bytes, ignoring trailing padding. Pad PAGE to 195 bytes so its five-byte
 record header proves room for a 200-byte reply; compressed senders need fresh
-incompressible padding. A context reset starts with the new packet's budget,
-and a short first command can still freeze a narrow reply. Retrying a control
+incompressible padding. Record and compression resets retain that proof;
+a changed BLE epoch clears it before parsing any new connection's bytes.
+A short first command can still freeze a narrow reply. Retrying a control
 or proving a larger budget later does not change its original page width.
-MTU23 retains its small inferred budget. Replies use owned temporary heap
-storage, reused for diagnostic sampling, instead of a page-sized stack array.
+MTU23 retains its small inferred budget. Replies use two fixed 200-byte buffers
+in the CFW context, one per origin, instead of temporary heap or stack storage.
+An atomic per-origin claim protects unlocked diagnostic sampling through the
+copied send; image_mutex protects replay construction. Same-origin overlap
+refuses instead of overwriting the scratch. Request decoding and copied stock
+send queues retain their existing allocation and reserve checks.
 Replies are ID31, source lens bit, LE32 request ID, page/count and snapshot bytes.
 The distinct bridge video-return envelope leaves upstream ACK/NACK validation
-unchanged. Send services copy each bounded stack reply before return.
+unchanged. Send services copy each bounded reply before return. Private bridge
+requests carry the ingress connection's LE32 epoch after kind/origin; returns
+keep their original header. Both lenses must run this transport version. This
+does not change the UART configuration. The DM adapter advances the epoch on
+host rebinding/disconnect; receivers discard old reconstruction, inflater and
+budget before accepting bytes tagged with a different epoch. No proof is
+retained when the adapter cannot establish an epoch.
 
 Snapshot bytes 0..3 are version, supported stage, control result and lifecycle
 state; LE32 values at 4/8/12/16/20/24/28 are stream, generation, left/right request
@@ -920,3 +931,37 @@ evaluation are already in each cell; the decoded-luma curve selects the raw
 table. Width alignment guarantees an even centered x, while both centered
 row phases are retained. Native scale keeps the scalar path. No new frame
 RAM, extra Y8 copy, decoder change or phase approximation is required.
+
+## Receive And Clock Evidence
+
+Playback capability byte 7 bit 5 advertises diagnostic kinds 4 and 5. Both use
+opcode 7 and a twelve-byte request: kind at 8, selector at 9, zero bytes 10..11.
+They return frozen 128-byte snapshots through the normal PAGE contract.
+
+Kind 4 selects origin index 0 or 1. Header bytes 3..7 are kind, schema 1,
+origin bit, responding lens and row count. LE32 serial/dropped are at 8/12;
+byte 16 is row size 24. Four newest-first records start at 32. Each contains
+LE32 serial/tick/request at 0/4/8, opcode/page/reason/proven budget at 12..15,
+frozen capacity/page count at 16/17, and LE32 detail at 20. For NALs the request
+field is the NAL sequence. Reasons are 1 lock timeout, 2 missing entry, 3 page
+range, 4 capacity, 5 pending/scratch overlap, 6 reserved reply-allocation,
+7 copied-send failure, 8 format, 9 replay and 10 command result. Reply allocation
+cannot fail now because the scratch is context-owned. A bounded atomic claim
+protects each ring even after a control-lock timeout; contention increments
+dropped rather than waiting. This evidence covers dispatched video requests,
+not failures decoding a compressed record before its opcode is known.
+
+Kind 5 selects START/steady/STOP indices 0/1/2. The presenter alone captures
+samples, including stop before normal park, under publication protection. No
+clock service is called and no register is written. Bytes 3..7 are kind, phase,
+schema 1, lens and flags: valid 1, 250..1000 ms bracket 2, CYCCNT enabled 4,
+performance request changed 8, tick-pair skew 16. Missing samples stay invalid.
+LE32 stream/generation are at 8/12. First tick/CYCCNT/tick-after are at 16/20/24;
+last are at 28/32/36. Raw words at 40..92 are MCUPERFREQ, CLKGEN CLOCKENSTAT,
+MISC, CLKCTRL, MCUCTRL PLLCTL0, PLLDIV0, PLLDIV1, manager word, DWT CTRL,
+SDK cached mode, ending MCUPERFREQ, starting MCUPERFREQ, PLLSTAT and PLLMUXCTL.
+Source/divider offsets follow Apollo510 CMSIS; donor mode/cache/manager addresses
+are fixed to the guarded image. Clock transitions, stopped counters, long spans
+or tick skew prevent a trustworthy cycle ratio; raw evidence is retained.
+The rolling steady bracket is at least 250 ms without sleeping or busy-waiting.
+These snapshots do not establish a physical core frequency by themselves.

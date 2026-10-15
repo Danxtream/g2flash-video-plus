@@ -57,6 +57,7 @@
 #include "video/controller.c"
 #include "video/diagnostics.c"
 #include "video/control.c"
+#include "video/telemetry.c"
 #include "video/timeline.c"
 #include "video/decoded_queue.c"
 #include "video/pacing.c"

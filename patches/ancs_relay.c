@@ -124,6 +124,8 @@ static void ancs_restored(customCfwContext *ctx) {
  * the existing SID-f0 hook) remains intact for every non-ANCS command. */
 uint8_t cfw_ancs_write(uint8_t connection, uint16_t handle, uint8_t operation,
     uint16_t offset, uint16_t length, const uint8_t *value, const void *attribute) {
+    /* Private records already require a context; bind before their first byte. */
+    if (value && length >= 8 && value[0] == 0xaa && value[6] == CFW_MESSAGE_SID) ANCS_ALLOC();
     video_radio_bind(connection);
     if (!value || length < 2 || value[0] != 'A' || value[1] != 'N')
         return ANCS_STOCK_WRITE(connection,handle,operation,offset,length,value,attribute);

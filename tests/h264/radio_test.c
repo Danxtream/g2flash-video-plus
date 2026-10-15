@@ -193,6 +193,8 @@ int main(void) {
     assert(!context.video_radio.links[1].connected);
     video_radio_bind(1);
     video_radio_link *link = &context.video_radio.links[0];
+    assert(video_radio_transport_epoch() == 1);
+    video_radio_bind(1); assert(video_radio_transport_epoch() == 1);
     assert(link->connected && link->bound && link->epoch == 1 && link->handle == 0x123);
     assert(!video_radio_request(1, 0, VIDEO_RADIO_READ, 0, 0, 0));
     assert(!video_radio_request(1, 1, VIDEO_RADIO_SET, 2, 2, 7));
@@ -217,6 +219,7 @@ int main(void) {
     event(VIDEO_RADIO_DM_CLOSE, 1, 0x123, 0, 0, 0);
     live(1, 0x123, 1); event(VIDEO_RADIO_DM_OPEN, 1, 0x123, 0, 0, 0); video_radio_bind(1);
     assert(link->epoch == 2 && !link->valid && !link->permission);
+    assert(video_radio_transport_epoch() == 3);
     dispatch(); assert(reads == 1); /* Even handle reuse cannot inherit mail. */
     assert(video_radio_request(1, 2, VIDEO_RADIO_READ, 0, 0, 0));
     room = 0; dispatch(); room = 1; assert(reads == 1 && context.video_radio.result == 2);
