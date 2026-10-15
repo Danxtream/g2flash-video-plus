@@ -56,9 +56,24 @@ def decoder_identity():
     return hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest(), rows
 
 
+def reference_rate(path, data):
+    """Keep an audited clip's cadence, never guess one from decoder output."""
+    sidecar = Path(path).with_suffix('.g2.json')
+    if not sidecar.exists():
+        return None
+    metadata = json.loads(sidecar.read_text(encoding='utf-8'))
+    if metadata.get('fps') not in (10, 15, 20):
+        raise ValueError('re-convert video at 10, 15 or 20 fps')
+    encoded = metadata.get('h264', {})
+    if encoded.get('bytes') != len(data) or encoded.get('sha256') != hashlib.sha256(data).hexdigest():
+        raise ValueError('clip rate sidecar does not match encoded video')
+    return int(metadata['fps'])
+
+
 def make_reference(path, exe, output=None, previews=None):
     """Return actual completed pictures, active-plane CRC and contributing NALs."""
     data, nals = read_nals(path)
+    fps = reference_rate(path, data)
     wire = b''.join(struct.pack('<I', len(nal)) + nal for nal in nals)
     with tempfile.TemporaryFile() as raw:
         result = subprocess.run([str(exe)], input=wire, stdout=raw, stderr=subprocess.PIPE)
@@ -97,6 +112,8 @@ def make_reference(path, exe, output=None, previews=None):
                      nal_sizes=list(map(len, nals)), nal_count=len(nals), frame_count=len(frames), frames=frames,
                      format='progressive 320x192 I/P; ref1; two DPB; single slice; no crop/FMO/weighted prediction/I_PCM',
                      skip_chroma=True)
+    if fps is not None:
+        reference['fps'] = fps
     if output is not None:
         Path(output).write_text(json.dumps(reference, indent=2) + '\n', encoding='utf-8')
     return reference

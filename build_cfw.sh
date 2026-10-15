@@ -47,7 +47,7 @@ PATCH_JSON="patches/cfw_patches.json"   # committed patch set (applied to produc
 GEN="patches/gen_patches.py"      # clang: (re)generate the patch set
 APPLY="patches/apply_patches.py"  # no clang: replay the patch set onto BASE
 BASE_SHA256="a03fbea9f68a9de6bc271daabb9f3a41c59053d1086622c76a4e990f829cc561"
-OUT_SHA256="0d16548b49e6a1b685f45bd151fb2cf3a634a55967349b4523d9a043d043f9d0"
+OUT_SHA256="eb379da18c330486f9a864be28ef0e9a17565dc6e48cf6f5a70e9a3cef306e54"
 
 SKIP_VENV=0
 FORCE_DOWNLOAD=0

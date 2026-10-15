@@ -3,9 +3,10 @@
 #include "../memory.h"
 #pragma clang section text=".text.video"
 
-void video_rate_start(video_rate_state *s, uint32_t stream, uint32_t generation, uint32_t token) {
+void video_rate_start(video_rate_state *s, uint32_t stream, uint32_t generation, uint32_t token, uint32_t period_ms) {
     *s = (video_rate_state){0};
     s->stream = stream; s->generation = generation; s->token = token;
+    s->period_ms = period_ms;
     s->mode = VIDEO_RATE_INPUT; s->posted_mode = VIDEO_RATE_INPUT;
 }
 void video_rate_post_worker(video_rate_state *s, uint32_t tick, uint32_t code) {
@@ -69,8 +70,8 @@ static void video_rate_fold(video_rate_state *s, uint32_t now) {
         else if (p->code == VIDEO_RATE_FRAME) {
             if (s->frame_ms > s->current.decode_max) s->current.decode_max = s->frame_ms;
             if (s->frame_ms > s->gap_decode) s->gap_decode = s->frame_ms;
-            /* Millisecond quantization makes 63 ms borderline, not proof. */
-            if (s->frame_ms >= 64) ++s->current.overrun;
+            /* One quantized millisecond over the clip period is not proof. */
+            if (s->frame_ms > s->period_ms) ++s->current.overrun;
             s->frame_ms = 0;
         } else if (p->code == VIDEO_RATE_READY) s->ready = 1;
         s->head = (s->head + 1) % VIDEO_RATE_POSTS; --s->count;
@@ -97,7 +98,7 @@ void video_rate_copy(video_rate_state *s, uint32_t tick, uint32_t ordinal, uint3
         else { ++s->gaps[bin]; ++s->gap_count; }
         if (gap > s->gap_max) s->gap_max = gap;
     }
-    if (gap > 64 && s->dip_high != UINT32_MAX) {
+    if (gap > s->period_ms + 1 && s->dip_high != UINT32_MAX) {
         video_rate_dip *d = &s->dips[s->dip_high % VIDEO_RATE_ROWS];
         *d = (video_rate_dip){++s->dip_high, s->copy_tick - s->anchor,
             tick - s->anchor, s->ordinal, ordinal, gap, s->gap_flags, s->gap_decode};

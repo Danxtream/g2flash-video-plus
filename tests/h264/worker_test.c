@@ -353,7 +353,7 @@ static int test_sync_send(const uint8_t *body) {
             assert(video_sync_receive(&partner, source, stream, operation, ordinal, pts, body[20], body[21]));
             if (video_sync_trigger(&partner)) {
                 if (!partner_anchor) partner_anchor = tick();
-                uint32_t due = partner_anchor + (ordinal - 1) * 1000 / 16;
+                uint32_t due = partner_anchor + (ordinal - 1) * 1000 / 15;
                 while ((int32_t)(due - tick()) > 0) delay(1);
                 reply[3] = VIDEO_SYNC_TRIGGER; reply[20] = 0; reply[21] = partner_native;
                 assert(video_sync_complete(&partner, ordinal));
@@ -1051,7 +1051,7 @@ static void rate_contract(void) {
     configure(); request_next = 0;
     uint8_t command[24], out[144];
     context.video_control.owner_origin = 1;
-    video_rate_start(&context.video_rate, 42, 7, 3);
+    video_rate_start(&context.video_rate, 42, 7, 3, 67);
     video_rate_copy(&context.video_rate, 100, 1, 0);
     video_rate_present(&context.video_rate, 1100, 0, 0);
     control_command(command, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_RATE_DIAGNOSTICS);
@@ -1458,7 +1458,7 @@ int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
         /* The terminating slice carries its own frame time instead of a
          * separate offer; a full timeline refuses it and the loop retries. */
         record[1] = VIDEO_CONTROL_NAL_TIMED; header = VIDEO_NAL_TIMED_HEADER_BYTES;
-        video_write32(record + 10, sequence - 1); video_write32(record + 14, (sequence - 2) * 1000 / 16);
+        video_write32(record + 10, sequence - 1); video_write32(record + 14, ((sequence - 2) * 1000 + 7) / 15);
         assert(header + bytes <= VIDEO_RECORD_LIMIT);
     }
     memcpy(record + header, nal, bytes);
@@ -1466,7 +1466,7 @@ int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
     if (queued_upload && !timed_upload && sequence >= 2) {
         /* This fixture emits exactly one terminating slice per picture;
          * production clients obtain these identities from decoded references. */
-        video_frame_time media = {sequence - 1, sequence, (sequence - 2) * 1000 / 16};
+        video_frame_time media = {sequence - 1, sequence, ((sequence - 2) * 1000 + 7) / 15};
         for (;;) {
             assert(!take(1, 1000));
             int offered = video_timeline_offer_preroll(&context.video_control.timeline, 1,
@@ -1546,7 +1546,7 @@ static void exercise_pause(void) {
     uint32_t frozen = copied_frames;
     assert(frozen > 0 && frozen < 32);
     if (playback_pause_fixture == 2) {
-        assert(frozen == 1 && owner->presenter->media_shown == 8 && owner->presenter->done_pts == 437);
+        assert(frozen == 1 && owner->presenter->media_shown == 8 && owner->presenter->done_pts == 467);
         assert(owner->presenter->queue.released == 8 && consumed_frames > frozen);
     }
     for (uint32_t i = 0; i < 150; ++i) { display_pump(); pool_drain(); delay(1); }
@@ -1561,7 +1561,7 @@ static void exercise_pause(void) {
         assert(owner->presenter->menu.seek_serial == 1 && !owner->presenter->menu.seek_target);
         menu_fixture_command(VIDEO_CONTROL_MENU, VIDEO_MENU_NEXT, 5);
         menu_fixture_command(VIDEO_CONTROL_MENU, VIDEO_MENU_APPLY, 5);
-        assert(owner->presenter->menu.seek_serial == 2 && owner->presenter->menu.seek_target == 2000);
+        assert(owner->presenter->menu.seek_serial == 2 && owner->presenter->menu.seek_target == 2133);
         menu_fixture_command(VIDEO_CONTROL_MENU, VIDEO_MENU_CLOSE, 0);
         for (uint32_t i = 432 * VIDEO_PANEL_STRIDE; i < VIDEO_PANEL_BYTES; ++i) assert(!physical_frame[i]);
         menu_fixture_command(VIDEO_CONTROL_MENU, VIDEO_MENU_OPEN, 1);
@@ -1587,7 +1587,7 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
     uint32_t prefix = with_pause == 2 ? 7 : 0, visible = 32 - prefix;
     partner.next = prefix + 1;
     context.framebuffer_shadow = 0;
-    assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, prefix * 1000 / 16, 16, 1));
+    assert(video_timeline_configure(&context.video_control.timeline, 1, (32000 + 7) / 15, (prefix * 1000 + 7) / 15, 15, 1));
     context.video_control.owner_origin = 1;
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
     control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_QUEUED_PRESENTATION;
@@ -1616,7 +1616,7 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
         if (done) break;
         assert((int32_t)(limit - tick()) > 0 && !context.video.fault); delay(1);
     }
-    assert(tick() - started >= (visible - 1) * 1000 / 16 && consumed_frames == 32 && decoded_calls == 34);
+    assert(tick() - started >= (visible - 1) * 1000 / 15 && consumed_frames == 32 && decoded_calls == 34);
     assert(!picture_relock_refusals);
     assert(playback_pause_count == (uint32_t)(with_pause != 0)); playback_pause_fixture = 0;
     assert(owner->presenter->queue.released == 32);
@@ -1651,7 +1651,7 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
     paired_fixture = 0;
     for (uint32_t fail = 8; fail <= 10; ++fail) {
         configure(); request_next = 0; fail_at = fail;
-        assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, 0, 16, 1));
+        assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, 0, 15, 1));
         context.video_control.owner_origin = 1;
         control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_QUEUED_PRESENTATION;
         assert(!video_control_received(p, 24, &route));
@@ -1675,7 +1675,7 @@ static void timed_record(uint8_t *record, uint32_t sequence, uint32_t ordinal, u
 }
 static void timed_input(void) {
     configure(); request_next = 0;
-    assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, 0, 16, 1));
+    assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, 0, 15, 1));
     context.video_control.owner_origin = 1;
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
     uint8_t record[VIDEO_NAL_TIMED_HEADER_BYTES + 2], plain[VIDEO_NAL_HEADER_BYTES + 2];
@@ -1745,7 +1745,7 @@ static void dither_consumer(void) {
     dither_fixture = 0;
     queued_consumer_mode(0, 0); /* Fresh default generation returns to A4. */
     configure(); request_next = 0; views[0].max_alloc = 100000;
-    assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, 0, 16, 1));
+    assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, 0, 15, 1));
     context.video_control.owner_origin = 1;
     uint8_t p[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
     control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_DITHER_PRESENTATION;

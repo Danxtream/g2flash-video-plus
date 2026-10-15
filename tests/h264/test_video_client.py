@@ -183,7 +183,7 @@ def synthetic_reference(count=32):
     nals = [b'\x67', b'\x68'] + [b'\x65' if not n else b'\x41' for n in range(count)]
     frames = [dict(ordinal=n + 1, first_nal=0 if not n else n + 2, last_nal=n + 2,
                    crc=0x12345678, width=320, height=192, kind='P' if n else 'IDR') for n in range(count)]
-    return nals, dict(nal_count=len(nals), nal_sizes=list(map(len, nals)), frame_count=count, frames=frames)
+    return nals, dict(fps=15, nal_count=len(nals), nal_sizes=list(map(len, nals)), frame_count=count, frames=frames)
 
 
 class VideoClientTests(unittest.TestCase):
@@ -191,7 +191,7 @@ class VideoClientTests(unittest.TestCase):
         for flags in (23, 55, 119, 247, 150):
             client = VideoClient.__new__(VideoClient)
             client.counter = Counter()
-            raw = bytes((1, 13, 0, 255, 2, 16, 255, flags)) + bytes(8)
+            raw = bytes((1, 13, 0, 255, 2, 7, 255, flags)) + bytes(8)
             client.raw_replies = lambda *_: {1: raw}
             if flags == 150:
                 with self.assertRaises(ValueError): client.playback_capabilities()

@@ -45,7 +45,7 @@ class TriggerTimingTests(unittest.TestCase):
         def replies(payload, length, **kwargs):
             sent.append((payload, length, kwargs))
             if payload[1] == 13:
-                return {2: bytes((1, 13, 0, 255, 2, 16, 255, 7)) + struct.pack('<II', 77824, 8192)}
+                return {2: bytes((1, 13, 0, 255, 2, 7, 255, 7)) + struct.pack('<II', 77824, 8192)}
             return {2: self.report()}
         client.raw_replies = replies
         self.assertTrue(client.playback_capabilities()[2]['trigger_timing'])

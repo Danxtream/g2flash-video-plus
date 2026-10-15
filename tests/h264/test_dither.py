@@ -17,7 +17,7 @@ class DitherTests(unittest.TestCase):
         client = video_client.VideoClient.__new__(video_client.VideoClient)
         client.counter = SimpleNamespace(reserve=lambda: 1)
         for flags in (1, 3):
-            raw = bytes((1, 13, 0, 255, 2, 16, 255, flags)) + struct.pack('<II', 77824, 8192)
+            raw = bytes((1, 13, 0, 255, 2, 7, 255, flags)) + struct.pack('<II', 77824, 8192)
             client.raw_replies = lambda *args, **kwargs: {1: raw, 2: raw}
             self.assertEqual(client.playback_capabilities()[2]['dither'], flags == 3)
 

@@ -7,29 +7,32 @@ static uint32_t word(const uint8_t *p) {
 }
 int main(void) {
     video_rate_state s; uint8_t reply[144];
+    for (uint32_t fps = 10; fps <= 20; fps += 5) {
     for (uint32_t anchor = 0; ; anchor = UINT32_MAX - 100) {
-        video_rate_start(&s, 8, 9, 10);
+        uint32_t period = (1000 + fps - 1) / fps;
+        video_rate_start(&s, 8, 9, 10, period);
         video_rate_copy(&s, anchor, 1, 0);
-        for (uint32_t i = 1; i <= 160; ++i) {
-            video_rate_present(&s, anchor + (i * 125) / 2, 1, 0);
-            video_rate_copy(&s, anchor + (i * 125) / 2, i + 1, 0);
+        for (uint32_t i = 1; i <= fps * 10; ++i) {
+            video_rate_present(&s, anchor + i * 1000 / fps, 1, 0);
+            video_rate_copy(&s, anchor + i * 1000 / fps, i + 1, 0);
         }
-        assert(s.high == 10 && s.rows[9 % 8].shown == 16);
+        assert(s.high == 10 && s.rows[9 % 8].shown == fps);
         assert(video_rate_snapshot(&s, 0, 1, 1, reply));
         assert(reply[28] == 2 && reply[29] == 56 && word(reply + 32) == 3);
         uint32_t phases = 0;
         for (uint32_t j = 0; j < 10; ++j) phases += (word(reply + 80 + (j >= 8 ? 4 : 0)) >> ((j % 8) * 4)) & 15;
-        assert(phases == 16);
-        assert(word(reply + 40) == 16 && word(reply + 44) <= 63);
+        assert(phases == fps);
+        assert(word(reply + 40) == fps && word(reply + 44) <= period);
         assert(!s.dip_high && !(s.flags & VIDEO_RATE_INVALID));
-        assert(video_rate_snapshot(&s, 2, 0, 1, reply) && word(reply + 24) == 160 && reply[28] == 16);
-        assert(s.gaps[5] == 80 && s.gaps[6] == 80 && word(reply + 96) == 63);
+        assert(video_rate_snapshot(&s, 2, 0, 1, reply) && word(reply + 24) == fps * 10 && reply[28] == 16);
+        assert(word(reply + 96) == period);
         video_rate_stop(&s, anchor + 10010);
         uint32_t high = s.high;
         video_rate_present(&s, anchor + 30000, 0, 0); assert(s.high == high);
         if (anchor) break;
     }
-    video_rate_start(&s, 8, 9, 10); video_rate_copy(&s, 0, 1, 0);
+    }
+    video_rate_start(&s, 8, 9, 10, 67); video_rate_copy(&s, 0, 1, 0);
     video_rate_post_worker(&s, 0, VIDEO_RATE_DECODE);
     video_rate_post_worker(&s, 80, VIDEO_RATE_FRAME);
     video_rate_post_worker(&s, 80, VIDEO_RATE_OUTPUT);
@@ -43,7 +46,7 @@ int main(void) {
     assert(s.rows[1].flags & VIDEO_RATE_PAUSED);
     video_rate_copy(&s, 2100, 3, 1); uint32_t high = s.high;
     video_rate_present(&s, 10000, 0, 0); assert(s.high == high);
-    video_rate_start(&s, 9, 10, 11); video_rate_copy(&s, 10, 1, 0);
+    video_rate_start(&s, 9, 10, 11, 67); video_rate_copy(&s, 10, 1, 0);
     for (uint32_t i = 0; i <= VIDEO_RATE_POSTS; ++i) video_rate_post_worker(&s, 11 + i, VIDEO_RATE_FRAME);
     assert(s.flags & VIDEO_RATE_INVALID);
     video_rate_present(&s, 100010, 0, 0); assert(s.high >= 99);

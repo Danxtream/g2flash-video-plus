@@ -127,7 +127,9 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_presenter_fault(owner, VIDEO_FAULT_OWNERSHIP);
     video_profile_start_locked(p);
     video_clock_start_locked(ctx);
-    video_rate_start(&ctx->video_rate, ctx->video_control.stream, p->generation, p->token);
+    const uint32_t fps = ctx->video_control.timeline.fps;
+    const uint32_t period_ms = (1000 + fps - 1) / fps;
+    video_rate_start(&ctx->video_rate, ctx->video_control.stream, p->generation, p->token, period_ms);
     video_control_give(ctx);
     while (!video_lifecycle_cancelled(&ctx->video, p->token)) {
         video_presenter_resources(p);
@@ -208,7 +210,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
                q->slots[(q->head + ready_depth) % q->depth].state == VIDEO_DECODED_READY) ++ready_depth;
         /* Prebuffer two pictures, except an explicitly timed terminal picture.
          * After starvation re-anchor, never run a catch-up presentation burst. */
-        int terminal = available && ctx->video_control.timeline.duration - q->slots[q->head].media.pts <= VIDEO_PRESENT_PERIOD_CEIL_MS;
+        int terminal = available && ctx->video_control.timeline.duration - q->slots[q->head].media.pts <= period_ms;
         uint32_t ready_pts = available ? q->slots[q->head].media.pts : 0;
         int advertise = 0;
         if (p->paired && available) {
@@ -225,7 +227,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         if (available && buffering && (ready_depth == q->depth || terminal) &&
             (!p->paired || p->sync.side == 1 ||
              (p->sync.peer_ordinal == ordinal && (p->sync.peer_depth == q->depth || p->sync.peer_terminal)))) {
-            video_pacing_anchor(&p->pacing, p->generation, ordinal, now);
+            video_pacing_anchor(&p->pacing, p->generation, ordinal, now, fps);
             buffering = 0;
         }
         if (available && !buffering &&
@@ -317,9 +319,9 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         p->done_pts = media.pts;
         /* Copy/decode overrun holds the cadence instead of showing overdue
          * pictures back-to-back. RIGHT paired coordination extends this later. */
-        if ((int32_t)(VIDEO_TICK - deadline) >= VIDEO_PRESENT_PERIOD_CEIL_MS) {
+        if ((int32_t)(VIDEO_TICK - deadline) >= (int32_t)period_ms) {
             ++p->holds;
-            video_pacing_anchor(&p->pacing, p->generation, ordinal + 1, VIDEO_TICK + VIDEO_PRESENT_PERIOD_CEIL_MS);
+            video_pacing_anchor(&p->pacing, p->generation, ordinal + 1, VIDEO_TICK + period_ms, fps);
         }
         VIDEO_OS_EVENT_SET(owner->wake, VIDEO_WAKE_INPUT);
         video_control_give(ctx);

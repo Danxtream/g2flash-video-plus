@@ -371,7 +371,7 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             entry->snapshot[1] = VIDEO_PLAYBACK_CAPABILITIES;
             entry->snapshot[3] = VIDEO_PLAYBACK_QUEUE | VIDEO_PLAYBACK_PAIRED | VIDEO_PLAYBACK_METADATA | VIDEO_PLAYBACK_SHOWN | VIDEO_PLAYBACK_CONTROLS | VIDEO_PLAYBACK_SEEK | VIDEO_PLAYBACK_MENU | VIDEO_PLAYBACK_POLICY;
             entry->snapshot[4] = VIDEO_DECODED_DEPTH;
-            entry->snapshot[5] = VIDEO_TIMELINE_FPS;
+            entry->snapshot[5] = VIDEO_TIMELINE_RATE_MASK;
             entry->snapshot[6] = 255; /* Maximum explicit decoded seek prefix. */
             entry->snapshot[7] = 247; /* Adds timed NAL records and timeline credits; 8 stays reserved. */
             video_write32(entry->snapshot + 8, VIDEO_PRESENTER_A4_LIMIT);

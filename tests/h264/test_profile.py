@@ -13,7 +13,7 @@ class ProfileCapabilityTests(unittest.TestCase):
         client = VideoClient.__new__(VideoClient)
         client.counter = SimpleNamespace(reserve=lambda: 1)
         client.raw_replies = lambda payload, length: {
-            1: bytes((1, PLAYBACK_CAPABILITIES, 0, 255, 2, 16, 255, bits)) + struct.pack('<II', 77824, 8192)}
+            1: bytes((1, PLAYBACK_CAPABILITIES, 0, 255, 2, 7, 255, bits)) + struct.pack('<II', 77824, 8192)}
         return client
 
     def test_new_and_old_capabilities_are_explicit(self):

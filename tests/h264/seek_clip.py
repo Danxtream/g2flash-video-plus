@@ -3,6 +3,7 @@
 SPDX-License-Identifier: GPL-3.0-only
 """
 import math
+from bisect import bisect_left
 
 
 class ParameterBits:
@@ -51,9 +52,13 @@ def prepare_seek(nals, reference, target_ms):
         raise ValueError('seek source/reference mismatch')
     if not isinstance(target_ms, (int, float)) or not math.isfinite(target_ms):
         raise ValueError('invalid seek position')
-    duration = (len(frames) * 1000 + 15) // 16
+    fps = reference.get('fps')
+    if fps not in (10, 15, 20):
+        raise ValueError('re-convert video at 10, 15 or 20 fps')
+    duration = (len(frames) * 1000 + fps // 2) // fps
     requested = max(0, min(duration, int(target_ms)))
-    target = min(len(frames) - 1, (requested * 16 + 999) // 1000)
+    target = min(len(frames) - 1, bisect_left(
+        range(len(frames)), requested, key=lambda i: (i * 1000 + fps // 2) // fps))
     idr = next((i for i in range(target, -1, -1) if frames[i]['kind'] == 'IDR'), None)
     if idr is None or target - idr > 255:
         raise ValueError('no bounded preceding IDR')
@@ -90,7 +95,7 @@ def prepare_seek(nals, reference, target_ms):
     offset = 2 - start
     timeline = []
     for index, row in enumerate(frames[idr:]):
-        timeline.append(dict(row, ordinal=index + 1, pts_ms=(idr + index) * 1000 // 16,
+        timeline.append(dict(row, ordinal=index + 1, pts_ms=((idr + index) * 1000 + fps // 2) // fps,
                              first_nal=0 if index == 0 else row['first_nal'] + offset,
                              last_nal=row['last_nal'] + offset))
     hidden = target - idr

@@ -27,7 +27,7 @@ class SeekTests(unittest.TestCase):
         nals = [sps, pps, idr, predicted, unrelated_sps, unrelated_pps, idr, predicted]
         frames = [dict(ordinal=i + 1, kind=kind, first_nal=first, last_nal=last, crc=i)
                   for i, (kind, first, last) in enumerate((('IDR', 0, 2), ('P', 3, 3), ('IDR', 4, 6), ('P', 7, 7)))]
-        return nals, dict(nal_count=len(nals), nal_sizes=list(map(len, nals)), frame_count=4, frames=frames)
+        return nals, dict(nal_count=len(nals), nal_sizes=list(map(len, nals)), frame_count=4, frames=frames, fps=15)
 
     def test_seek_selects_applicable_not_latest_parameters_and_preserves_tail(self):
         nals, source = self.fixture()
@@ -36,7 +36,7 @@ class SeekTests(unittest.TestCase):
         self.assertEqual(reference['preroll'], 1)
         self.assertEqual(reference['decoded_frame_count'], 2)
         self.assertEqual(reference['frame_count'], 1)
-        self.assertEqual(reference['start_pts_ms'], 187)
+        self.assertEqual(reference['start_pts_ms'], 200)
         self.assertEqual(reference['timeline_frames'][1]['ordinal'], 2)
         self.assertEqual(reference['frames'][0]['ordinal'], 1)
         self.assertEqual(reference['frames'][0]['first_nal'], 3)
@@ -46,7 +46,7 @@ class SeekTests(unittest.TestCase):
     def test_clamps_edges_and_rejects_missing_idr_parameters_and_bad_input(self):
         nals, source = self.fixture()
         self.assertEqual(prepare_seek(nals, source, -10)[1]['start_pts_ms'], 0)
-        self.assertEqual(prepare_seek(nals, source, 99999)[1]['start_pts_ms'], 187)
+        self.assertEqual(prepare_seek(nals, source, 99999)[1]['start_pts_ms'], 200)
         with self.assertRaises(ValueError): prepare_seek(nals, source, float('nan'))
         nals[0] = b'\x67\x42\x00\x1e' + ue_bytes(2)
         source['nal_sizes'] = list(map(len, nals))
@@ -63,3 +63,17 @@ class SeekTests(unittest.TestCase):
     def test_prefix_reader_rejects_truncation_and_bad_escape(self):
         for nal in (b'\x68', b'\x68\x00\x00\x03\x04', b'\x68' + b'\x00' * 8):
             with self.assertRaises(ValueError): ParameterBits(nal).ue()
+
+    def test_seek_uses_supported_clip_rate_and_rounded_boundaries(self):
+        nals, source = self.fixture()
+        for fps in (10, 15, 20):
+            source['fps'] = fps
+            pts = (1000 + fps // 2) // fps
+            selected = prepare_seek(nals, source, pts)[1]
+            self.assertEqual(selected['start_pts_ms'], pts)
+            self.assertEqual(selected['preroll'], 1)
+            self.assertEqual(selected['duration_ms'], (4000 + fps // 2) // fps)
+        for fps in (None, 16, 30):
+            source['fps'] = fps
+            with self.assertRaisesRegex(ValueError, 're-convert'):
+                prepare_seek(nals, source, 0)

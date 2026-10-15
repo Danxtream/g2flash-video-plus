@@ -13,7 +13,7 @@ class GrayCurveTests(unittest.TestCase):
         client = VideoClient.__new__(VideoClient)
         client.counter = SimpleNamespace(reserve=lambda: 9)
         client.raw_replies = lambda payload, length: {
-            lens: bytes((1, PLAYBACK_CAPABILITIES, 0, 255, 2, 16, 255, advanced)) +
+            lens: bytes((1, PLAYBACK_CAPABILITIES, 0, 255, 2, 7, 255, advanced)) +
                 struct.pack('<II', 77824, 8192) for lens in (1, 2)
         }
         return client

@@ -6,7 +6,7 @@ enum {
     VIDEO_TIMELINE_VERSION = 1,
     VIDEO_TIMELINE_RECORDS = 4,
     VIDEO_TIMELINE_BYTES = 24,
-    VIDEO_TIMELINE_FPS = 16
+    VIDEO_TIMELINE_RATE_MASK = 7 /* Bits 0/1/2: 10/15/20 pictures per second. */
 };
 
 typedef struct {
@@ -16,7 +16,7 @@ typedef struct {
 /* NAL sequence identifies the terminating slice, not a count of pictures.
  * Keep this fixed mailbox separate from decoded pixels and decoder references. */
 typedef struct {
-    uint32_t stream, generation, duration, start_pts;
+    uint32_t stream, generation, duration, start_pts, fps;
     uint32_t accepted, consumed, last_nal, last_pts;
     uint8_t head, count, configured, active;
     video_frame_time frames[VIDEO_TIMELINE_RECORDS];

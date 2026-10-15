@@ -17,8 +17,6 @@ enum {
     VIDEO_DITHER_PRESENTATION = 16,
     VIDEO_START_PAUSED = 32,
     VIDEO_PREROLL_SHIFT = 16,
-    /* Terminal detection and late-frame holds use one rounded cadence period. */
-    VIDEO_PRESENT_PERIOD_CEIL_MS = (1000 + VIDEO_TIMELINE_FPS - 1) / VIDEO_TIMELINE_FPS,
     VIDEO_PRESENTER_STACK_BYTES = 8192,
     /* Separate from the decoder cap: pixels, guarded stack, TCB/events/ledger
      * and room for the later bounded sync/report records, with charged headers. */

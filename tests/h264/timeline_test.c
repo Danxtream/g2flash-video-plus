@@ -6,14 +6,20 @@
 int main(void) {
     video_timeline s = {0};
     video_frame_time out = {0};
-    assert(!video_timeline_configure(&s, 0, 1000, 0, 16, 1));
-    assert(!video_timeline_configure(&s, 1, 1000, 1001, 16, 1));
-    assert(!video_timeline_configure(&s, 1, 1000, 0, 15, 1));
-    assert(video_timeline_configure(&s, 1, 1000, 0, 16, 1));
+    for (uint32_t fps = 10; fps <= 20; fps += 5) {
+        assert(video_timeline_configure(&s, 1, 1000, 0, fps, 1));
+        assert(s.fps == fps);
+    }
+    assert(!video_timeline_configure(&s, 1, 1000, 0, 30, 1));
+    assert(!video_timeline_configure(&s, 1, 1000, 0, 15, 2));
+    assert(!video_timeline_configure(&s, 0, 1000, 0, 15, 1));
+    assert(!video_timeline_configure(&s, 1, 1000, 1001, 15, 1));
+    assert(!video_timeline_configure(&s, 1, 1000, 0, 16, 1));
+    assert(video_timeline_configure(&s, 1, 1000, 0, 15, 1));
     assert(!video_timeline_start(&s, 2, 7));
     assert(!video_timeline_start(&s, 1, 0));
     assert(video_timeline_start(&s, 1, 7));
-    assert(!video_timeline_configure(&s, 2, 1000, 0, 16, 1));
+    assert(!video_timeline_configure(&s, 2, 1000, 0, 15, 1));
     for (uint32_t i = 1; i <= VIDEO_TIMELINE_RECORDS; ++i) {
         video_frame_time f = {i, 2 * i, (i - 1) * 62};
         assert(!video_timeline_offer(&s, 1, 8, &f));
@@ -47,7 +53,7 @@ int main(void) {
     assert(!video_timeline_offer(&s, 1, 7, &next));
     video_timeline_stop(&s, 7);
     assert(!s.active && !s.configured && !s.count);
-    assert(video_timeline_configure(&s, 2, 1000, 500, 16, 1));
+    assert(video_timeline_configure(&s, 2, 1000, 500, 15, 1));
     assert(video_timeline_start(&s, 2, 8));
     next = (video_frame_time){1, 4, 500};
     assert(video_timeline_offer(&s, 2, 8, &next));
@@ -55,7 +61,7 @@ int main(void) {
     assert(s.active);
     puts("Bounded picture timelines, duplicate/conflict, NAL independence and stale generations PASS");
     video_timeline_stop(&s, 8);
-    assert(video_timeline_configure(&s, 3, 1000, 125, 16, 1));
+    assert(video_timeline_configure(&s, 3, 1000, 125, 15, 1));
     assert(video_timeline_start(&s, 3, 9));
     next = (video_frame_time){1, 2, 0};
     assert(!video_timeline_offer(&s, 3, 9, &next));

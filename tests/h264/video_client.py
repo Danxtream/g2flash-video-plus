@@ -224,21 +224,21 @@ class VideoClient(VideoLink):
         replies = self.raw_replies(payload, 16)
         for raw in replies.values():
             if (raw[:3] != bytes((VERSION, PLAYBACK_CAPABILITIES, 0)) or raw[3] not in (1, 3, 7, 15, 31, 63, 127, 255) or
-                    raw[4:6] != bytes((2, 16)) or
+                    raw[4:6] != bytes((2, 7)) or
                     (raw[3] & 32 and (raw[6] != 255 or raw[7] not in tuple(range(1, 256, 2)))) or
                     (not raw[3] & 32 and raw[6:8] != bytes((0, 0)))):
                 raise ValueError('unsupported queued playback capability')
         self.shown_bytes = {lens: 72 if raw[7] & 4 else 64 for lens, raw in replies.items()}
-        return {lens: dict(timed_nal=bool(raw[7] & 128), receive_evidence=bool(raw[7] & 32), profiling=bool(raw[7] & 16), trigger_timing=bool(raw[7] & 4), dither=bool(raw[7] & 2), policy=bool(raw[3] & 128), menu=bool(raw[3] & 64), seek=bool(raw[3] & 32), max_preroll=raw[6], controls=bool(raw[3] & 16), shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], fps=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
+        return {lens: dict(timed_nal=bool(raw[7] & 128), receive_evidence=bool(raw[7] & 32), profiling=bool(raw[7] & 16), trigger_timing=bool(raw[7] & 4), dither=bool(raw[7] & 2), policy=bool(raw[3] & 128), menu=bool(raw[3] & 64), seek=bool(raw[3] & 32), max_preroll=raw[6], controls=bool(raw[3] & 16), shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4], rates=(10, 15, 20), rate_mask=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
                            stack_bytes=struct.unpack_from('<I', raw, 12)[0]) for lens, raw in replies.items()}
 
-    def configure_timeline(self, stream, duration_ms, start_pts_ms=0):
+    def configure_timeline(self, stream, duration_ms, start_pts_ms=0, fps=15):
         """Prepare optional picture metadata without enabling queued presentation."""
-        if not 0 < stream <= 0xffffffff or not 0 < duration_ms <= 0xffffffff or not 0 <= start_pts_ms <= duration_ms:
+        if fps not in (10, 15, 20) or not 0 < stream <= 0xffffffff or not 0 < duration_ms <= 0xffffffff or not 0 <= start_pts_ms <= duration_ms:
             raise ValueError('invalid timeline stream, duration or position')
         request = self.counter.reserve()
         payload = struct.pack('<BBBBIIIIHH', MESSAGE, TIMELINE, VERSION, 0,
-                              request, stream, duration_ms, start_pts_ms, 16, 1)
+                              request, stream, duration_ms, start_pts_ms, fps, 1)
         return paired_report({lens: status(raw) for lens, raw in
                               self.raw_replies(payload, BASE_STATUS_BYTES).items()})
 
@@ -366,7 +366,9 @@ class VideoClient(VideoLink):
             raise ValueError('use source-tagged replies for paired commands')
         return next(iter(self.raw_replies(payload, length).values()))
 
-    def command(self, op, stream=0, *, native=False, verify=False, queued=False, paired=False, paused=False, dither=False, preroll=0, radio="video", token=0, ordinal=0, lens=None):
+    def command(self, op, stream=0, *, native=False, verify=False, queued=False, paired=False, paused=False, dither=False, preroll=0, radio="video", token=0, ordinal=0, lens=None, fps=15):
+        if op == START and fps not in (10, 15, 20):
+            raise ValueError('re-convert video at 10, 15 or 20 fps')
         if radio not in ("off", "video"):
             raise ValueError("radio mode must be off or video")
         if paired and not queued:
@@ -393,6 +395,7 @@ class VideoClient(VideoLink):
         if op == START:
             payload[18] = (NATIVE if native else 0) | (VERIFY_FRAMES if verify else 0) | (RADIO_OFF if radio == "off" else 0) | (QUEUED if queued else 0) | (PAIRED if paired else 0) | (START_PAUSED if paused else 0) | (DITHER if dither else 0)
             payload[19] = preroll
+            struct.pack_into('<I', payload, 20, (1000 + fps - 1) // fps)
         return paired_report({source: status(raw) for source, raw in
                               self.raw_replies(payload, STATUS_BYTES if op == STATUS else BASE_STATUS_BYTES).items()})
 
@@ -455,8 +458,8 @@ class DirectPairClient:
     def playback_capabilities(self):
         return {side: client.playback_capabilities()[side] for side, client in self.clients.items()}
 
-    def configure_timeline(self, stream, duration_ms, start_pts_ms=0):
-        return paired_report({side: client.configure_timeline(stream, duration_ms, start_pts_ms)
+    def configure_timeline(self, stream, duration_ms, start_pts_ms=0, fps=15):
+        return paired_report({side: client.configure_timeline(stream, duration_ms, start_pts_ms, fps)
                               for side, client in self.clients.items()})
 
     def frame_time_fast(self, stream, ordinal, nal_sequence, pts_ms):
@@ -694,6 +697,9 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, queued=Fa
         raise ValueError('radio mode must be off or video')
     if dither and not queued:
         raise ValueError('dithering requires queued playback')
+    fps = reference.get('fps')
+    if queued and fps not in (10, 15, 20):
+        raise ValueError('re-convert video at 10, 15 or 20 fps')
     if (len(nals) != reference['nal_count'] or list(map(len, nals)) != reference['nal_sizes'] or
             reference['frame_count'] != len(reference['frames']) or not reference['frame_count'] or
             any(not data or len(data) > 4086 for data in nals)):
@@ -719,14 +725,15 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, queued=Fa
             raise ValueError('every recipient must advertise queued playback and compact metadata')
         if ((preroll or paused) and any(not r.get('seek') or preroll > r['max_preroll'] for r in playback.values())):
             raise ValueError('seek/paused preview is not advertised by every recipient')
-        if client.configure_timeline(stream, reference.get('duration_ms', (reference['frame_count'] * 1000 + 15) // 16),
-                                     reference.get('start_pts_ms', 0))['result']:
+        if client.configure_timeline(stream, reference.get('duration_ms', (reference['frame_count'] * 1000 + fps // 2) // fps),
+                                     reference.get('start_pts_ms', 0), fps)['result']:
             raise ValueError('timeline configuration refused')
     deadline = clock() + timeout
     try:
         start_options = dict(native=native, verify=verify, radio=radio)
         if queued:
             start_options['queued'] = True
+            start_options['fps'] = fps
             if dither: start_options['dither'] = True
             if preroll or paused:
                 start_options.update(preroll=preroll, paused=paused)
@@ -828,7 +835,7 @@ def stream_clip(client, nals, reference, *, verify=True, native=False, queued=Fa
                         ordinal = finishing.get(index + offset)
                         if ordinal:
                             metadata = client.frame_time_fast(stream, ordinal, index + offset,
-                                timed_by_ordinal[ordinal].get('pts_ms', (ordinal - 1) * 1000 // 16))
+                                timed_by_ordinal[ordinal].get('pts_ms', ((ordinal - 1) * 1000 + fps // 2) // fps))
                             if metadata['result'] == 3:
                                 count = offset
                                 break

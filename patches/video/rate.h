@@ -26,12 +26,13 @@ typedef struct {
     uint32_t ready, paused, flags, head, count, posted_mode;
     uint16_t gaps[16];
     uint32_t gap_count, gap_max;
+    uint32_t period_ms;
 } video_rate_state;
 _Static_assert(sizeof(video_rate_state) <= 1024, "Cadence evidence exceeds its resident bound");
 
 /* Caller holds the existing publication lock. Worker calls only post edges;
  * presenter calls own folding, window closure and shown publication. */
-void video_rate_start(video_rate_state *, uint32_t stream, uint32_t generation, uint32_t token);
+void video_rate_start(video_rate_state *, uint32_t stream, uint32_t generation, uint32_t token, uint32_t period_ms);
 void video_rate_post_worker(video_rate_state *, uint32_t tick, uint32_t code);
 void video_rate_present(video_rate_state *, uint32_t tick, uint32_t ready, uint32_t paused);
 void video_rate_copy(video_rate_state *, uint32_t tick, uint32_t ordinal, uint32_t terminal);

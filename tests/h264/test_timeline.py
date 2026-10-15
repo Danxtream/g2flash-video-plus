@@ -16,6 +16,18 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class TimelineTests(unittest.TestCase):
+    def test_pc_rates_are_explicit_and_legacy_rate_is_refused(self):
+        for fps in (10, 15, 20):
+            client = self.client()
+            with patch.object(video_client, 'status', lambda raw: dict(state=0, result=0)):
+                client.configure_timeline(9, 2000, fps=fps)
+            self.assertEqual(struct.unpack_from('<HH', self.sent[0][0], 20), (fps, 1))
+        client = self.client()
+        for fps in (0, 16, 24, 30):
+            with self.assertRaises(ValueError):
+                client.configure_timeline(9, 2000, fps=fps)
+        self.assertFalse(self.sent)
+
     def client(self):
         client = video_client.VideoClient.__new__(video_client.VideoClient)
         client.counter = SimpleNamespace(reserve=lambda: 7)
@@ -32,7 +44,7 @@ class TimelineTests(unittest.TestCase):
             client.configure_timeline(9, 2000, 500)
             client.frame_time(9, 1, 4, 500)
         self.assertEqual(struct.unpack('<BBBBIIIIHH', self.sent[0][0]),
-                         (31, 11, 1, 0, 7, 9, 2000, 500, 16, 1))
+                         (31, 11, 1, 0, 7, 9, 2000, 500, 15, 1))
         self.assertEqual(struct.unpack('<BBBBIIIII', self.sent[1][0]),
                          (31, 12, 1, 0, 7, 9, 1, 4, 500))
         self.assertEqual([len(payload) for payload, _ in self.sent], [24, 24])
@@ -53,7 +65,7 @@ class TimelineTests(unittest.TestCase):
         def replies(payload, length, **kwargs):
             captured.append((payload, length, kwargs))
             if payload[1] == video_client.PLAYBACK_CAPABILITIES:
-                raw = bytes((1, 13, 0, 7, 2, 16, 0, 0)) + struct.pack('<II', 77824, 8192)
+                raw = bytes((1, 13, 0, 7, 2, 7, 0, 0)) + struct.pack('<II', 77824, 8192)
             else:
                 raw = struct.pack('<IBB', 3, 2, 0)
             return {1: raw, 2: raw}

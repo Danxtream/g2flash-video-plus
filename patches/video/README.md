@@ -37,7 +37,8 @@ not a physical one-way latency guarantee. No half-roundtrip symmetry claim,
 shared clock exchange or assumed nonzero compensation is introduced.
 
 The optional control 13 query returns 16 bytes: version, operation, result,
-feature mask (bit 0 owned queue, bit 1 paired triggers, bit 2 compact metadata), depth 2, frame rate 16, two reserved bytes,
+feature mask (bit 0 owned queue, bit 1 paired triggers, bit 2 compact metadata),
+depth 2, supported-rate mask 7 (bits 0/1/2 mean 10/15/20 fps), two reserved bytes,
 then LE32 A4 charged allowance 77824 and presenter stack 8192. START option 4
 requires a configured TIMELINE. BOTH-target queued START enables paired wire
 triggers; option 8 explicitly pairs independently delivered host streams.
@@ -48,7 +49,7 @@ LE32 accepted picture ordinal, remaining metadata credits, result. Full mail
 returns BUSY without accepting a new row. The PC queues metadata for reference
 identified terminating NALs, never assuming every NAL produces a picture.
 
-RIGHT coordinates at 16 fps, regardless of compressed-payload ingress. Wire-only
+RIGHT coordinates at the clip rate, regardless of compressed-payload ingress. Wire-only
 kind 5 records carry source/version/operation, stream, picture ordinal, PTS,
 sender-local tick, ready depth and terminal flag in 24 bytes. READY gates the
 matching heads; a common TRIGGER consumes an already-decoded frame. RIGHT
@@ -66,7 +67,7 @@ task stack, with its own reserve-aware allocation ledger. Metadata names the
 completed picture and terminating NAL independently. The decoder cannot reuse
 its borrowed Y until copying is complete; snapshots stay pinned through actual
 display-copy completion. Prebuffer two pictures, except the timed terminal
-picture. Absolute 16 fps deadlines use alternating 62/63 ms intervals;
+picture. Absolute clip-rate deadlines retain the rational millisecond phase;
 starvation
 holds/rebuffers rather than presenting overdue pictures in a burst. Controller
 completion work posts wakeups; pacing runs on the presenter task. Unknown
@@ -790,7 +791,9 @@ enables it only with a configured timeline and admitted task/queue ownership.
 Optional ID31 operations 11 and 12 retain protocol version 1 and the existing
 24-byte bounded replay format. TIMELINE 11, while stopped, carries little-endian
 u32 stream/duration_ms/start_pts_ms and u16 fps numerator/denominator after
-the eight-byte control header. This contract currently accepts 16/1 only.
+the eight-byte control header. This contract accepts exactly 10/1, 15/1 or 20/1.
+The capability rate mask replaces the former fixed-rate byte: older apps
+reject it, and apps requiring this mask reject the old fixed-rate firmware.
 FRAME_TIME 12 carries u32
 stream/picture_ordinal/terminating_nal_sequence/pts_ms.
 Pictures are one-based; parameter sets and filler do not increment ordinals.
