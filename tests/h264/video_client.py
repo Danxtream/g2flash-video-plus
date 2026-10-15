@@ -264,7 +264,7 @@ class VideoClient(VideoLink):
         replies = self.raw_replies(payload, 6, result_offset=5)
         reports = {lens: dict(accepted=struct.unpack_from('<I', raw)[0], credits=raw[4],
                               result=raw[5]) for lens, raw in replies.items()}
-        if any(r['credits'] > 4 for r in reports.values()):
+        if any(r['credits'] > 6 for r in reports.values()):
             raise ValueError('invalid metadata credits')
         return dict(result=max(r['result'] for r in reports.values()), by_lens=reports)
 

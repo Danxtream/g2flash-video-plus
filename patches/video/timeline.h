@@ -4,7 +4,7 @@
 
 enum {
     VIDEO_TIMELINE_VERSION = 1,
-    VIDEO_TIMELINE_RECORDS = 4,
+    VIDEO_TIMELINE_RECORDS = 6,
     VIDEO_TIMELINE_BYTES = 24,
     VIDEO_TIMELINE_RATE_MASK = 7 /* Bits 0/1/2: 10/15/20 pictures per second. */
 };

@@ -1727,6 +1727,13 @@ static void timed_input(void) {
         else if (flagged == 2) assert(result && code == VIDEO_CONTROL_FORMAT);
         else assert(!result && !code);
     }
+    context.video_control.timeline.count = 0;
+    control_command(p, VIDEO_CONTROL_CREDITS, 1);
+    video_write32(p + 12, context.video.token);
+    video_write32(p + 20, VIDEO_CREDITS_TIMELINE);
+    assert(!video_control_received(p, VIDEO_CREDITS_TIMELINE_REQUEST_BYTES, &wide));
+    assert(control_reply[VIDEO_REPLY_HEADER_BYTES + 5] == 6 << VIDEO_CREDIT_TIMELINE_SHIFT);
+    context.video_control.timeline.count = 2;
     control_command(p, VIDEO_PLAYBACK_CAPABILITIES, 0);
     memset(snapshot, 0, sizeof(snapshot));
     assert(control_response(p, VIDEO_CONTROL_HEADER_BYTES, snapshot, VIDEO_PLAYBACK_CAPABILITIES_BYTES) ==

@@ -4,6 +4,7 @@
 #include "../../patches/video/timeline.c"
 
 int main(void) {
+    _Static_assert(VIDEO_TIMELINE_RECORDS == 6, "Six independent picture records");
     video_timeline s = {0};
     video_frame_time out = {0};
     for (uint32_t fps = 10; fps <= 20; fps += 5) {
@@ -21,30 +22,31 @@ int main(void) {
     assert(video_timeline_start(&s, 1, 7));
     assert(!video_timeline_configure(&s, 2, 1000, 0, 15, 1));
     for (uint32_t i = 1; i <= VIDEO_TIMELINE_RECORDS; ++i) {
-        video_frame_time f = {i, 2 * i, (i - 1) * 62};
+        video_frame_time f = {i, 2 * i, ((i - 1) * 1000 + 7) / 15};
         assert(!video_timeline_offer(&s, 1, 8, &f));
         assert(video_timeline_offer(&s, 1, 7, &f));
         assert(video_timeline_offer(&s, 1, 7, &f));
         f.pts++;
         assert(!video_timeline_offer(&s, 1, 7, &f));
     }
-    video_frame_time next = {5, 10, 250};
+    const uint32_t last = VIDEO_TIMELINE_RECORDS + 1, pts = (VIDEO_TIMELINE_RECORDS * 1000 + 7) / 15;
+    video_frame_time next = {last, 2 * last, pts};
     assert(!video_timeline_offer(&s, 1, 7, &next));
     assert(!video_timeline_take(&s, 8, 1, 2, &out));
     assert(!video_timeline_take(&s, 7, 1, 1, &out));
     assert(video_timeline_take(&s, 7, 1, 2, &out));
     assert(out.ordinal == 1 && out.nal_sequence == 2 && out.pts == 0);
     assert(video_timeline_offer(&s, 1, 7, &next));
-    for (uint32_t i = 2; i <= 5; ++i) {
+    for (uint32_t i = 2; i <= last; ++i) {
         assert(video_timeline_take(&s, 7, i, 2 * i, &out));
         assert(out.ordinal == i);
     }
-    assert(!video_timeline_take(&s, 7, 6, 12, &out));
-    next = (video_frame_time){6, 9, 260};
+    assert(!video_timeline_take(&s, 7, last + 1, 2 * (last + 1), &out));
+    next = (video_frame_time){last + 1, 2 * last - 1, pts + 10};
     assert(!video_timeline_offer(&s, 1, 7, &next));
-    next = (video_frame_time){6, 12, 249};
+    next = (video_frame_time){last + 1, 2 * (last + 1), pts - 1};
     assert(!video_timeline_offer(&s, 1, 7, &next));
-    next = (video_frame_time){6, 12, 1001};
+    next = (video_frame_time){last + 1, 2 * (last + 1), 1001};
     assert(!video_timeline_offer(&s, 1, 7, &next));
     video_timeline_stop(&s, 8);
     assert(s.active);

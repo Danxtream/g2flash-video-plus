@@ -16,6 +16,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class TimelineTests(unittest.TestCase):
+    def test_compact_metadata_accepts_six_rooms_but_refuses_seven(self):
+        client = self.client()
+        for room in range(8):
+            client.raw_replies = lambda *args, **kwargs: {1: struct.pack('<IBB', 1, room, 0)}
+            if room <= 6:
+                self.assertEqual(client.frame_time_fast(9, 1, 2, 0)['by_lens'][1]['credits'], room)
+            else:
+                with self.assertRaisesRegex(ValueError, 'metadata credits'):
+                    client.frame_time_fast(9, 1, 2, 0)
+
     def test_pc_rates_are_explicit_and_legacy_rate_is_refused(self):
         for fps in (10, 15, 20):
             client = self.client()

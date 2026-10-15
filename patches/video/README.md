@@ -797,7 +797,7 @@ reject it, and apps requiring this mask reject the old fixed-rate firmware.
 FRAME_TIME 12 carries u32
 stream/picture_ordinal/terminating_nal_sequence/pts_ms.
 Pictures are one-based; parameter sets and filler do not increment ordinals.
-Four metadata records have credits independent of compressed input slots.
+Six metadata records have credits independent of compressed input slots.
 Exact duplicates are idempotent; conflicting, stale and overflowing records
 refuse without overwriting pending media identity. RESET retires the generation.
 Metadata alone does not enable queued/synchronized presentation. Playback
