@@ -28,14 +28,14 @@ int video_queue_extend(video_nal_queue *q, uint8_t *bytes) {
 uint32_t video_queue_credits(const video_nal_queue *q) {
     return q ? q->capacity - q->count : 0;
 }
-int video_queue_push(video_nal_queue *q, uint32_t sequence,
-                       const uint8_t *bytes, uint16_t length) {
+int video_queue_probe(const video_nal_queue *q, uint32_t sequence,
+                        const uint8_t *bytes, uint16_t length) {
     if (!q || !q->token || !bytes || !length || length > VIDEO_RAW_NAL_BYTES) return 0;
     if (sequence == UINT32_MAX) return VIDEO_QUEUE_WRAP;
     /* Released slot bytes form a bounded exact replay cache until reuse. No
      * checksum can silently accept a conflicting consumed payload. */
     for (uint32_t i = 0; i < q->capacity; ++i) {
-        video_nal_slot *s = &q->slots[i];
+        const video_nal_slot *s = &q->slots[i];
         if (!s->length || s->sequence != sequence) continue;
         int equal = length == s->length;
         for (uint32_t j = 0; equal && j < length; ++j) equal = bytes[j] == s->bytes[j];
@@ -44,6 +44,14 @@ int video_queue_push(video_nal_queue *q, uint32_t sequence,
     if (q->accepted == UINT32_MAX) return VIDEO_QUEUE_WRAP;
     if (sequence < q->expected) return VIDEO_QUEUE_STALE;
     if (sequence - q->expected >= q->capacity) return 0;
+    for (uint32_t i = 0; i < q->capacity; ++i)
+        if (!q->slots[i].occupied) return 1;
+    return 0;
+}
+int video_queue_push(video_nal_queue *q, uint32_t sequence,
+                       const uint8_t *bytes, uint16_t length) {
+    int probe = video_queue_probe(q, sequence, bytes, length);
+    if (probe != 1) return probe;
     for (uint32_t i = 0; i < q->capacity; ++i) {
         video_nal_slot *s = &q->slots[i];
         if (s->occupied) continue;

@@ -111,6 +111,12 @@ class WorkerTests(unittest.TestCase):
     def test_owned_pictures_use_independent_fixed_clock_presenter_and_drain(self):
         self.check_case("queued-consumer")
 
+    def test_timed_nal_records_feed_presenters_without_separate_frame_time(self):
+        self.check_case("timed-consumer")
+
+    def test_timed_nal_record_publishes_frame_time_and_nal_together_or_neither(self):
+        self.check_case("timed-input")
+
     def test_dither_y8_admission_paired_modes_default_restart_and_refusal(self):
         self.check_case("dither-consumer")
 

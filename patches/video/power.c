@@ -152,6 +152,13 @@ static void video_power_bootstrap(uint32_t app, const uint8_t *data, uint32_t si
         view.free_bytes < VIDEO_CACHED_RESERVE + sizeof(customCfwContext) + 128) return;
     video_worker_ensure_mutex();
 }
+/* Take the job's address outside video_power_received: there the PC-relative
+ * MOVW/MOVT pair grew past 32 KB, which clang's assembler refuses for a pair
+ * resolved within one section under -fropi ("Relocation Not In Range"). */
+__attribute__((noinline)) static void video_power_dispatch_bootstrap(uint32_t serial) {
+    video_pool_item item = {video_power_bootstrap, VIDEO_MESSAGE_ID, 0, 0, 0, serial};
+    VIDEO_POOL_DISPATCH(&item);
+}
 uint32_t video_power_received(const uint8_t *data, uint32_t size) {
     uint32_t here = VIDEO_POWER_HERE();
     if (!data || size != VIDEO_POWER_BYTES || data[0] != VIDEO_POWER_BRIDGE ||
@@ -164,9 +171,8 @@ uint32_t video_power_received(const uint8_t *data, uint32_t size) {
     if (data[1] == here) return 0;
     customCfwContext *ctx = peekCustomCfwContext();
     if (!ctx || !ctx->image_mutex) {
-        video_pool_item item = {video_power_bootstrap, VIDEO_MESSAGE_ID, 0, 0, 0,
-                                video_power_read(data + 14)};
-        VIDEO_POOL_DISPATCH(&item); return 6; /* Owner retries after task-context bootstrap. */
+        video_power_dispatch_bootstrap(video_power_read(data + 14));
+        return 6; /* Owner retries after task-context bootstrap. */
     }
     video_power_state *p = &ctx->video_power;
     uint32_t expected = 0;

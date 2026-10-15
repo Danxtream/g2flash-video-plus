@@ -29,7 +29,7 @@ static uint32_t cancel_new, expire_new, fail_publication, defer_reclaimed;
 static uint32_t feed, fed, stream_ok, corrupt_guard, suppress_park;
 static uint32_t consume_enabled, decoded_calls, consumed_frames, decode_paused, refuse_extension;
 static uint32_t upload_limit;
-static uint32_t queued_upload, dither_fixture;
+static uint32_t queued_upload, dither_fixture, timed_upload;
 static uint32_t cycle_reads, clock_inits, calibrations, crc_calls, anomalous_clock;
 static uint32_t forced_cycles, force_cycles;
 static uint32_t evidence_drain, evidence_next, evidence_checked, evidence_was_full;
@@ -1451,11 +1451,19 @@ int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
     assert(bytes <= VIDEO_RAW_NAL_BYTES && !worker_thread);
     if (upload_limit && sequence >= upload_limit) return 0;
     if (playback_pause_fixture && sequence == 12) exercise_pause();
-    uint8_t record[VIDEO_SLOT_BYTES] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_NAL};
+    uint8_t record[VIDEO_SLOT_BYTES + 8] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_NAL};
     video_write32(record + 2, 1); video_write32(record + 6, sequence);
-    memcpy(record + VIDEO_NAL_HEADER_BYTES, nal, bytes);
+    uint32_t header = VIDEO_NAL_HEADER_BYTES;
+    if (queued_upload && timed_upload && sequence >= 2) {
+        /* The terminating slice carries its own frame time instead of a
+         * separate offer; a full timeline refuses it and the loop retries. */
+        record[1] = VIDEO_CONTROL_NAL_TIMED; header = VIDEO_NAL_TIMED_HEADER_BYTES;
+        video_write32(record + 10, sequence - 1); video_write32(record + 14, (sequence - 2) * 1000 / 16);
+        assert(header + bytes <= VIDEO_RECORD_LIMIT);
+    }
+    memcpy(record + header, nal, bytes);
     uint32_t limit = tick() + 3000;
-    if (queued_upload && sequence >= 2) {
+    if (queued_upload && !timed_upload && sequence >= 2) {
         /* This fixture emits exactly one terminating slice per picture;
          * production clients obtain these identities from decoded references. */
         video_frame_time media = {sequence - 1, sequence, (sequence - 2) * 1000 / 16};
@@ -1484,13 +1492,13 @@ int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
     }
     for (;;) {
         display_pump(); pool_drain(); drain_frame_results();
-        if (!video_control_received(record, VIDEO_NAL_HEADER_BYTES + bytes, &control_route)) break;
+        if (!video_control_received(record, header + bytes, &control_route)) break;
         assert((int32_t)(limit - tick()) > 0 && state() == VIDEO_READY); delay(1);
     }
     /* Uploaded input is no longer borrowed. The same sequence can be retried
      * exactly even if consumption happened before the transport reply. */
-    assert(!video_control_received(record, VIDEO_NAL_HEADER_BYTES + bytes, &control_route));
-    memset(record + VIDEO_NAL_HEADER_BYTES, 0xee, bytes);
+    assert(!video_control_received(record, header + bytes, &control_route));
+    memset(record + header, 0xee, bytes);
     return 1;
 }
 
@@ -1653,6 +1661,83 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
 }
 
 static void queued_consumer(void) { queued_consumer_mode(0, 0); }
+static void timed_consumer(void) {
+    timed_upload = 1;
+    queued_consumer_mode(0, 0); queued_consumer_mode(1, 0); queued_consumer_mode(2, 0);
+    timed_upload = 0;
+    puts("timed NAL records feed single, paired left and paired right presenters PASS");
+}
+static void timed_record(uint8_t *record, uint32_t sequence, uint32_t ordinal, uint32_t pts, uint8_t nal) {
+    record[0] = VIDEO_MESSAGE_ID; record[1] = VIDEO_CONTROL_NAL_TIMED;
+    video_write32(record + 2, 1); video_write32(record + 6, sequence);
+    video_write32(record + 10, ordinal); video_write32(record + 14, pts);
+    record[VIDEO_NAL_TIMED_HEADER_BYTES] = nal; record[VIDEO_NAL_TIMED_HEADER_BYTES + 1] = (uint8_t)sequence;
+}
+static void timed_input(void) {
+    configure(); request_next = 0;
+    assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, 0, 16, 1));
+    context.video_control.owner_origin = 1;
+    uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+    uint8_t record[VIDEO_NAL_TIMED_HEADER_BYTES + 2], plain[VIDEO_NAL_HEADER_BYTES + 2];
+    timed_record(record, 2, 1, 0, 0x65);
+    assert(video_control_received(record, sizeof(record), &control_route)); /* No owner yet. */
+    control_command(p, VIDEO_CONTROL_START, 1);
+    assert(control_snapshot(p, 24, snapshot) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); await_ready();
+    video_owner *owner = context.video_owner;
+    const video_timeline *timeline = &context.video_control.timeline;
+    for (uint32_t sequence = 0; sequence < 2; ++sequence) {
+        memset(plain, 0, sizeof(plain)); plain[0] = VIDEO_MESSAGE_ID; plain[1] = VIDEO_CONTROL_NAL;
+        video_write32(plain + 2, 1); video_write32(plain + 6, sequence);
+        plain[VIDEO_NAL_HEADER_BYTES] = sequence ? 0x68 : 0x67;
+        assert(!video_control_received(plain, sizeof(plain), &control_route));
+    }
+    assert(!timeline->count && owner->queue.accepted == 2);
+    assert(!video_control_received(record, sizeof(record), &control_route));
+    assert(timeline->count == 1 && timeline->accepted == 1 && owner->queue.accepted == 3);
+    /* An exact replay is accepted without offering its frame time twice. */
+    assert(!video_control_received(record, sizeof(record), &control_route));
+    assert(timeline->count == 1 && owner->queue.accepted == 3);
+    /* A refused frame time leaves the NAL unqueued even though it had room. */
+    timed_record(record, 3, 3, 125, 0x41);
+    assert(video_control_received(record, sizeof(record), &control_route));
+    assert(timeline->count == 1 && owner->queue.accepted == 3);
+    cfw_message_route wrong = control_route; wrong.origin = 2;
+    timed_record(record, 3, 2, 62, 0x41);
+    assert(video_control_received(record, sizeof(record), &wrong));
+    assert(timeline->count == 1 && owner->queue.accepted == 3);
+    assert(!video_control_received(record, sizeof(record), &control_route));
+    assert(timeline->count == 2 && timeline->accepted == 2 && owner->queue.accepted == 4);
+    /* Outside the four-slot window: the NAL refuses before any frame time. */
+    timed_record(record, 4, 3, 125, 0x41);
+    assert(video_control_received(record, sizeof(record), &control_route));
+    assert(timeline->count == 2 && owner->queue.accepted == 4);
+    /* The flagged credit request packs free timeline records with the result. */
+    cfw_message_route wide = control_route; wide.reply_capacity = 21;
+    for (uint32_t flagged = 0; flagged <= 2; ++flagged) {
+        control_command(p, VIDEO_CONTROL_CREDITS, 1);
+        video_write32(p + 12, context.video.token);
+        if (flagged) video_write32(p + 20, flagged == 1 ? VIDEO_CREDITS_TIMELINE : 2);
+        control_reply_size = 0;
+        int result = video_control_received(p, flagged ? VIDEO_CREDITS_TIMELINE_REQUEST_BYTES :
+                                            VIDEO_CREDITS_REQUEST_BYTES, &wide);
+        assert(control_reply_size == VIDEO_REPLY_HEADER_BYTES + VIDEO_CREDITS_BYTES);
+        uint8_t code = control_reply[VIDEO_REPLY_HEADER_BYTES + 5];
+        if (flagged == 1) assert(!result && code == (VIDEO_TIMELINE_RECORDS - 2) << VIDEO_CREDIT_TIMELINE_SHIFT);
+        else if (flagged == 2) assert(result && code == VIDEO_CONTROL_FORMAT);
+        else assert(!result && !code);
+    }
+    control_command(p, VIDEO_PLAYBACK_CAPABILITIES, 0);
+    memset(snapshot, 0, sizeof(snapshot));
+    assert(control_response(p, VIDEO_CONTROL_HEADER_BYTES, snapshot, VIDEO_PLAYBACK_CAPABILITIES_BYTES) ==
+           VIDEO_CONTROL_ACCEPTED && snapshot[7] == 247);
+    control_command(p, VIDEO_CONTROL_STOP, 1);
+    assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+    timed_record(record, 4, 3, 125, 0x41);
+    assert(video_control_received(record, sizeof(record), &control_route));
+    pool_drain(); finish();
+    puts("timed NAL records publish frame time and NAL together; credits report timeline room PASS");
+}
 static void dither_consumer(void) {
     dither_fixture = 1;
     queued_consumer_mode(0, 0); queued_consumer_mode(1, 0);
@@ -2623,6 +2708,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "recovery")) recovery();
     else if (!strcmp(argv[1], "consumer")) consumer();
     else if (!strcmp(argv[1], "queued-consumer")) queued_consumer();
+    else if (!strcmp(argv[1], "timed-consumer")) timed_consumer();
+    else if (!strcmp(argv[1], "timed-input")) timed_input();
     else if (!strcmp(argv[1], "dither-consumer")) dither_consumer();
     else if (!strcmp(argv[1], "paired-consumer")) paired_consumer();
     else if (!strcmp(argv[1], "playback-controls")) playback_controls();

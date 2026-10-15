@@ -90,6 +90,32 @@ static void video_credit_snapshot(customCfwContext *ctx, video_control_replay *e
         (queue.capacity == VIDEO_QUEUE_MAX ? VIDEO_CREDIT_CAPACITY_SIX : 0) |
         (state << VIDEO_CREDIT_STATE_SHIFT) | (queue.gap_deadline ? VIDEO_CREDIT_GAP : 0);
     p[5] = entry->result ? entry->result : ctx->video_control.error;
+    if (entry->length == VIDEO_CREDITS_TIMELINE_REQUEST_BYTES) {
+        const video_timeline *t = &ctx->video_control.timeline;
+        uint32_t room = entry->result ? 0 : VIDEO_TIMELINE_RECORDS - t->count;
+        p[5] = (p[5] & VIDEO_CREDIT_RESULT_MASK) | room << VIDEO_CREDIT_TIMELINE_SHIFT;
+    }
+}
+
+/* Publish a timed record's frame time and NAL together, or neither: a frame
+ * time without its NAL would hold a timeline record the phone never filled. */
+static int video_control_timed_nal(customCfwContext *ctx, const uint8_t *data, uint16_t size,
+                                   const cfw_message_route *route) {
+    video_control_state *s = &ctx->video_control;
+    video_owner *owner = ctx->video_owner;
+    uint32_t stream = video_read32(data + 2), sequence = video_read32(data + 6);
+    const uint8_t *nal = data + VIDEO_NAL_TIMED_HEADER_BYTES;
+    uint16_t bytes = size - VIDEO_NAL_TIMED_HEADER_BYTES;
+    video_frame_time frame = {video_read32(data + 10), sequence, video_read32(data + 14)};
+    if (!owner || !s->start_guard || route->origin != s->owner_origin || stream != s->stream ||
+        !video_control_generation_valid(ctx, s->start_guard) ||
+        video_lifecycle_state(&ctx->video) != VIDEO_READY) return 0;
+    /* An exact replay published its frame time with the first copy. */
+    if (video_queue_probe(&owner->queue, sequence, nal, bytes) == 1 &&
+        !video_timeline_offer_preroll(&s->timeline, stream, s->control_generation, &frame,
+                                      (s->options >> VIDEO_PREROLL_SHIFT) & 255u))
+        return VIDEO_TIMED_TIMELINE_REFUSED;
+    return video_worker_receive_nal_locked(stream, sequence, nal, bytes, route->origin);
 }
 
 static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
@@ -130,7 +156,8 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
             (video_worker_wake_locked(ctx->video.token, VIDEO_WAKE_INPUT), VIDEO_CONTROL_ACCEPTED) : VIDEO_CONTROL_INPUT;
     }
     if (op == VIDEO_CONTROL_CREDITS) {
-        if (n != VIDEO_CREDITS_REQUEST_BYTES) return VIDEO_CONTROL_FORMAT;
+        if (n != VIDEO_CREDITS_REQUEST_BYTES && (n != VIDEO_CREDITS_TIMELINE_REQUEST_BYTES ||
+            video_read32(p + 20) != VIDEO_CREDITS_TIMELINE)) return VIDEO_CONTROL_FORMAT;
         uint32_t token = video_read32(p + (here == CFW_MESSAGE_LEFT ? 12 : 16));
         if (!token || token != ctx->video.token || video_read32(p + 8) != s->stream ||
             origin != s->owner_origin || !s->start_guard ||
@@ -223,14 +250,16 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
 static int video_control_command(const uint8_t *data, uint16_t size,
                                   const cfw_message_route *route, uint8_t *reply) {
     if (data && size >= 2 && data[0] == VIDEO_MESSAGE_ID &&
-        data[1] == VIDEO_CONTROL_NAL) {
-        if (size <= VIDEO_NAL_HEADER_BYTES || size > VIDEO_RECORD_LIMIT ||
+        (data[1] == VIDEO_CONTROL_NAL || data[1] == VIDEO_CONTROL_NAL_TIMED)) {
+        uint32_t header = data[1] == VIDEO_CONTROL_NAL ? VIDEO_NAL_HEADER_BYTES : VIDEO_NAL_TIMED_HEADER_BYTES;
+        if (size <= header || size > VIDEO_RECORD_LIMIT ||
             !video_route_valid(route)) return video_refused(peekCustomCfwContext(), data, size, route, VIDEO_REFUSAL_FORMAT, 0, 0, 0);
         customCfwContext *ctx = peekCustomCfwContext();
         if (!ctx || !ctx->image_mutex || !video_control_wait(ctx, VIDEO_STOP_LIMIT_MS))
             return video_refused(ctx, data, size, route, VIDEO_REFUSAL_LOCK, 0, 0, 0);
         video_fold_signals(ctx);
-        int copied = video_worker_receive_nal_locked(video_read32(data + 2),
+        int copied = data[1] == VIDEO_CONTROL_NAL_TIMED ? video_control_timed_nal(ctx, data, size, route) :
+            video_worker_receive_nal_locked(video_read32(data + 2),
             video_read32(data + 6), data + VIDEO_NAL_HEADER_BYTES,
             size - VIDEO_NAL_HEADER_BYTES, route->origin);
         video_control_give(ctx);
@@ -344,7 +373,7 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             entry->snapshot[4] = VIDEO_DECODED_DEPTH;
             entry->snapshot[5] = VIDEO_TIMELINE_FPS;
             entry->snapshot[6] = 255; /* Maximum explicit decoded seek prefix. */
-            entry->snapshot[7] = 119; /* Includes bounded cadence-window evidence. */
+            entry->snapshot[7] = 247; /* Adds timed NAL records and timeline credits; 8 stays reserved. */
             video_write32(entry->snapshot + 8, VIDEO_PRESENTER_A4_LIMIT);
             video_write32(entry->snapshot + 12, VIDEO_PRESENTER_STACK_BYTES);
         }
@@ -454,7 +483,8 @@ static int video_control_command(const uint8_t *data, uint16_t size,
 
 int video_control_received(const uint8_t *data, uint16_t size,
                             const cfw_message_route *route) {
-    if (data && size >= 2 && data[0] == VIDEO_MESSAGE_ID && data[1] == VIDEO_CONTROL_NAL)
+    if (data && size >= 2 && data[0] == VIDEO_MESSAGE_ID &&
+        (data[1] == VIDEO_CONTROL_NAL || data[1] == VIDEO_CONTROL_NAL_TIMED))
         return video_control_command(data, size, route, 0);
     if (!data || size < VIDEO_CONTROL_HEADER_BYTES || !video_route_valid(route)) return -1;
     customCfwContext *ctx = peekCustomCfwContext();

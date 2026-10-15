@@ -51,6 +51,9 @@ uint32_t video_queue_credits(const video_nal_queue *);
  * sequence. Positive means accepted or byte-identical replay, zero is full or
  * outside the window; negative distinguishes conflict/stale/wrap. */
 int video_queue_push(video_nal_queue *, uint32_t sequence, const uint8_t *, uint16_t);
+/* The same answer push would give, without copying: lets a timed record refuse
+ * before its frame time is published. */
+int video_queue_probe(const video_nal_queue *, uint32_t sequence, const uint8_t *, uint16_t);
 /* Check before input publication and after consumer release. A retry cannot
  * repair an expired gap. Future/duplicate input never extends its deadline. */
 int video_queue_watch(video_nal_queue *, uint32_t now);
