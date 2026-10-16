@@ -113,6 +113,29 @@ int main(void) {
             assert(video_decoded_release(&q, 10, 1));
         }
     }
+    const video_geometry geometries[] = {
+        {320,192,{0,6,320,180}}, {320,176,{3,0,313,176}}, {144,240,{4,0,135,240}}
+    };
+    for (uint32_t g = 0; g < 3; ++g) for (uint32_t type = 1; type <= 2; ++type) {
+        assert(video_decoded_init(&q, 11, 9, type, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
+        assert(video_decoded_geometry(&q, geometries[g]));
+        video_geometry bad = geometries[g]; bad.picture.width += 20;
+        assert(!video_decoded_geometry(&q, bad));
+        video_frame_time time = {1,1,0};
+        uint32_t serial = video_decoded_reserve(&q, 11, &time);
+        assert(!video_decoded_geometry(&q, geometries[g]));
+        uint32_t width = geometries[g].width, height = geometries[g].height;
+        memset(y, 0x80, VIDEO_DECODED_Y8_BYTES);
+        assert(!video_decoded_copy(&q, 11, serial, y, width, width * height - 1));
+        assert(video_decoded_copy(&q, 11, serial, y, width, width * height));
+        memset(y, 0, VIDEO_DECODED_Y8_BYTES);
+        assert(video_decoded_publish(&q, 11, serial));
+        video_frame_descriptor frame;
+        assert(video_decoded_claim(&q, 11, 1, VIDEO_SCALE_DOUBLE, &frame, &time));
+        assert(frame.width == width && frame.height == height && frame.picture.width == geometries[g].picture.width);
+        assert(frame.picture.y == geometries[g].picture.y && frame.pixels[0] == 0x88 - (type == 1 ? 8 : 0));
+        assert(video_decoded_release(&q, 11, 1));
+    }
     free(y);
     free(pixels);
     puts("A4/Y8 ownership, poisoned producer, FIFO pins, cancel, depth and finite serials PASS");

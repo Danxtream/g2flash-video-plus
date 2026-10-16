@@ -4,6 +4,7 @@
 #include "../message_transport.h"
 #include "timeline.h"
 #include "sync.h"
+#include "geometry.h"
 
 enum {
     VIDEO_MESSAGE_ID = 31,
@@ -55,6 +56,7 @@ enum {
     VIDEO_CREDIT_GAP = 128,
     VIDEO_CONTROL_HEADER_BYTES = 8,
     VIDEO_START_BYTES = 24,
+    VIDEO_START_GEOMETRY_BYTES = 32,
     VIDEO_CONTROL_REPLAYS = 4,
     VIDEO_BASE_STATUS_BYTES = 128,
     VIDEO_STATUS_BYTES = VIDEO_BASE_STATUS_BYTES + VIDEO_STATUS_EXTENSION_UNIT,
@@ -107,7 +109,7 @@ typedef struct {
     uint32_t request;
     uint8_t length, result, capacity, pending;
     uint8_t snapshot_bytes;
-    uint8_t command[VIDEO_START_BYTES];
+    uint8_t command[VIDEO_START_GEOMETRY_BYTES];
     uint8_t snapshot[VIDEO_STATUS_BYTES];
 } video_control_replay;
 
@@ -115,6 +117,7 @@ typedef struct {
     uint32_t request_high[2], stream_high, stream, interval;
     uint32_t start_guard, control_generation, error, owner_origin;
     uint32_t options;
+    video_geometry geometry;
     uint32_t stop_generation; /* STOP remains visible until stock hand-back completes. */
     volatile uint32_t active_deadline;
     volatile uint32_t controller_serial, controller_job, controller_reasons;

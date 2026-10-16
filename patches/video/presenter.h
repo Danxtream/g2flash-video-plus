@@ -31,7 +31,9 @@ enum {
     VIDEO_PLAYBACK_CONTROLS = 16,
     VIDEO_PLAYBACK_SEEK = 32,
     VIDEO_PLAYBACK_MENU = 64,
-    VIDEO_PLAYBACK_POLICY = 128
+    VIDEO_PLAYBACK_POLICY = 128,
+    /* High bits of capability byte 4; low six bits retain decoded depth. */
+    VIDEO_PLAYBACK_GEOMETRY = 128
 };
 
 struct video_owner;

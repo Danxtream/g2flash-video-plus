@@ -36,28 +36,63 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
     if (frame->bytes < needed || source > UINTPTR_MAX - needed ||
         destination > UINTPTR_MAX - VIDEO_PANEL_BYTES ||
         (source < destination + VIDEO_PANEL_BYTES && destination < source + needed)) return 0;
+    video_picture_rect r = frame->picture;
+    if (!r.width && !r.height && !r.x && !r.y)
+        r = (video_picture_rect){0, 0, frame->width, frame->height};
+    if (!r.width || !r.height ||
+        r.x + r.width > frame->width || r.y + r.height > frame->height) return 0;
     uint32_t x = (VIDEO_PANEL_WIDTH - frame->width * frame->scale) / 2;
     uint32_t y = (VIDEO_PANEL_HEIGHT - frame->height * frame->scale) / 2;
     /* The entire byte-aligned picture is overwritten below. Only margins can
      * retain the old scale, overlay or image, including odd-height centering. */
-    uint32_t first = y * VIDEO_PANEL_STRIDE;
-    uint32_t last = (y + frame->height * frame->scale) * VIDEO_PANEL_STRIDE;
-    uint32_t left = x / 2, right = left + frame->width * frame->scale / 2;
+    uint32_t first = (y + r.y * frame->scale) * VIDEO_PANEL_STRIDE;
+    uint32_t last = (y + (r.y + r.height) * frame->scale) * VIDEO_PANEL_STRIDE;
+    uint32_t left = (x + r.x * frame->scale) / 2;
+    uint32_t right = (x + (r.x + r.width) * frame->scale + 1) / 2;
     for (uint32_t i = 0; i < first; ++i) shadow[i] = 0;
     for (uint32_t i = last; i < VIDEO_PANEL_BYTES; ++i) shadow[i] = 0;
     for (uint32_t row = first; row < last; row += VIDEO_PANEL_STRIDE) {
         for (uint32_t col = 0; col < left; ++col) shadow[row + col] = 0;
         for (uint32_t col = right; col < VIDEO_PANEL_STRIDE; ++col) shadow[row + col] = 0;
+        if (frame->scale == VIDEO_SCALE_NATIVE && (r.x & 1)) shadow[row + left] = 0;
+        if (frame->scale == VIDEO_SCALE_NATIVE && ((r.x + r.width) & 1)) shadow[row + right - 1] = 0;
+    }
+    /* Odd picture boundaries share a packed byte with a dark margin. Keep the
+     * fast byte/cell paths for aligned pictures, masking just this native case. */
+    if (frame->scale == VIDEO_SCALE_NATIVE && ((r.x | r.width) & 1)) {
+        for (uint32_t row = r.y; row < r.y + r.height; ++row) {
+            const uint8_t *in = frame->pixels + row * frame->stride;
+            uint8_t *out = shadow + (y + row) * VIDEO_PANEL_STRIDE + x / 2;
+            for (uint32_t col = r.x; col < r.x + r.width; ++col) {
+                uint8_t level = type == VIDEO_SOURCE_A4 ?
+                    (col & 1 ? in[col/2] & 15 : in[col/2] >> 4) :
+                    dither ? video_dither_level(in[col], tv, x + col, y + row) : video_gray_level(in[col], tv);
+                if (col & 1) out[col/2] = (out[col/2] & 240) | level;
+                else out[col/2] = (out[col/2] & 15) | (level << 4);
+            }
+        }
+        return 1;
+    }
+    if (frame->scale == VIDEO_SCALE_DOUBLE && type == VIDEO_SOURCE_A4 && ((r.x | r.width) & 1)) {
+        for (uint32_t row = r.y; row < r.y + r.height; ++row) {
+            const uint8_t *in = frame->pixels + row * frame->stride;
+            uint8_t *out = shadow + (y + row * 2) * VIDEO_PANEL_STRIDE + x / 2;
+            for (uint32_t col = r.x; col < r.x + r.width; ++col) {
+                uint8_t level = col & 1 ? in[col/2] & 15 : in[col/2] >> 4;
+                out[col] = out[VIDEO_PANEL_STRIDE + col] = level * 17;
+            }
+        }
+        return 1;
     }
     if (dither) {
         if (frame->scale == VIDEO_SCALE_DOUBLE) {
             /* Width is a multiple of four, so the centered x is always even.
              * Each source load writes its complete two-row Bayer cell once. */
             const uint16_t *cells = video_dither_cells[tv][y & 1];
-            for (uint32_t row = 0; row < frame->height; ++row) {
+            for (uint32_t row = r.y; row < r.y + r.height; ++row) {
                 const uint8_t *in = frame->pixels + row * frame->stride;
                 uint8_t *out = shadow + (y + row * 2) * VIDEO_PANEL_STRIDE + x / 2;
-                for (uint32_t col = 0; col < frame->width; ++col) {
+                for (uint32_t col = r.x; col < r.x + r.width; ++col) {
                     uint16_t cell = cells[in[col]];
                     out[col] = cell >> 8;
                     out[VIDEO_PANEL_STRIDE + col] = cell;
@@ -65,35 +100,35 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
             }
             return 1;
         }
-        for (uint32_t row = 0; row < frame->height * frame->scale; ++row) {
+        for (uint32_t row = r.y; row < r.y + r.height; ++row) {
             const uint8_t *in = frame->pixels + (row / frame->scale) * frame->stride;
             uint8_t *out = shadow + (y + row) * VIDEO_PANEL_STRIDE + x / 2;
-            for (uint32_t col = 0; col < frame->width * frame->scale; col += 2)
+            for (uint32_t col = r.x; col < r.x + r.width; col += 2)
                 out[col / 2] = (video_dither_level(in[col / frame->scale], tv, x + col, y + row) << 4) |
                     video_dither_level(in[(col + 1) / frame->scale], tv, x + col + 1, y + row);
         }
         return 1;
     }
-    for (uint32_t row = 0; row < frame->height; ++row) {
+    for (uint32_t row = r.y; row < r.y + r.height; ++row) {
         const uint8_t *in = frame->pixels + row * frame->stride;
         uint8_t *out = shadow + (y + row * frame->scale) * VIDEO_PANEL_STRIDE + x / 2;
         if (frame->scale == VIDEO_SCALE_NATIVE) {
             if (type == VIDEO_SOURCE_Y8) {
-                for (uint32_t col = 0; col < frame->width; col += 2)
+                for (uint32_t col = r.x; col < r.x + r.width; col += 2)
                     out[col / 2] = (video_gray_level(in[col], tv) << 4) |
                                    video_gray_level(in[col + 1], tv);
             } else {
-                for (uint32_t col = 0; col < row_bytes; ++col) out[col] = in[col];
+                for (uint32_t col = r.x / 2; col < (r.x + r.width) / 2; ++col) out[col] = in[col];
             }
         } else {
             if (type == VIDEO_SOURCE_Y8) {
-                for (uint32_t col = 0; col < frame->width; ++col) {
+                for (uint32_t col = r.x; col < r.x + r.width; ++col) {
                     uint8_t doubled = (uint8_t)(video_gray_level(in[col], tv) * 0x11);
                     out[col] = out[VIDEO_PANEL_STRIDE + col] = doubled;
                 }
             } else {
                 /* One packed pair expands directly into both physical rows. */
-                for (uint32_t col = 0; col < row_bytes; ++col) {
+                for (uint32_t col = r.x / 2; col < (r.x + r.width) / 2; ++col) {
                     uint16_t cell = video_plain_cells[in[col]];
                     out[col * 2] = out[VIDEO_PANEL_STRIDE + col * 2] = cell >> 8;
                     out[col * 2 + 1] = out[VIDEO_PANEL_STRIDE + col * 2 + 1] = cell;

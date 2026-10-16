@@ -364,11 +364,28 @@ bits, offset 72 is the gap deadline and offset 76 the first missing receipt
 sequence. Expected consumption at offset 52 and completed pictures at 64 remain
 separate. All pending queue bytes belong to the retired owner, never the next
 stream. The C interface limits the parsed progressive I/P format before its
-first input: exact 320x192, one reference and two DPB frames, no crop, FMO,
+first input: the selected coded size, one reference and two DPB frames, no crop, FMO,
 weighted prediction or multiple slices. Baseline CAVLC, Main CABAC and High
 CABAC with 8x8 transforms are supported; High CAVLC with 8x8 is rejected.
 I_PCM remains rejected by the decoder. Queries return actual lazy DPB storage,
 independent of which reconstruction features are compiled into the decoder.
+
+START retains its legacy 24-byte full-320x192 form. Capability operation 13
+byte 4 bit 7 advertises the 32-byte form; bits 0..5 retain decoded queue depth.
+Bytes 12..15 select exactly 320x192, 320x176 or 144x240. Extended bytes 24..31
+contain little-endian 16-bit picture x, y, width and height inside that coded
+frame. All four are replay-frozen and bounds-checked before admission. Odd
+picture edges are allowed: 16:9 uses 313x176 at x=3 in 320x176, leaving three
+and four unlit coded columns. Neither rotation nor pixel-aspect correction
+is performed by the glasses. The phone provides the final upright rectangle.
+
+The coded frame is centered at Native or 2x. Packing leaves every pixel outside
+the picture rectangle at level zero, including partial packed-byte edges;
+picture content keeps the existing level-one black floor. Maximum decoder and
+two-slot A4/Y8 buffer sizes and heap reserves do not grow. The exact selected
+size is enforced by the decoder before input; it is not a crop or rescale.
+New clients require the capability for nonlegacy geometry. Old phone clients
+reject the unfamiliar capability depth byte instead of misplacing a picture.
 
 ### Shared display lifetime
 

@@ -156,6 +156,8 @@ static int video_runtime_preflight(const g2_h264_request *requests, uint32_t cou
  * and allocation run only on this task, outside image/display locks. */
 static int video_worker_consume(video_owner *owner) {
     customCfwContext *ctx = owner->context;
+    video_geometry geometry = ctx->video_control.geometry;
+    if (!geometry.width) geometry = video_geometry_default();
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
     video_nal_view view;
     int claimed = !video_lifecycle_cancelled(&ctx->video, owner->token) &&
@@ -184,7 +186,7 @@ static int video_worker_consume(video_owner *owner) {
     g2_h264_dpb_info dpb = {0};
     if (decoded == G2_H264_FRAME_READY &&
         (g2_h264_frame(owner->decoder, &frame) != G2_H264_FRAME_READY ||
-         !frame.y || frame.width != VIDEO_FRAME_WIDTH || frame.height != VIDEO_FRAME_HEIGHT ||
+         !frame.y || frame.width != geometry.width || frame.height != geometry.height ||
          frame.stride < frame.width || frame.stride > UINT32_MAX / frame.height ||
          !g2_h264_dpb(owner->decoder, &dpb) ||
          dpb.capacity != VIDEO_FRAME_DPB || dpb.allocated_frames > dpb.capacity))
@@ -216,7 +218,7 @@ static int video_worker_consume(video_owner *owner) {
                 (frame.range_flags & G2_H264_RANGE_FULL ? 0u : VIDEO_SOURCE_TV) |
                 (frame.range_flags & G2_H264_RANGE_SIGNALLED ? 0u : VIDEO_SOURCE_UNSIGNALLED),
             ctx->video_control.options & VIDEO_PRESENT_NATIVE ? VIDEO_SCALE_NATIVE : VIDEO_SCALE_DOUBLE,
-            frame.y};
+            frame.y, geometry.picture};
         int presented = owner->presenter ? video_presenter_produce(owner, &descriptor, view.sequence) :
                                           video_present_frame(&descriptor);
         if (!presented && !video_lifecycle_cancelled(&ctx->video, owner->token))
@@ -242,7 +244,9 @@ static void video_worker_entry(void *argument) {
     if (!video_lifecycle_cancelled(&ctx->video, token)) {
         owner->decoder = g2_h264_init(owner->object, g2_h264_size());
         if (!owner->decoder) video_runtime_fail(VIDEO_FAULT_INIT);
-        if (!g2_h264_limit_format(owner->decoder, VIDEO_FRAME_WIDTH, VIDEO_FRAME_HEIGHT,
+        video_geometry geometry = ctx->video_control.geometry;
+        if (!geometry.width) geometry = video_geometry_default();
+        if (!g2_h264_limit_format(owner->decoder, geometry.width, geometry.height,
                                   VIDEO_FRAME_REFERENCES, VIDEO_FRAME_DPB))
             video_runtime_fail(VIDEO_FAULT_FORMAT);
         video_storage_finish_call(&owner->storage);

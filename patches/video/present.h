@@ -2,6 +2,7 @@
 #pragma once
 #include <stdint.h>
 #include "profile.h"
+#include "geometry.h"
 
 enum {
     VIDEO_PANEL_WIDTH = 640,
@@ -33,6 +34,7 @@ typedef struct {
     uint32_t token, generation, ordinal;
     uint32_t width, height, stride, bytes, format, scale;
     const uint8_t *pixels;
+    video_picture_rect picture; /* Zero width/height means the entire legacy frame. */
 } video_frame_descriptor;
 
 /* Clear margins and pack top-down pixels, high nibble first. Refuse malformed

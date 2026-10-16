@@ -815,6 +815,7 @@ static void control_command(uint8_t *p, uint32_t op, uint32_t stream) {
     p[14] = VIDEO_FRAME_HEIGHT; p[16] = 1; p[17] = 2;
     video_write32(p + 20, 63);
 }
+void worker_stream_geometry(uint32_t width, uint32_t height);
 static uint8_t control_response(const uint8_t *p, uint32_t n, uint8_t *snapshot, uint32_t length) {
     int result = video_control_received(p, n, &control_route);
     assert(control_reply_size == 9 && control_reply[7] == length);
@@ -2697,9 +2698,56 @@ static void radio_contract(void) {
     assert(control_snapshot(p, 24, report) == VIDEO_CONTROL_FORMAT && !radio_active);
 }
 
+static void geometry_contract(void) {
+    const video_geometry sizes[] = {
+        {320,192,{0,6,320,180}}, {320,176,{3,0,313,176}}, {144,240,{4,0,135,240}}
+    };
+    for (uint32_t i = 0; i < 3; ++i) {
+        configure();
+        uint8_t p[VIDEO_START_GEOMETRY_BYTES] = {0}, snapshot[VIDEO_STATUS_BYTES];
+        control_command(p, VIDEO_CONTROL_START, 1);
+        const video_geometry g = sizes[i];
+        p[12] = g.width; p[13] = g.width >> 8; p[14] = g.height; p[15] = g.height >> 8;
+        uint16_t rect[] = {g.picture.x,g.picture.y,g.picture.width,g.picture.height};
+        for (uint32_t j = 0; j < 4; ++j) { p[24+2*j] = rect[j]; p[25+2*j] = rect[j] >> 8; }
+        assert(!control_snapshot(p, sizeof(p), snapshot));
+        assert(context.video_control.geometry.width == g.width && context.video_control.geometry.picture.height == g.picture.height);
+        uint8_t replay[VIDEO_STATUS_BYTES];
+        assert(!control_snapshot(p, sizeof(p), replay) && !memcmp(snapshot,replay,VIDEO_BASE_STATUS_BYTES));
+        ++p[24];
+        assert(video_control_received(p, sizeof(p), &control_route));
+        --p[24];
+        worker_stream_geometry(g.width,g.height);
+        feed = 1; pool_drain(); await_ready();
+        uint32_t deadline = tick() + 3000;
+        while (!__atomic_load_n(&fed, __ATOMIC_ACQUIRE)) { assert((int32_t)(tick()-deadline)<0); delay(1); }
+        assert(stream_ok && state() == VIDEO_READY);
+        video_worker_report r = video_completed_report(context.video_owner);
+        fprintf(stderr,"geometry %ux%u 32 decoded pictures; storage peak %u guards %u limit %u\n",
+                g.width,g.height,r.storage_peak,r.guards_ok,video_current_owner()->storage.limit);
+        assert(r.guards_ok && r.storage_peak <= video_current_owner()->storage.limit);
+        finish();
+    }
+    worker_stream_geometry(320,192);
+    for (uint32_t bad = 0; bad < 5; ++bad) {
+        configure();
+        uint8_t p[VIDEO_START_GEOMETRY_BYTES] = {0}, snapshot[VIDEO_STATUS_BYTES];
+        control_command(p, VIDEO_CONTROL_START, 1);
+        p[26] = 0; p[28] = 64; p[29] = 1; p[30] = 176;
+        if (bad == 0) p[14] = 176; /* Nonlegacy dimensions need extended command. */
+        if (bad == 1) p[25] = 1;
+        if (bad == 2) p[30] = 0;
+        if (bad == 3) p[24] = 2;
+        assert(control_snapshot(p, bad == 0 ? 24 : bad == 4 ? 31 : 32, snapshot) == VIDEO_CONTROL_FORMAT);
+        assert(!context.video_control.stream_high && !pool_pending());
+        finish();
+    }
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
-    if (!strcmp(argv[1], "normal")) normal();
+    if (!strcmp(argv[1], "geometry")) geometry_contract();
+    else if (!strcmp(argv[1], "normal")) normal();
     else if (!strcmp(argv[1], "allocations")) allocation_failures();
     else if (!strcmp(argv[1], "startup")) startup();
     else if (!strcmp(argv[1], "reserves")) reserves();

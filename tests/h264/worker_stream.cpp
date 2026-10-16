@@ -25,6 +25,10 @@ struct Bits {
 };
 
 extern "C" void worker_finish_call(void);
+static uint32_t stream_width = 320, stream_height = 192;
+extern "C" void worker_stream_geometry(uint32_t width, uint32_t height) {
+    stream_width = width; stream_height = height;
+}
 extern "C" int worker_upload_nal(const uint8_t *, uint32_t, uint32_t);
 static int emit(void *handle, Bits b, uint32_t sequence, g2_h264_result expected, bool queued) {
     uint32_t bytes = b.finish();
@@ -34,10 +38,12 @@ static int emit(void *handle, Bits b, uint32_t sequence, g2_h264_result expected
     return 1;
 }
 static int synthetic_stream(void *handle, bool queued) {
+    uint32_t width = stream_width, height = stream_height;
+    uint32_t macroblocks = width * height / 256;
     Bits sps(0x67);
     sps.bits(66, 8); sps.bits(0, 8); sps.bits(30, 8);
     sps.ue(0); sps.ue(0); sps.ue(2); sps.ue(1);
-    sps.bits(0, 1); sps.ue(19); sps.ue(11);
+    sps.bits(0, 1); sps.ue(width / 16 - 1); sps.ue(height / 16 - 1);
     sps.bits(1, 1); sps.bits(1, 1); sps.bits(0, 1); sps.bits(0, 1);
     if (!emit(handle, sps, 0, G2_H264_CONSUMED, queued)) return 0;
     Bits pps(0x68);
@@ -52,15 +58,15 @@ static int synthetic_stream(void *handle, bool queued) {
         if (!n) { b.ue(0); b.bits(0, 1); b.bits(0, 1); }
         else { b.bits(0, 1); b.bits(0, 1); b.bits(0, 1); }
         b.se(0); b.ue(1);
-        if (n) b.ue(240);
-        else for (uint32_t i = 0; i < 240; ++i) {
+        if (n) b.ue(macroblocks);
+        else for (uint32_t i = 0; i < macroblocks; ++i) {
             b.ue(3); b.ue(0); b.se(0); b.bits(1, 1);
         }
         if (!emit(handle, b, n + 2, G2_H264_FRAME_READY, queued)) return 0;
         if (queued) continue;
         g2_h264_frame_info frame = {};
         if (g2_h264_frame(handle, &frame) != G2_H264_FRAME_READY ||
-            frame.width != 320 || frame.height != 192 || frame.count != n + 1) return 0;
+            frame.width != width || frame.height != height || frame.count != n + 1) return 0;
         for (uint32_t y = 0; y < frame.height; ++y)
             for (uint32_t x = 0; x < frame.width; ++x)
                 if (frame.y[y * frame.stride + x] != 128) return 0;

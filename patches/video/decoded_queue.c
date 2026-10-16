@@ -14,8 +14,14 @@ int video_decoded_init(video_decoded_queue *q, uint32_t generation, uint32_t tok
         (format & ~(VIDEO_SOURCE_TYPE_MASK | VIDEO_SOURCE_DITHER)) ||
         ((format & VIDEO_SOURCE_DITHER) && type != VIDEO_SOURCE_Y8)) return 0;
     *q = (video_decoded_queue){.generation = generation, .token = token,
-                                .format = format, .depth = depth, .slot_bytes = slot};
+        .format = format, .depth = depth, .slot_bytes = slot, .geometry = video_geometry_default()};
     for (uint32_t i = 0; i < depth; ++i) q->slots[i].pixels = pixels + i * slot;
+    return 1;
+}
+
+int video_decoded_geometry(video_decoded_queue *q, video_geometry geometry) {
+    if (!q || q->count || q->accepted || q->cancelled || !video_geometry_valid(geometry)) return 0;
+    q->geometry = geometry;
     return 1;
 }
 
@@ -60,22 +66,23 @@ int video_decoded_copy_range(video_decoded_queue *q, uint32_t generation, uint32
     if (!q || !y || q->generation != generation ||
         (range & ~(VIDEO_SOURCE_TV | VIDEO_SOURCE_UNSIGNALLED)) ||
         ((range & VIDEO_SOURCE_UNSIGNALLED) && !(range & VIDEO_SOURCE_TV)) ||
-        __atomic_load_n(&q->cancelled, __ATOMIC_ACQUIRE) || stride < 320 ||
-        stride > UINT32_MAX / 192 || bytes < stride * 192) return 0;
+        __atomic_load_n(&q->cancelled, __ATOMIC_ACQUIRE) || stride < q->geometry.width ||
+        stride > UINT32_MAX / q->geometry.height || bytes < stride * q->geometry.height) return 0;
     video_decoded_slot *slot = video_decoded_filling(q, serial);
     if (!slot) return 0;
     uintptr_t a = (uintptr_t)y, b = (uintptr_t)slot->pixels;
     if (a > UINTPTR_MAX - bytes || b > UINTPTR_MAX - q->slot_bytes ||
         (a < b + q->slot_bytes && b < a + bytes)) return 0;
-    for (uint32_t row = 0; row < 192; ++row) {
+    uint32_t width = q->geometry.width, height = q->geometry.height;
+    for (uint32_t row = 0; row < height; ++row) {
         const uint8_t *src = y + row * stride;
-        uint8_t *dst = slot->pixels + row * ((q->format & VIDEO_SOURCE_TYPE_MASK) == VIDEO_SOURCE_A4 ? 160 : 320);
+        uint8_t *dst = slot->pixels + row * ((q->format & VIDEO_SOURCE_TYPE_MASK) == VIDEO_SOURCE_A4 ? width / 2 : width);
         if ((q->format & VIDEO_SOURCE_TYPE_MASK) == VIDEO_SOURCE_A4) {
-            for (uint32_t col = 0; col < 160; ++col)
+            for (uint32_t col = 0; col < width / 2; ++col)
                 dst[col] = (video_gray_level(src[2 * col], range & VIDEO_SOURCE_TV) << 4) |
                             video_gray_level(src[2 * col + 1], range & VIDEO_SOURCE_TV);
         } else {
-            for (uint32_t col = 0; col < 320; ++col) dst[col] = src[col];
+            for (uint32_t col = 0; col < width; ++col) dst[col] = src[col];
         }
     }
     slot->range = range; slot->copied = 1;
@@ -96,9 +103,9 @@ int video_decoded_claim(video_decoded_queue *q, uint32_t generation, uint32_t or
         (scale != VIDEO_SCALE_NATIVE && scale != VIDEO_SCALE_DOUBLE)) return 0;
     video_decoded_slot *slot = &q->slots[q->head];
     if (slot->state != VIDEO_DECODED_READY || slot->media.ordinal != ordinal) return 0;
-    *frame = (video_frame_descriptor){q->token, generation, ordinal, 320, 192,
-        (q->format & VIDEO_SOURCE_TYPE_MASK) == VIDEO_SOURCE_A4 ? 160 : 320,
-        q->slot_bytes, q->format | slot->range, scale, slot->pixels};
+    *frame = (video_frame_descriptor){q->token, generation, ordinal, q->geometry.width, q->geometry.height,
+        (q->format & VIDEO_SOURCE_TYPE_MASK) == VIDEO_SOURCE_A4 ? q->geometry.width / 2 : q->geometry.width,
+        q->slot_bytes, q->format | slot->range, scale, slot->pixels, q->geometry.picture};
     *media = slot->media;
     slot->state = VIDEO_DECODED_PRESENTING;
     return 1;

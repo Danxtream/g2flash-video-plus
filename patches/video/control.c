@@ -182,12 +182,20 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         return VIDEO_CONTROL_ACCEPTED;
     }
     if (op == VIDEO_CONTROL_START) {
-        if (n != VIDEO_START_BYTES || p[12] != (VIDEO_FRAME_WIDTH & 255) ||
-            p[13] != VIDEO_FRAME_WIDTH >> 8 || p[14] != VIDEO_FRAME_HEIGHT || p[15] ||
+        if ((n != VIDEO_START_BYTES && n != VIDEO_START_GEOMETRY_BYTES) ||
             p[16] != VIDEO_FRAME_REFERENCES || p[17] != VIDEO_FRAME_DPB ||
             p[18] & ~(VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES | VIDEO_QUEUED_PRESENTATION | VIDEO_PAIRED_PRESENTATION | VIDEO_START_PAUSED | VIDEO_DITHER_PRESENTATION) ||
             ((p[19] || (p[18] & (VIDEO_START_PAUSED | VIDEO_DITHER_PRESENTATION))) && !(p[18] & VIDEO_QUEUED_PRESENTATION)))
             return VIDEO_CONTROL_FORMAT;
+        video_geometry geometry = {p[12] | (uint16_t)p[13] << 8, p[14] | (uint16_t)p[15] << 8,
+            {0, 0, p[12] | (uint16_t)p[13] << 8, p[14] | (uint16_t)p[15] << 8}};
+        if (n == VIDEO_START_GEOMETRY_BYTES) {
+            geometry.picture = (video_picture_rect){p[24] | (uint16_t)p[25] << 8,
+                p[26] | (uint16_t)p[27] << 8, p[28] | (uint16_t)p[29] << 8,
+                p[30] | (uint16_t)p[31] << 8};
+        } else if (geometry.width != VIDEO_FRAME_WIDTH || geometry.height != VIDEO_FRAME_HEIGHT)
+            return VIDEO_CONTROL_FORMAT;
+        if (!video_geometry_valid(geometry)) return VIDEO_CONTROL_FORMAT;
         uint32_t stream = video_read32(p + 8), interval = video_read32(p + 20);
         if (!stream || stream <= s->stream_high || interval < VIDEO_INTERVAL_MIN ||
             interval > VIDEO_INTERVAL_MAX) return VIDEO_CONTROL_FORMAT;
@@ -203,6 +211,7 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         if ((p[18] & VIDEO_PAIRED_PRESENTATION) && !(p[18] & VIDEO_QUEUED_PRESENTATION))
             return VIDEO_CONTROL_FORMAT;
         s->stream = s->stream_high = stream;
+        s->geometry = geometry;
         s->interval = interval;
         uint32_t policy = s->options & VIDEO_RADIO_POLICY_MASK;
         s->options = p[18] | (uint32_t)p[19] << VIDEO_PREROLL_SHIFT | policy;
@@ -299,7 +308,7 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             video_control_give(ctx); return video_refused(ctx, data, size, route, VIDEO_REFUSAL_REPLAY, 0, 0, 0);
         }
     } else {
-        if (request <= s->request_high[origin] || size > VIDEO_START_BYTES) {
+        if (request <= s->request_high[origin] || size > VIDEO_START_GEOMETRY_BYTES) {
             video_control_give(ctx); return video_refused(ctx, data, size, route, VIDEO_REFUSAL_REPLAY, 0, 0, s->request_high[origin]);
         }
         entry = &s->replay[origin][s->replay_next[origin]];
@@ -370,7 +379,7 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             entry->snapshot[0] = VIDEO_PROTOCOL_VERSION;
             entry->snapshot[1] = VIDEO_PLAYBACK_CAPABILITIES;
             entry->snapshot[3] = VIDEO_PLAYBACK_QUEUE | VIDEO_PLAYBACK_PAIRED | VIDEO_PLAYBACK_METADATA | VIDEO_PLAYBACK_SHOWN | VIDEO_PLAYBACK_CONTROLS | VIDEO_PLAYBACK_SEEK | VIDEO_PLAYBACK_MENU | VIDEO_PLAYBACK_POLICY;
-            entry->snapshot[4] = VIDEO_DECODED_DEPTH;
+            entry->snapshot[4] = VIDEO_DECODED_DEPTH | VIDEO_PLAYBACK_GEOMETRY;
             entry->snapshot[5] = VIDEO_TIMELINE_RATE_MASK;
             entry->snapshot[6] = 255; /* Maximum explicit decoded seek prefix. */
             entry->snapshot[7] = 247; /* Adds timed NAL records and timeline credits; 8 stays reserved. */

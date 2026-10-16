@@ -25,7 +25,7 @@ static void check_pixels(uint32_t format, uint32_t scale, uint32_t width, uint32
                                              video_gray_level(brightness(x + 1, y), tv);
         }
     }
-    video_frame_descriptor frame = {3, 9, 17, width, height, stride, bytes, format, scale, source};
+    video_frame_descriptor frame = {3, 9, 17, width, height, stride, bytes, format, scale, source, {0}};
     uint8_t *shadow = storage + 32;
     assert(video_pack_frame(shadow, VIDEO_PANEL_BYTES, &frame));
     uint32_t ox = (640 - width * scale) / 2, oy = (480 - height * scale) / 2;
@@ -46,7 +46,7 @@ static void rejected(void) {
     uint8_t *shadow = malloc(VIDEO_PANEL_BYTES), *source = malloc(320 * 192);
     assert(shadow && source); memset(shadow, 0xaa, VIDEO_PANEL_BYTES);
     video_frame_descriptor valid = {1, 1, 1, 320, 192, 320, 320 * 192,
-                                    VIDEO_SOURCE_Y8, VIDEO_SCALE_DOUBLE, source};
+                                    VIDEO_SOURCE_Y8, VIDEO_SCALE_DOUBLE, source, {0}};
     for (uint32_t variant = 0; variant < 16; ++variant) {
         video_frame_descriptor f = valid;
         switch (variant) {
@@ -103,7 +103,7 @@ static void dithered(void) {
     for (uint32_t scale = 1; scale <= 2; ++scale) for (uint32_t tv = 0; tv <= 1; ++tv) {
         for (uint32_t i = 0; i < sizeof(source); ++i) source[i] = i;
         video_frame_descriptor f = {1, 1, 1, 320, 192, 320, sizeof(source),
-            VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER | (tv ? VIDEO_SOURCE_TV : 0), scale, source};
+            VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER | (tv ? VIDEO_SOURCE_TV : 0), scale, source, {0}};
         assert(video_pack_frame(shadow, sizeof(shadow), &f));
         uint32_t ox = (640 - 320 * scale) / 2, oy = (480 - 192 * scale) / 2;
         for (uint32_t y = 0; y < 480; ++y) for (uint32_t x = 0; x < 640; ++x) {
@@ -131,7 +131,7 @@ static void dither_cells(void) {
             memset(source, sample, sizeof(source));
             uint32_t height = phase ? 1 : 2;
             video_frame_descriptor f = {1, 1, 1, 4, height, 4, sizeof(source),
-                VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER | (tv ? VIDEO_SOURCE_TV : 0), VIDEO_SCALE_DOUBLE, source};
+                VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER | (tv ? VIDEO_SOURCE_TV : 0), VIDEO_SCALE_DOUBLE, source, {0}};
             assert(video_pack_frame(shadow, sizeof(shadow), &f));
             uint32_t y = 240 - height;
             for (uint32_t row = 0; row < height * 2; ++row) for (uint32_t col = 0; col < 4; ++col)
@@ -159,7 +159,7 @@ static void mode_changes(void) {
                     (type == 3 ? VIDEO_SOURCE_DITHER : 0);
                 uint32_t stride = type == 2 ? width / 2 : width;
                 memset(source, type == 2 ? level * 17 : sample, 640 * 384);
-                video_frame_descriptor frame = {1, 1, 1, width, height, stride, 640 * 384, format, scale, source};
+                video_frame_descriptor frame = {1, 1, 1, width, height, stride, 640 * 384, format, scale, source, {0}};
                 /* A menu occupies bottom margins; the next complete media frame
                  * must clear it without depending on a freshly zeroed shadow. */
                 memset(shadow + 432 * VIDEO_PANEL_STRIDE, 0xab, 48 * VIDEO_PANEL_STRIDE);
@@ -191,7 +191,7 @@ static void plain_cells(void) {
             memset(guarded, 0xcd, sizeof(guarded));
             uint8_t *shadow = guarded + 1; /* Also permit unaligned destinations. */
             video_frame_descriptor frame = {1, 1, 1, 4, height, 3, sizeof(source),
-                VIDEO_SOURCE_A4 | (tv ? VIDEO_SOURCE_TV : 0), VIDEO_SCALE_DOUBLE, source};
+                VIDEO_SOURCE_A4 | (tv ? VIDEO_SOURCE_TV : 0), VIDEO_SCALE_DOUBLE, source, {0}};
             assert(video_pack_frame(shadow, VIDEO_PANEL_BYTES, &frame));
             uint32_t y = 240 - height;
             for (uint32_t row = 0; row < 2 * height; ++row) {
@@ -202,6 +202,35 @@ static void plain_cells(void) {
             assert(guarded[0] == 0xcd && guarded[VIDEO_PANEL_BYTES + 1] == 0xcd);
         }
     }
+}
+
+static void picture_margins(void) {
+    uint8_t source[320 * 192], shadow[VIDEO_PANEL_BYTES];
+    const uint16_t sizes[3][2] = {{320,192}, {320,176}, {144,240}};
+    for (uint32_t size = 0; size < 3; ++size) for (uint32_t scale = 1; scale <= 2; ++scale)
+        for (uint32_t mode = 0; mode < 3; ++mode) for (uint32_t edge = 0; edge < 3; ++edge) {
+            uint32_t width = sizes[size][0], height = sizes[size][1];
+            uint32_t type = mode == 0 ? VIDEO_SOURCE_A4 : VIDEO_SOURCE_Y8;
+            memset(source, mode == 0 ? 0x11 : 0, sizeof(source));
+            memset(shadow, 0xff, sizeof(shadow));
+            video_frame_descriptor f = {1,1,1,width,height,type == VIDEO_SOURCE_A4 ? width/2 : width,
+                sizeof(source),type | (mode == 2 ? VIDEO_SOURCE_DITHER : 0),scale,source,
+                {4,6,width-8,height-12}};
+            if (edge == 1) f.picture = (video_picture_rect){3,0,width-7,height};
+            if (edge == 2) f.picture = (video_picture_rect){4,3,width-9,height-7};
+            assert(video_pack_frame(shadow, sizeof(shadow), &f));
+            uint32_t x0 = (640-width*scale)/2 + f.picture.x*scale;
+            uint32_t y0 = (480-height*scale)/2 + f.picture.y*scale;
+            for (uint32_t y = 0; y < 480; ++y) for (uint32_t x = 0; x < 640; ++x) {
+                uint32_t level = shadow[y*320+x/2]; level = x&1 ? level&15 : level>>4;
+                assert(level == (x >= x0 && x < x0+f.picture.width*scale &&
+                                 y >= y0 && y < y0+f.picture.height*scale ? 1u : 0u));
+            }
+            f.picture.x = width;
+            memset(shadow, 0xa5, sizeof(shadow));
+            assert(!video_pack_frame(shadow, sizeof(shadow), &f));
+            for (uint32_t i = 0; i < sizeof(shadow); ++i) assert(shadow[i] == 0xa5);
+        }
 }
 
 int main(int argc, char **argv) {
@@ -227,7 +256,8 @@ int main(int argc, char **argv) {
     } else if (!strcmp(argv[1], "dump-gray")) {
         for (uint32_t y = 0; y < 256; ++y)
             printf("%u %u %u\n", y, video_gray_level(y, 0), video_gray_level(y, 1));
-    } else if (!strcmp(argv[1], "margins")) mode_changes();
+    } else if (!strcmp(argv[1], "picture-margins")) picture_margins();
+    else if (!strcmp(argv[1], "margins")) mode_changes();
     else if (!strcmp(argv[1], "plain-cells")) plain_cells();
     else if (!strcmp(argv[1], "cells")) dither_cells();
     else if (!strcmp(argv[1], "dither")) dithered();
