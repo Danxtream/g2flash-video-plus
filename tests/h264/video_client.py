@@ -229,7 +229,7 @@ class VideoClient(VideoLink):
                     (not raw[3] & 32 and raw[6:8] != bytes((0, 0)))):
                 raise ValueError('unsupported queued playback capability')
         self.shown_bytes = {lens: 72 if raw[7] & 4 else 64 for lens, raw in replies.items()}
-        return {lens: dict(geometry=bool(raw[4] & 128), timed_nal=bool(raw[7] & 128), receive_evidence=bool(raw[7] & 32), profiling=bool(raw[7] & 16), trigger_timing=bool(raw[7] & 4), dither=bool(raw[7] & 2), policy=bool(raw[3] & 128), menu=bool(raw[3] & 64), seek=bool(raw[3] & 32), max_preroll=raw[6], controls=bool(raw[3] & 16), shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4] & 63, rates=(10, 15, 20), rate_mask=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
+        return {lens: dict(geometry=bool(raw[4] & 128), timed_nal=bool(raw[7] & 128), multi_slice=bool(raw[7] & 8), receive_evidence=bool(raw[7] & 32), profiling=bool(raw[7] & 16), trigger_timing=bool(raw[7] & 4), dither=bool(raw[7] & 2), policy=bool(raw[3] & 128), menu=bool(raw[3] & 64), seek=bool(raw[3] & 32), max_preroll=raw[6], controls=bool(raw[3] & 16), shown=bool(raw[3] & 8), paired=bool(raw[3] & 2), compact_metadata=bool(raw[3] & 4), depth=raw[4] & 63, rates=(10, 15, 20), rate_mask=raw[5], a4_bytes=struct.unpack_from('<I', raw, 8)[0],
                            stack_bytes=struct.unpack_from('<I', raw, 12)[0]) for lens, raw in replies.items()}
 
     def configure_timeline(self, stream, duration_ms, start_pts_ms=0, fps=15):

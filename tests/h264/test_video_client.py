@@ -198,7 +198,7 @@ class VideoClientTests(unittest.TestCase):
             self.assertEqual(row['geometry'], bool(flags & 128))
 
     def test_receive_evidence_capability_preserves_old_flags_and_rejects_unknown_bits(self):
-        for flags in (23, 55, 119, 247, 150):
+        for flags in (23, 55, 119, 247, 255, 150):
             client = VideoClient.__new__(VideoClient)
             client.counter = Counter()
             raw = bytes((1, 13, 0, 255, 2, 7, 255, flags)) + bytes(8)
@@ -208,6 +208,7 @@ class VideoClientTests(unittest.TestCase):
             else:
                 self.assertEqual(client.playback_capabilities()[1]['receive_evidence'], bool(flags & 32))
                 self.assertEqual(client.playback_capabilities()[1]['timed_nal'], bool(flags & 128))
+                self.assertEqual(client.playback_capabilities()[1]['multi_slice'], bool(flags & 8))
 
     def test_presentation_rate_uses_copy_ticks_and_exposes_short_or_missing_windows(self):
         samples = [dict(presented=30, copy_tick=2100), dict(presented=32, copy_tick=2225)]

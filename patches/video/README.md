@@ -276,7 +276,8 @@ Snapshot bytes 0..3 are version, supported stage, control result and lifecycle
 state; LE32 values at 4/8/12/16/20/24/28 are stream, generation, left/right request
 high-water, stream high-water, last error and interval. Record/NAL maxima are
 LE32 at 32/36; geometry at 40/42, references/DPB at 44/45, forced chroma skip and
-single-slice limit at 46/47, four/six-slot bounds at 48/49. Capacity/free slots are bytes 50/51; LE32
+legacy single-slice byte at 46/47 (always 1; playback capability byte 7 bit 3
+advertises multi-slice pictures), four/six-slot bounds at 48/49. Capacity/free slots are bytes 50/51; LE32
 accepted/consumed NAL counts are at 56/60. Expected sequence is LE32 at 52. Completed pictures are LE32 at 64;
 bytes 68..79 carry recovery and diagnostic details. Stage 7 announces ordered
 decoding, copy-completed presentation and optional verification; byte 71 advertises allowed START
@@ -365,7 +366,8 @@ sequence. Expected consumption at offset 52 and completed pictures at 64 remain
 separate. All pending queue bytes belong to the retired owner, never the next
 stream. The C interface limits the parsed progressive I/P format before its
 first input: the selected coded size, one reference and two DPB frames, no crop, FMO,
-weighted prediction or multiple slices. Baseline CAVLC, Main CABAC and High
+weighted prediction; only CAVLC pictures without 8x8 transforms may span several
+slices, in raster order. Baseline CAVLC, Main CABAC and High
 CABAC with 8x8 transforms are supported; High CAVLC with 8x8 is rejected.
 I_PCM remains rejected by the decoder. Queries return actual lazy DPB storage,
 independent of which reconstruction features are compiled into the decoder.
@@ -933,7 +935,8 @@ level=(16+(f*239+127)/255)>>4. The immutable normalization table clamps
 Y<=16 to 0 and Y>=235 to 255. A level table avoids hot-path division.
 Rescale is the only mapping. Decoder bytes, evidence CRCs and off margins
 remain unchanged. Retired development command 23 is refused; advanced
-capability byte 7 bit 3 and paired picture wire byte 23 are reserved zeros.
+capability byte 7 bit 3 now advertises multi-slice pictures; paired picture
+wire byte 23 is a reserved zero.
 
 Plain doubled A4 expands each packed pair through a 512-byte immutable
 table, writing both physical rows directly: 30720 lookups for a 320x192

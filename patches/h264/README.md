@@ -43,8 +43,9 @@ prefixes. The current 4096-byte record leaves 4086 bytes for each NAL; RBSP scra
 is reserved once at 4096 bytes. CONSUMED and FRAME_READY are distinct: input is
 not a picture count. A borrowed Y view exists only after FRAME_READY and expires
 at the next decode/destroy. Decode/preflight errors require a decoder restart.
-The unchanged decoder still supports only single-slice pictures; this API does
-not bake that restriction into queue or transport sequencing.
+The decoder joins a picture's CAVLC slices: earlier slices return CONSUMED and
+the last one FRAME_READY. CABAC and 8x8-transform pictures stay single-slice.
+Queue and transport sequencing never assumed one slice per picture.
 
 The firmware keeps one SPS/PPS (ID zero), no legacy output copy and
 SUB0H264_TRACE=0. SUB0H264_ENABLE_CALLBACK_TRACE=0 also omits structured

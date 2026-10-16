@@ -153,10 +153,12 @@ static bool validInput(State &state) {
         return nal.type == NalType::Sei || nal.type == NalType::Aud ||
             nal.type == NalType::EndOfSequence || nal.type == NalType::EndOfStream ||
             nal.type == NalType::FillerData;
-    uint32_t first = br.readUev(), type = br.readUev(), id = br.readUev();
-    /* The current core completes one slice at a time. Advertise and enforce
-     * that limitation rather than counting arbitrary VCL NALs as pictures. */
-    if (!br.hasBits(1) || first || type > 9 || (type % 5 != 0 && type % 5 != 2) ||
+    /* Any first_mb_in_slice is accepted: the core joins a picture's CAVLC
+     * slices, refuses one that does not continue it in raster order and
+     * reports FRAME_READY only at the picture's last slice. */
+    static_cast<void>(br.readUev());
+    uint32_t type = br.readUev(), id = br.readUev();
+    if (!br.hasBits(1) || type > 9 || (type % 5 != 0 && type % 5 != 2) ||
         id >= cMaxPpsCount) return false;
     const Pps *pps = sets.getPps(static_cast<uint8_t>(id));
     const Sps *sps = pps ? sets.getSps(pps->spsId_) : nullptr;

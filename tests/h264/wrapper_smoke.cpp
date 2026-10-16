@@ -108,9 +108,11 @@ static Bits pps() {
     b.bits(1, 1); b.bits(0, 1); b.bits(0, 1);
     return b;
 }
-static Bits idr() {
+/* One flat I_16x16 MB; `first` is first_mb_in_slice, so wider frames can be
+ * sent as one slice per MB. */
+static Bits idr(uint32_t first = 0) {
     Bits b(0x65);
-    b.ue(0); b.ue(2); b.ue(0); b.bits(0, 4); b.ue(0);
+    b.ue(first); b.ue(2); b.ue(0); b.bits(0, 4); b.ue(0);
     b.bits(0, 1); b.bits(0, 1); b.se(0); b.ue(1);
     b.ue(3); b.ue(0); b.se(0); b.bits(1, 1);
     return b;
@@ -200,6 +202,21 @@ static void refusal(uint32_t tag) {
         refusedTag = 0;
     }
     CHECK(live == before);
+}
+
+/* A picture split into slices is consumed slice by slice and ready only
+ * at its last MB; a slice that continues no open picture is refused. */
+static void split_picture() {
+    Handle h;
+    g2_h264_frame_info info;
+    CHECK(g2_h264_limit_format(h.value, 32, 16, 1, 2));
+    CHECK(feed(h.value, sps(2, 1)) == G2_H264_CONSUMED);
+    CHECK(feed(h.value, pps()) == G2_H264_CONSUMED);
+    CHECK(feed(h.value, idr(0)) == G2_H264_CONSUMED);
+    CHECK(g2_h264_frame(h.value, &info) == G2_H264_ERROR && !info.y);
+    CHECK(feed(h.value, idr(1)) == G2_H264_FRAME_READY);
+    CHECK(g2_h264_frame(h.value, &info) == G2_H264_FRAME_READY && info.width == 32 && info.height == 16);
+    CHECK(feed(h.value, idr(1)) == G2_H264_ERROR);
 }
 
 static void format_limits() {
@@ -358,6 +375,7 @@ int main(int argc, char **argv) {
     }
     lifecycle();
     format_limits();
+    split_picture();
     refusal(1);  // DPB metadata.
     refusal(2);  // Y plane.
     refusal(5);  // Macroblock context batch.

@@ -1743,7 +1743,7 @@ static void timed_input(void) {
     control_command(p, VIDEO_PLAYBACK_CAPABILITIES, 0);
     memset(snapshot, 0, sizeof(snapshot));
     assert(control_response(p, VIDEO_CONTROL_HEADER_BYTES, snapshot, VIDEO_PLAYBACK_CAPABILITIES_BYTES) ==
-           VIDEO_CONTROL_ACCEPTED && snapshot[7] == 247);
+           VIDEO_CONTROL_ACCEPTED && snapshot[7] == 255);
     control_command(p, VIDEO_CONTROL_STOP, 1);
     assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
     timed_record(record, 4, 3, 125, 0x41);
@@ -2645,14 +2645,14 @@ static void gray_contract(void) {
         assert(!context.video_control.options && !context.video_control.stream_high);
     }
     control_command(p, 13, 0);
-    assert(!control_response(p, 8, report, 16) && !(report[7] & 8));
+    assert(!control_response(p, 8, report, 16) && (report[7] & 8)); /* Bit 3 now marks multi-slice pictures. */
     control_command(p, VIDEO_CONTROL_START, 1);
     assert(!control_snapshot(p, 24, report)); pool_drain(); await_ready();
     control_command(p, RETIRED_GRAY_CONTROL, 0); video_write32(p + 8, 1);
     assert(control_snapshot(p, 12, report) == VIDEO_CONTROL_FORMAT);
     assert(!context.video_control.options && context.video_control.stream == 1);
     control_command(p, VIDEO_CONTROL_STOP, 1); assert(!control_snapshot(p, 12, report)); pool_drain(); finish();
-    puts("retired gray selections/query/replay refused; capability reserved; playback unchanged PASS");
+    puts("retired gray selections/query/replay refused; capability bit reused for multi-slice; playback unchanged PASS");
 }
 
 static void radio_provenance(void) {

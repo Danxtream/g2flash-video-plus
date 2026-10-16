@@ -51,7 +51,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     p[42] = VIDEO_FRAME_HEIGHT & 255; p[43] = VIDEO_FRAME_HEIGHT >> 8;
     p[44] = VIDEO_FRAME_REFERENCES; p[45] = VIDEO_FRAME_DPB;
     p[46] = 1; /* Chroma skipped. */
-    p[47] = 1; /* Multiple slices per picture are not implemented. */
+    p[47] = 1; /* Legacy single-slice byte kept for older apps; playback capability byte 7 bit 3 advertises multi-slice pictures. */
     p[48] = VIDEO_QUEUE_INITIAL; p[49] = VIDEO_QUEUE_MAX;
     video_queue_report queue;
     video_worker_queue_report_locked(&queue);
@@ -386,7 +386,7 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             entry->snapshot[4] = VIDEO_DECODED_DEPTH | VIDEO_PLAYBACK_GEOMETRY | VIDEO_PLAYBACK_PICTURE_STYLE;
             entry->snapshot[5] = VIDEO_TIMELINE_RATE_MASK;
             entry->snapshot[6] = 255; /* Maximum explicit decoded seek prefix. */
-            entry->snapshot[7] = 247; /* Adds timed NAL records and timeline credits; 8 stays reserved. */
+            entry->snapshot[7] = 255; /* Adds timed NAL records and timeline credits; 8 marks multi-slice pictures. */
             video_write32(entry->snapshot + 8, VIDEO_PRESENTER_A4_LIMIT);
             video_write32(entry->snapshot + 12, VIDEO_PRESENTER_STACK_BYTES);
         }
