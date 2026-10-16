@@ -151,7 +151,9 @@ extern "C" int chroma_trimmed_storage_check(void)
         int32_t qps[4] = {51, 0, 51, 0};
         deblockMb(luma, 1U, 1U, true, 0, 0, nnz, motion, qps, transforms,
                   offset, 2U, 2U, false);
-        if ((luma.y(15U, 16U) == 128U) != (offset == 0)) return 9;
+        // Filtered for both offsets: the left MB edge uses the QP averaged with
+        // the QP-51 neighbour (§8.7.2.2), whatever this MB's own QP.
+        if (luma.y(15U, 16U) == 128U) return 9;
     }
     return 0;
 }

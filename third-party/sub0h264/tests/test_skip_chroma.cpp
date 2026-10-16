@@ -189,10 +189,9 @@ TEST_CASE("Skip chroma: deblocking preserves joint threshold and Y edges")
         deblockMb(full, 1U, 1U, true, 0, 0, nnz, motion, qps, transforms, offset, 2U, 2U);
         deblockMb(luma, 1U, 1U, true, 0, 0, nnz, motion, qps, transforms, offset, 2U, 2U, true);
         CHECK(std::memcmp(full.yData(), luma.yData(), 1024U) == 0);
-        if (offset == 0)
-            CHECK(luma.y(15U, 16U) == 128U);
-        else
-            CHECK(luma.y(15U, 16U) != 128U);
+        // The left MB edge uses the QP averaged with the QP-51 neighbour
+        // (§8.7.2.2), so it is filtered even though this MB's own QP is 0.
+        CHECK(luma.y(15U, 16U) != 128U);
     }
 }
 

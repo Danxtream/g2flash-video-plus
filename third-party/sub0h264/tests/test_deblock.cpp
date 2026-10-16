@@ -1,6 +1,8 @@
 #include "doctest.h"
 #include "../components/sub0h264/src/deblock.hpp"
 
+#include <cstring>
+
 using namespace sub0h264;
 
 TEST_CASE("Deblock: alpha/beta tables valid range")
@@ -241,6 +243,27 @@ TEST_CASE("Deblock: weak filter skips when |p1-p0| >= beta §8.7.2.3")
     filterLumaWeak(p0, p1, p2, q0, q1, q2, 12, 4, 1);
     CHECK(p0 == 80U);  // unchanged: |p1-p0|=4 is NOT < beta=4
     CHECK(q0 == 82U);
+}
+
+TEST_CASE("Deblock: low-QP MB still filters its left edge with the averaged QP §8.7.2.2")
+{
+    // The MB edge uses qPav = (qPp + qPq + 1) >> 1 = (44 + 0 + 1) >> 1 = 22:
+    // alpha 9, beta 3, tc0 1 for bS 2, so p0/q0 move by 2 although this MB's
+    // own QP 0 gives alpha 0 for its internal edges.
+    Frame frame;
+    REQUIRE(frame.allocate(32U, 16U, true));
+    frame.fill(100U, 0U, 0U);
+    for (uint32_t y = 0U; y < 16U; ++y)
+        for (uint32_t x = 16U; x < 32U; ++x)
+            frame.y(x, y) = 104U;
+    uint8_t nnz[32], transforms[2] = {};
+    std::memset(nnz, 1, sizeof nnz); // coefficients everywhere: bS 2 between inter MBs
+    MbMotionInfo motion[32]{};
+    for (auto& m : motion) m.refIdx = 0;
+    int32_t qps[2] = {44, 0};
+    deblockMb(frame, 1U, 0U, false, 0, 0, nnz, motion, qps, transforms, 0, 2U, 1U, true);
+    CHECK(frame.y(15U, 8U) == 102U);
+    CHECK(frame.y(16U, 8U) == 102U);
 }
 
 TEST_CASE("Deblock: intra MB boundary uses BS=4 strong filter §8.7.2.4")

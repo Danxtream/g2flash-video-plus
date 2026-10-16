@@ -415,7 +415,24 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
     int32_t cAlpha = cAlphaTable[clampQpIdx(chromaQp + alphaOffset)];
 
     if (alpha == 0 && cAlpha == 0)
-        return; // No filtering needed at this QP
+    {
+        // Left and top MB edges use the QP averaged with the neighbour
+        // (§8.7.2.2), so a low-QP MB beside a higher-QP one can still need
+        // those edges filtered.
+        bool boundaryFiltered = false;
+        for (uint32_t side = 0U; side < 2U && !boundaryFiltered; ++side)
+        {
+            if (side == 0U ? mbX == 0U : mbY == 0U) continue;
+            uint32_t neighborIdx = side == 0U ? mbIdx - 1U : mbIdx - widthInMbs;
+            int32_t lumaAvg = (qp + mbQps[neighborIdx] + 1) >> 1;
+            int32_t chromaAvg = (chromaQp +
+                cChromaQpTable[clampQpIdx(mbQps[neighborIdx] + chromaQpIndexOffset)] + 1) >> 1;
+            boundaryFiltered = cAlphaTable[clampQpIdx(lumaAvg + alphaOffset)] != 0 ||
+                               cAlphaTable[clampQpIdx(chromaAvg + alphaOffset)] != 0;
+        }
+        if (!boundaryFiltered)
+            return; // No filtering needed at this QP
+    }
 
     uint8_t verticalBs[4][4] = {}, horizontalBs[4][4] = {};
     uint32_t pixX = mbX * 16U;
