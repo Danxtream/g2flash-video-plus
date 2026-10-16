@@ -50,6 +50,9 @@ class PackTests(unittest.TestCase):
     def test_picture_rect_keeps_bars_unlit_and_black_content_lit_for_all_shapes_and_modes(self):
         subprocess.run([str(self.exe), "picture-margins"], check=True)
 
+    def test_four_floors_keep_default_and_bright_curve_and_dark_bars_for_both_scales(self):
+        subprocess.run([str(self.exe), "picture-styles"], check=True)
+
 
 if __name__ == "__main__":
     unittest.main()

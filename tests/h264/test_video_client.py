@@ -188,7 +188,7 @@ def synthetic_reference(count=32):
 
 class VideoClientTests(unittest.TestCase):
     def test_geometry_flag_keeps_depth_and_presenter_budget_separate(self):
-        for flags in (2, 130):
+        for flags in (2, 130, 194):
             client = VideoClient.__new__(VideoClient)
             client.counter = Counter()
             raw = bytes((1,13,0,255,flags,7,255,247)) + struct.pack('<II',77824,8192)

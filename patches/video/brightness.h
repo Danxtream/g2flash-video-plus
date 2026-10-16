@@ -72,3 +72,19 @@ static inline uint8_t video_dither_level(uint8_t y, int tv, uint32_t x, uint32_t
     uint32_t threshold = (row & 1) ? ((x & 1) ? 1 : 3) : ((x & 1) ? 2 : 0);
     return (t >> 2) + ((t & 3) > threshold);
 }
+
+/* Style bits 0..1 select floor 1/0/0.25/0.5. Blend only below the first
+ * solid-one point, retaining the approved quarter-step curve above it. */
+static inline uint32_t video_dither_quarter(uint8_t y, int tv, uint32_t style) {
+    uint32_t full = tv ? video_tv_full[y] : y;
+    static const uint8_t floors[4] = {4,0,1,2};
+    uint32_t floor = floors[style & 3];
+    uint32_t t = full < 7 ? floor + (4-floor)*full/7 : video_quarter[full];
+    return t;
+}
+
+static inline uint8_t video_dither_tuned(uint8_t y, int tv, uint32_t x, uint32_t row, uint32_t style) {
+    uint32_t t = video_dither_quarter(y,tv,style);
+    uint32_t threshold = (row & 1) ? ((x & 1) ? 1 : 3) : ((x & 1) ? 2 : 0);
+    return (t >> 2) + ((t & 3) > threshold);
+}

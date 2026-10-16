@@ -41,6 +41,8 @@ int main(void) {
         }
     }
     video_decoded_queue q = {0};
+    assert(!video_decoded_init(&q, 7, 9, VIDEO_SOURCE_Y8 | VIDEO_SOURCE_STYLE_MASK, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
+    assert(video_decoded_init(&q, 7, 9, VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER | VIDEO_SOURCE_STYLE_MASK, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
     assert(!video_decoded_init(&q, 7, 9, VIDEO_SOURCE_A4 | VIDEO_SOURCE_DITHER, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
     assert(!video_decoded_init(&q, 7, 9, VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER, 2, pixels, 2 * VIDEO_DECODED_A4_BYTES));
     assert(video_decoded_init(&q, 7, 9, VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));

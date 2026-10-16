@@ -365,6 +365,8 @@ static int video_presenter_prepare(video_owner *owner) {
     if (!video_storage_init(&p->storage, &heap, video_owner_charge(raw_bytes),
                             owner->storage.display_allowance)) return 0;
     int dither = (owner->context->video_control.options & VIDEO_DITHER_PRESENTATION) != 0;
+    uint32_t format = dither ? VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER : VIDEO_SOURCE_A4;
+    format |= owner->context->video_control.picture_style << VIDEO_SOURCE_STYLE_SHIFT;
     uint32_t pixels_bytes = VIDEO_DECODED_DEPTH * (dither ? VIDEO_DECODED_Y8_BYTES : VIDEO_DECODED_A4_BYTES);
     p->storage.limit = dither ? VIDEO_PRESENTER_Y8_LIMIT : VIDEO_PRESENTER_A4_LIMIT;
     p->storage.cached_allowance = 0; /* Input slots already admitted by decoder. */
@@ -373,7 +375,7 @@ static int video_presenter_prepare(video_owner *owner) {
         VIDEO_PRESENTER_STACK_BYTES + 2 * VIDEO_STACK_GUARD_BYTES);
     if (!p->pixels || !p->stack_allocation ||
         !video_decoded_init(&p->queue, p->generation, p->token,
-                            dither ? VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER : VIDEO_SOURCE_A4,
+                            format,
                             VIDEO_DECODED_DEPTH, p->pixels, pixels_bytes) ||
         !video_decoded_geometry(&p->queue, owner->context->video_control.geometry.width ?
             owner->context->video_control.geometry : video_geometry_default()) ||

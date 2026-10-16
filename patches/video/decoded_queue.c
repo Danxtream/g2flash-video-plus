@@ -11,7 +11,8 @@ int video_decoded_init(video_decoded_queue *q, uint32_t generation, uint32_t tok
                     type == VIDEO_SOURCE_Y8 ? VIDEO_DECODED_Y8_BYTES : 0;
     if (!q || !generation || !token || !pixels || !slot || !depth ||
         depth > VIDEO_DECODED_DEPTH || bytes < depth * slot ||
-        (format & ~(VIDEO_SOURCE_TYPE_MASK | VIDEO_SOURCE_DITHER)) ||
+        (format & ~(VIDEO_SOURCE_TYPE_MASK | VIDEO_SOURCE_DITHER | VIDEO_SOURCE_STYLE_MASK)) ||
+        ((format & VIDEO_SOURCE_STYLE_MASK) && !(format & VIDEO_SOURCE_DITHER)) ||
         ((format & VIDEO_SOURCE_DITHER) && type != VIDEO_SOURCE_Y8)) return 0;
     *q = (video_decoded_queue){.generation = generation, .token = token,
         .format = format, .depth = depth, .slot_bytes = slot, .geometry = video_geometry_default()};

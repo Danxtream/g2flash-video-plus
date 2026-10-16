@@ -63,6 +63,9 @@ class WorkerTests(unittest.TestCase):
     def test_three_coded_geometries_exact_replay_invalid_rects_and_actual_decoder_budget(self):
         self.check_case("geometry")
 
+    def test_four_picture_floors_are_replay_frozen_admitted_and_reject_invalid_options(self):
+        self.check_case("picture-styles")
+
     def test_each_actual_allocation_failure_parks_before_reclaim(self):
         self.check_case("allocations")
 

@@ -2744,9 +2744,42 @@ static void geometry_contract(void) {
     }
 }
 
+static void picture_style_contract(void) {
+    for (uint32_t style = 0; style < 4; ++style) {
+        configure();
+        assert(video_timeline_configure(&context.video_control.timeline,1,2000,0,15,1));
+        context.video_control.owner_origin = 1;
+        uint8_t p[VIDEO_START_PICTURE_BYTES] = {0}, snapshot[VIDEO_STATUS_BYTES];
+        control_command(p,VIDEO_CONTROL_START,1);
+        p[18] = VIDEO_QUEUED_PRESENTATION | VIDEO_DITHER_PRESENTATION;
+        p[28] = 64; p[29] = 1; p[30] = 192; p[32] = style;
+        assert(!control_snapshot(p,sizeof(p),snapshot));
+        assert(context.video_control.picture_style == style);
+        uint8_t replay[VIDEO_STATUS_BYTES];
+        assert(!control_snapshot(p,sizeof(p),replay) && !memcmp(snapshot,replay,VIDEO_BASE_STATUS_BYTES));
+        p[32] ^= 1;
+        assert(video_control_received(p,sizeof(p),&control_route));
+        pool_drain(); await_ready();
+        assert(state() == VIDEO_READY && video_current_owner()->presenter->queue.format ==
+            (VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER | (style << VIDEO_SOURCE_STYLE_SHIFT)));
+        finish();
+    }
+    for (uint32_t variant = 0; variant < 3; ++variant) {
+        configure();
+        uint8_t p[VIDEO_START_PICTURE_BYTES] = {0}, snapshot[VIDEO_STATUS_BYTES];
+        control_command(p,VIDEO_CONTROL_START,1);
+        p[28] = 64; p[29] = 1; p[30] = 192;
+        p[32] = variant == 0 ? 4 : 1;
+        if (variant == 1) p[33] = 1;
+        assert(control_snapshot(p,sizeof(p),snapshot) == VIDEO_CONTROL_FORMAT);
+        assert(!context.video_control.stream_high && !pool_pending()); finish();
+    }
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
-    if (!strcmp(argv[1], "geometry")) geometry_contract();
+    if (!strcmp(argv[1], "picture-styles")) picture_style_contract();
+    else if (!strcmp(argv[1], "geometry")) geometry_contract();
     else if (!strcmp(argv[1], "normal")) normal();
     else if (!strcmp(argv[1], "allocations")) allocation_failures();
     else if (!strcmp(argv[1], "startup")) startup();

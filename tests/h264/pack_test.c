@@ -233,6 +233,45 @@ static void picture_margins(void) {
         }
 }
 
+static void picture_styles(void) {
+    const uint32_t threshold[2][2] = {{0,2},{3,1}};
+    uint8_t pixels[8], shadow[VIDEO_PANEL_BYTES];
+    for (uint32_t style = 0; style < 4; ++style)
+    for (uint32_t tv = 0; tv < 2; ++tv) for (uint32_t sample = 0; sample < 256; ++sample) {
+        uint32_t full = tv ? video_tv_full[sample] : sample;
+        const uint32_t floors[] = {4,0,1,2};
+        uint32_t t = full < 7 ? floors[style]+(4-floors[style])*full/7 : expected_quarter(full);
+        uint32_t sum = 0;
+        for (uint32_t y = 0; y < 2; ++y) for (uint32_t x = 0; x < 2; ++x) {
+            uint32_t level = video_dither_tuned(sample,tv,x,y,style);
+            assert(level == (t>>2)+((t&3)>threshold[y][x]));
+            assert(video_dither_tuned(sample,tv,x,y,0) == video_dither_level(sample,tv,x,y));
+            if (sample) assert(level >= video_dither_tuned(sample-1,tv,x,y,style));
+            if (full >= 7) assert(level == video_dither_level(sample,tv,x,y));
+            sum += level;
+        }
+        assert(sum == t && sum >= floors[style] && sum <= 60);
+        if (!full) assert(sum == floors[style]);
+        if (sample > 7 && sample != 16 && sample != 235 && sample != 255) continue;
+        memset(pixels,sample,sizeof(pixels));
+        for (uint32_t scale = 1; scale <= 2; ++scale) for (uint32_t height = 1; height <= 2; ++height)
+            for (uint32_t odd = 0; odd < 2; ++odd) {
+                video_frame_descriptor f = {1,1,1,4,height,4,sizeof(pixels),VIDEO_SOURCE_Y8 |
+                    VIDEO_SOURCE_DITHER | (style << VIDEO_SOURCE_STYLE_SHIFT) | (tv ? VIDEO_SOURCE_TV : 0),scale,pixels,{0}};
+                f.picture = (video_picture_rect){odd,0,4-odd,height};
+                memset(shadow,0xef,sizeof(shadow));
+                assert(video_pack_frame(shadow,sizeof(shadow),&f));
+                uint32_t ox = (640-4*scale)/2, oy = (480-height*scale)/2;
+                for (uint32_t y = 0; y < 480; ++y) for (uint32_t x = 0; x < 640; ++x) {
+                    uint32_t level = shadow[y*320+x/2]; level = x&1 ? level&15 : level>>4;
+                    uint32_t expected = x >= ox+odd*scale && x < ox+4*scale && y >= oy && y < oy+height*scale ?
+                        video_dither_tuned(sample,tv,x,y,style) : 0;
+                    assert(level == expected);
+                }
+            }
+    }
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (!strcmp(argv[1], "pixels")) {
@@ -256,7 +295,8 @@ int main(int argc, char **argv) {
     } else if (!strcmp(argv[1], "dump-gray")) {
         for (uint32_t y = 0; y < 256; ++y)
             printf("%u %u %u\n", y, video_gray_level(y, 0), video_gray_level(y, 1));
-    } else if (!strcmp(argv[1], "picture-margins")) picture_margins();
+    } else if (!strcmp(argv[1], "picture-styles")) picture_styles();
+    else if (!strcmp(argv[1], "picture-margins")) picture_margins();
     else if (!strcmp(argv[1], "margins")) mode_changes();
     else if (!strcmp(argv[1], "plain-cells")) plain_cells();
     else if (!strcmp(argv[1], "cells")) dither_cells();

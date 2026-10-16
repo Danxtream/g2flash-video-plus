@@ -19,12 +19,14 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
     uint32_t type = frame->format & VIDEO_SOURCE_TYPE_MASK;
     int tv = (frame->format & VIDEO_SOURCE_TV) != 0;
     int dither = (frame->format & VIDEO_SOURCE_DITHER) != 0;
+    uint32_t style = (frame->format & VIDEO_SOURCE_STYLE_MASK) >> VIDEO_SOURCE_STYLE_SHIFT;
     if (!shadow || bytes < VIDEO_PANEL_BYTES || !frame->pixels ||
         !frame->width || !frame->height || frame->width % 4 ||
         (frame->scale != VIDEO_SCALE_NATIVE && frame->scale != VIDEO_SCALE_DOUBLE) ||
         (type != VIDEO_SOURCE_Y8 && type != VIDEO_SOURCE_A4) ||
-        (frame->format & ~(VIDEO_SOURCE_TYPE_MASK | VIDEO_SOURCE_TV | VIDEO_SOURCE_UNSIGNALLED | VIDEO_SOURCE_DITHER)) ||
+        (frame->format & ~(VIDEO_SOURCE_TYPE_MASK | VIDEO_SOURCE_TV | VIDEO_SOURCE_UNSIGNALLED | VIDEO_SOURCE_DITHER | VIDEO_SOURCE_STYLE_MASK)) ||
         (dither && type != VIDEO_SOURCE_Y8) ||
+        (style && !dither) ||
         ((frame->format & VIDEO_SOURCE_UNSIGNALLED) && !tv) ||
         frame->width > VIDEO_PANEL_WIDTH / frame->scale ||
         frame->height > VIDEO_PANEL_HEIGHT / frame->scale) return 0;
@@ -66,7 +68,7 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
             for (uint32_t col = r.x; col < r.x + r.width; ++col) {
                 uint8_t level = type == VIDEO_SOURCE_A4 ?
                     (col & 1 ? in[col/2] & 15 : in[col/2] >> 4) :
-                    dither ? video_dither_level(in[col], tv, x + col, y + row) : video_gray_level(in[col], tv);
+                    dither ? video_dither_tuned(in[col], tv, x + col, y + row, style) : video_gray_level(in[col], tv);
                 if (col & 1) out[col/2] = (out[col/2] & 240) | level;
                 else out[col/2] = (out[col/2] & 15) | (level << 4);
             }
@@ -94,6 +96,12 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
                 uint8_t *out = shadow + (y + row * 2) * VIDEO_PANEL_STRIDE + x / 2;
                 for (uint32_t col = r.x; col < r.x + r.width; ++col) {
                     uint16_t cell = cells[in[col]];
+                    if (style) {
+                        uint32_t t = video_dither_quarter(in[col],tv,style), level = t >> 2, fraction = t & 3;
+                        uint8_t top = ((level + (fraction > 0)) << 4) | (level + (fraction > 2));
+                        uint8_t bottom = ((level + (fraction > 3)) << 4) | (level + (fraction > 1));
+                        cell = y & 1 ? (bottom << 8) | top : (top << 8) | bottom;
+                    }
                     out[col] = cell >> 8;
                     out[VIDEO_PANEL_STRIDE + col] = cell;
                 }
@@ -104,8 +112,8 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
             const uint8_t *in = frame->pixels + (row / frame->scale) * frame->stride;
             uint8_t *out = shadow + (y + row) * VIDEO_PANEL_STRIDE + x / 2;
             for (uint32_t col = r.x; col < r.x + r.width; col += 2)
-                out[col / 2] = (video_dither_level(in[col / frame->scale], tv, x + col, y + row) << 4) |
-                    video_dither_level(in[(col + 1) / frame->scale], tv, x + col + 1, y + row);
+                out[col / 2] = (video_dither_tuned(in[col / frame->scale], tv, x + col, y + row, style) << 4) |
+                    video_dither_tuned(in[(col + 1) / frame->scale], tv, x + col + 1, y + row, style);
         }
         return 1;
     }

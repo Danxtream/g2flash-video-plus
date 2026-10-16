@@ -387,6 +387,21 @@ size is enforced by the decoder before input; it is not a crop or rescale.
 New clients require the capability for nonlegacy geometry. Old phone clients
 reject the unfamiliar capability depth byte instead of misplacing a picture.
 
+Capability byte 4 bit 6 additionally advertises a 36-byte picture START. It
+includes the same geometry plus byte 32 selecting dither floor 1/0/0.25/0.5
+as values 0/1/2/3; bytes 33..35 must be zero. Nonzero style requires queued
+dithering, and legacy START forms reset to default style zero. The entire
+command, including the floor, is replay-frozen. It changes only at START/seek.
+
+Dithering remains an On/Off choice with quarter-step spatial Bayer cells.
+Floor one retains exactly the previous curve. Other floors blend into that
+curve below normalized Y7; every brighter target is unchanged. Half/quarter
+floors average two/one lit level-one pixels per black 2x2 cell; floor zero
+leaves black unlit. The fast doubled path computes one cell per source pixel,
+with no additional large lookup table. Unlit margins never enter this curve.
+Plain conversion is unchanged when dithering is off; fractional floor settings
+are retained by the phone but apply only when dithering is enabled.
+
 ### Shared display lifetime
 
 Prepare the single 153,600-byte shadow outside publication/display locks with
