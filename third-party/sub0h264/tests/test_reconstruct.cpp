@@ -658,6 +658,23 @@ TEST_CASE("IDCT: all-zero coefficients produce flat prediction output")
         CHECK(out[i] == 127U);
 }
 
+TEST_CASE("IDCT: rows are transformed before columns §8.5.12.2")
+{
+    // The >> 1 of the odd terms truncates, so the pass order changes the
+    // result: with rows first (the standard) row 0 column 2 gets residual -1;
+    // columns first would give 0 there. The other pixels agree either way.
+    int16_t coeffs[16] = {};
+    coeffs[1 * 4 + 3] = -7;
+    coeffs[3 * 4 + 2] = 51;
+    uint8_t pred[16];
+    uint8_t out[16];
+    std::memset(pred, 128, 16);
+    inverseDct4x4AddPred(coeffs, pred, 4U, out, 4U);
+    const int expected[16] = { 0, 0, -1, 0,  -1, 1, 1, -1,  1, -1, -1, 1,  0, 0, 1, 0 };
+    for (uint32_t i = 0U; i < 16U; ++i)
+        CHECK(out[i] == static_cast<uint8_t>(128 + expected[i]));
+}
+
 TEST_CASE("IDCT: DC-only block adds constant to all prediction pixels")
 {
     // §8.5.12.2: a DC-only coefficient at position (0,0) after dequant=64

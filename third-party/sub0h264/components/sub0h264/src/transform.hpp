@@ -133,21 +133,11 @@ inline void inverseDct4x4AddPred(const int16_t* coeffs,
     // ffmpeg: block[0] += 1 << 5 (rounding bias for the >>6 at output)
     block[0] += 32;
 
-    // Pass 1: Column transform
-    for (uint32_t i = 0U; i < 4U; ++i)
-    {
-        int32_t z0 = block[i + 4 * 0] + block[i + 4 * 2];
-        int32_t z1 = block[i + 4 * 0] - block[i + 4 * 2];
-        int32_t z2 = (block[i + 4 * 1] >> 1) - block[i + 4 * 3];
-        int32_t z3 = block[i + 4 * 1] + (block[i + 4 * 3] >> 1);
-
-        block[i + 4 * 0] = static_cast<int16_t>(z0 + z3);
-        block[i + 4 * 1] = static_cast<int16_t>(z1 + z2);
-        block[i + 4 * 2] = static_cast<int16_t>(z1 - z2);
-        block[i + 4 * 3] = static_cast<int16_t>(z0 - z3);
-    }
-
-    // Pass 2: Row transform + prediction + clip
+    // §8.5.12.2 transforms each row first, then each column; the >> 1 of the
+    // odd terms truncates, so the order is part of the result. (ffmpeg's loop
+    // runs over block[i + 4 * k] first because it stores coefficients
+    // transposed; ours are in raster order.)
+    // Pass 1: Row transform
     for (uint32_t i = 0U; i < 4U; ++i)
     {
         int32_t z0 = block[0 + 4 * i] + block[2 + 4 * i];
@@ -155,11 +145,25 @@ inline void inverseDct4x4AddPred(const int16_t* coeffs,
         int32_t z2 = (block[1 + 4 * i] >> 1) - block[3 + 4 * i];
         int32_t z3 = block[1 + 4 * i] + (block[3 + 4 * i] >> 1);
 
+        block[0 + 4 * i] = static_cast<int16_t>(z0 + z3);
+        block[1 + 4 * i] = static_cast<int16_t>(z1 + z2);
+        block[2 + 4 * i] = static_cast<int16_t>(z1 - z2);
+        block[3 + 4 * i] = static_cast<int16_t>(z0 - z3);
+    }
+
+    // Pass 2: Column transform + prediction + clip
+    for (uint32_t i = 0U; i < 4U; ++i)
+    {
+        int32_t z0 = block[i + 4 * 0] + block[i + 4 * 2];
+        int32_t z1 = block[i + 4 * 0] - block[i + 4 * 2];
+        int32_t z2 = (block[i + 4 * 1] >> 1) - block[i + 4 * 3];
+        int32_t z3 = block[i + 4 * 1] + (block[i + 4 * 3] >> 1);
+
         // ffmpeg-style: >>6 at output. Rounding bias was added to block[0] before butterfly.
-        out[i * outStride + 0] = static_cast<uint8_t>(clipU8(pred[i * predStride + 0] + ((z0 + z3) >> 6)));
-        out[i * outStride + 1] = static_cast<uint8_t>(clipU8(pred[i * predStride + 1] + ((z1 + z2) >> 6)));
-        out[i * outStride + 2] = static_cast<uint8_t>(clipU8(pred[i * predStride + 2] + ((z1 - z2) >> 6)));
-        out[i * outStride + 3] = static_cast<uint8_t>(clipU8(pred[i * predStride + 3] + ((z0 - z3) >> 6)));
+        out[0 * outStride + i] = static_cast<uint8_t>(clipU8(pred[0 * predStride + i] + ((z0 + z3) >> 6)));
+        out[1 * outStride + i] = static_cast<uint8_t>(clipU8(pred[1 * predStride + i] + ((z1 + z2) >> 6)));
+        out[2 * outStride + i] = static_cast<uint8_t>(clipU8(pred[2 * predStride + i] + ((z1 - z2) >> 6)));
+        out[3 * outStride + i] = static_cast<uint8_t>(clipU8(pred[3 * predStride + i] + ((z0 - z3) >> 6)));
     }
 }
 
