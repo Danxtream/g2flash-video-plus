@@ -6,7 +6,10 @@ SHOWN operation 15 queries an owned stream/token and telemetry cursor in 20
 bytes. Its frozen 72-byte reply is version/op/result/lens, followed by LE32
 stream, token, telemetry serial, frame ordinal, media PTS, copy tick, trigger
 tick, queued tick, flags, first available serial, high serial, overwritten
-count, holds, wire compensation and uncertainty, then claim and submit ticks.
+count, holds, reply tick and uncertainty, then claim and submit ticks. The
+reply tick (offset 56, formerly an always-zero wire compensation) is the lens's
+tick when the reply was built, so the host can age the copy without relying on
+a mapping fixed at START.
 Advanced capability byte 7 bit 2 selects extended captures; old 64-byte replies
 remain supported by the PC client. Capability bit 3 advertises
 this extension. Cursor 0 selects the oldest available row; an overwritten

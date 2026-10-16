@@ -518,7 +518,7 @@ def shown_report(raw):
     if len(raw) not in (64, 72) or raw[:2] != bytes((VERSION, SHOWN)) or (not raw[2] and raw[3] not in (1, 2)):
         raise ValueError('invalid shown-frame header')
     names = ('stream', 'token', 'serial', 'ordinal', 'pts', 'copy_tick', 'trigger_tick', 'queued_tick',
-             'flags', 'first', 'high', 'lost', 'holds', 'wire_delay_ms', 'uncertainty_ms')
+             'flags', 'first', 'high', 'lost', 'holds', 'reply_tick', 'uncertainty_ms')
     result = dict(zip(names, struct.unpack_from('<15I', raw, 4)), result=raw[2], lens=raw[3])
     result['claim_tick'], result['submit_tick'] = struct.unpack_from('<II', raw, 64) if len(raw) == 72 else (None, None)
     if not raw[2] and (not result['stream'] or not result['token'] or not result['ordinal'] or
@@ -566,7 +566,8 @@ def paired_offset(left, right):
     if any(r['result'] for r in (left, right)) or (left['lens'], right['lens']) != (1, 2) or any(
             left[k] != right[k] for k in ('stream', 'ordinal', 'pts')):
         raise ValueError('unmatched shown-frame pair')
-    estimate = left['trigger_to_copy_ms'] - right['trigger_to_copy_ms'] + right['wire_delay_ms']
+    # No wire delay is measured; offset 56 now carries the reply tick.
+    estimate = left['trigger_to_copy_ms'] - right['trigger_to_copy_ms']
     uncertainty = None if any(r['uncertainty_ms'] is None for r in (left, right)) else sum(
         r['uncertainty_ms'] for r in (left, right))
     return dict(offset_estimate_ms=estimate, uncertainty_ms=uncertainty,

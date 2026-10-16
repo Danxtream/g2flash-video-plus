@@ -10,9 +10,15 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ShownTests(unittest.TestCase):
-    def report(self, lens, copy, trigger, uncertainty):
-        values = (9, lens, 17, 17, 1000, copy, trigger, 500, 3, 17, 32, 16, 0, 0, uncertainty)
+    def report(self, lens, copy, trigger, uncertainty, reply_tick=0):
+        values = (9, lens, 17, 17, 1000, copy, trigger, 500, 3, 17, 32, 16, 0, reply_tick, uncertainty)
         return shown_report(bytes((1, 15, 0, lens)) + struct.pack('<15I', *values))
+
+    def test_reply_tick_is_reported_and_does_not_enter_the_paired_offset(self):
+        left = self.report(1, 4, 0xfffffffe, 0xffffffff, reply_tick=40)
+        right = self.report(2, 5010, 5000, 0xffffffff, reply_tick=5090)
+        self.assertEqual((left['reply_tick'], right['reply_tick']), (40, 5090))
+        self.assertEqual(paired_offset(left, right)['offset_estimate_ms'], -4)
 
     def test_offset_uses_local_deltas_with_explicit_unknown_wire_uncertainty(self):
         left = self.report(1, 4, 0xfffffffe, 0xffffffff)

@@ -128,7 +128,9 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
     video_profile_start_locked(p);
     video_clock_start_locked(ctx);
     const uint32_t fps = ctx->video_control.timeline.fps;
-    const uint32_t period_ms = (1000 + fps - 1) / fps;
+    /* A STOP between arming and this lock zeroes the timeline; the loop below then exits
+     * as cancelled, so only avoid the divide. */
+    const uint32_t period_ms = fps ? (1000 + fps - 1) / fps : 1000;
     video_rate_start(&ctx->video_rate, ctx->video_control.stream, p->generation, p->token, period_ms);
     video_control_give(ctx);
     while (!video_lifecycle_cancelled(&ctx->video, p->token)) {

@@ -16,6 +16,10 @@ static int video_shown_snapshot_locked(customCfwContext *ctx, const uint8_t *dat
     video_write32(out + 4, ctx->video_control.stream); video_write32(out + 8, owner->token);
     video_write32(out + 40, r->first); video_write32(out + 44, r->high);
     video_write32(out + 48, r->lost); video_write32(out + 52, p->holds);
+    /* This lens's tick when the reply was built. The tick runs about 2% fast against the
+     * phone on pair 1, so a mapping taken once at START drifts by seconds; each capture
+     * now carries a fresh tick to age its copy against. */
+    video_write32(out + 56, VIDEO_TICK);
     /* No shared-clock subtraction or invented wire measurement. The local
      * trigger-to-copy delta is useful; inter-lens offset stays unqualified
      * until loaded transport compensation/uncertainty is established. */

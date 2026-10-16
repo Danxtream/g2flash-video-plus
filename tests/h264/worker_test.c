@@ -1626,7 +1626,12 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
     video_write32(request + 8, 1); video_write32(request + 12, owner->token);
     video_write32(request + 16, 1);
     assert(!take(1, 1000));
+    uint32_t reply_before = tick();
     assert(video_shown_snapshot_locked(&context, request, 1, shown_report) == VIDEO_CONTROL_ACCEPTED);
+    uint32_t reply_tick = video_read32(shown_report + 56);
+    /* The reply tick is read during the snapshot and never precedes the reported copy. */
+    assert((uint32_t)(reply_tick - reply_before) <= (uint32_t)(tick() - reply_before) &&
+           (uint32_t)(reply_tick - video_read32(shown_report + 24)) < 0x80000000u);
     assert(video_read32(shown_report + 12) == first_report && video_read32(shown_report + 16) == prefix + first_report &&
            ((video_read32(shown_report + 36) & 4) != 0) == (first_report > 1) &&
            video_read32(shown_report + 48) == first_report - 1);
