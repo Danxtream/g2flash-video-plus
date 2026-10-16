@@ -221,6 +221,21 @@ public:
         return bitOffset_ >= (sizeBytes_ * 8U);
     }
 
+    /** Bit offset of the rbsp_stop_one_bit (§7.3.2.11): the last set bit,
+     *  ignoring trailing zero bytes. more_rbsp_data() (§7.2) is true while
+     *  bitOffset() is below it. Returns 0 for an all-zero buffer.
+     */
+    uint32_t rbspStopBit() const noexcept
+    {
+        uint32_t last = sizeBytes_;
+        while (last > 0U && data_[last - 1U] == 0U) --last;
+        if (last == 0U) return 0U;
+        uint32_t trailingZeros = 0U;
+        for (uint8_t b = data_[last - 1U]; (b & 1U) == 0U; b = static_cast<uint8_t>(b >> 1U))
+            ++trailingZeros;
+        return (last - 1U) * 8U + 7U - trailingZeros;
+    }
+
     /** Seek to an absolute bit position.
      *  Invalidates the read-ahead cache so the next read refills from the
      *  new position. Used by CabacEngine::restore() for state snapshots.

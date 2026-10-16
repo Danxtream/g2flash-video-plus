@@ -290,15 +290,18 @@ inline void intraPred4x4(Intra4x4Mode mode,
  *  @param frame      Frame containing reconstructed neighbors
  *  @param mbX, mbY   Macroblock position
  *  @param[out] pred  Output 16x16 prediction block (stride=16)
+ *  @param leftInSlice, topInSlice  False when that neighbouring MB belongs to
+ *                    an earlier slice (§6.4.8), so its samples are unavailable
  */
 inline void intraPred16x16(Intra16x16Mode mode,
                             const Frame& frame, uint32_t mbX, uint32_t mbY,
-                            uint8_t* pred) noexcept
+                            uint8_t* pred, bool leftInSlice = true,
+                            bool topInSlice = true) noexcept
 {
     uint32_t pixX = mbX * cMbSize;
     uint32_t pixY = mbY * cMbSize;
-    bool hasTop  = (mbY > 0U);
-    bool hasLeft = (mbX > 0U);
+    bool hasTop  = (mbY > 0U) && topInSlice;
+    bool hasLeft = (mbX > 0U) && leftInSlice;
 
     switch (mode)
     {
@@ -386,16 +389,19 @@ inline void intraPred16x16(Intra16x16Mode mode,
  *  @param mbX, mbY   Macroblock position
  *  @param isU        True for U (Cb) plane, false for V (Cr)
  *  @param[out] pred  Output 8x8 prediction block (stride=8)
+ *  @param leftInSlice, topInSlice  False when that neighbouring MB belongs to
+ *                    an earlier slice (§6.4.8), so its samples are unavailable
  */
 #if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
 inline void intraPredChroma8x8(IntraChromaMode mode,
                                 const Frame& frame, uint32_t mbX, uint32_t mbY,
-                                bool isU, uint8_t* pred) noexcept
+                                bool isU, uint8_t* pred, bool leftInSlice = true,
+                                bool topInSlice = true) noexcept
 {
     uint32_t pixX = mbX * cChromaBlockSize;
     uint32_t pixY = mbY * cChromaBlockSize;
-    bool hasTop  = (mbY > 0U);
-    bool hasLeft = (mbX > 0U);
+    bool hasTop  = (mbY > 0U) && topInSlice;
+    bool hasLeft = (mbX > 0U) && leftInSlice;
 
     auto getPixel = [&](uint32_t x, uint32_t y) -> uint8_t {
         return isU ? frame.u(x, y) : frame.v(x, y);

@@ -288,6 +288,37 @@ private:
     uint16_t heightInMbs_ = 0U;
     uint16_t prevRefFrameNum_ = 0U; ///< §8.2.5.2: PrevRefFrameNum for gap detection
 
+    // Several slices per picture (§7.4.3). Slices arrive in raster order with
+    // no ASO/FMO, so a neighbouring MB is in the current slice exactly when its
+    // address is at or after the slice's first MB. A picture stays open from
+    // its first slice (first_mb_in_slice 0) until its last MB is decoded.
+    uint32_t sliceFirstMb_ = 0U;  ///< first_mb_in_slice of the slice being decoded
+    uint32_t nextSliceMb_ = 0U;   ///< first_mb_in_slice the open picture's next slice must have
+    bool pictureOpen_ = false;    ///< a picture has decoded slices but missing MBs
+    Frame* openTarget_ = nullptr; ///< DPB frame of the open picture
+    uint16_t openFrameNum_ = 0U;  ///< frame_num shared by every slice of the open picture
+    bool openIdr_ = false;        ///< the open picture is an IDR picture
+    uint8_t openDeblockIdc_ = 0U; ///< deblocking parameters shared by every slice
+    int32_t openAlphaOffset_ = 0;
+    int32_t openBetaOffset_ = 0;
+
+    // Neighbours of the MB being decoded that are usable for prediction and
+    // context (§6.4.8): inside the picture and in the current slice.
+    bool leftInSlice_ = false;
+    bool topInSlice_ = false;
+    bool topLeftInSlice_ = false;
+    bool topRightInSlice_ = false;
+
+    /** Set the neighbour availability of the MB about to be decoded. */
+    void enterMb(uint32_t mbAddr, uint32_t mbX, uint32_t mbY) noexcept
+    {
+        const uint32_t width = widthInMbs_;
+        leftInSlice_ = mbX > 0U && mbAddr - 1U >= sliceFirstMb_;
+        topInSlice_ = mbY > 0U && mbAddr - width >= sliceFirstMb_;
+        topLeftInSlice_ = mbX > 0U && mbY > 0U && mbAddr - width - 1U >= sliceFirstMb_;
+        topRightInSlice_ = mbY > 0U && mbX + 1U < width && mbAddr - width + 1U >= sliceFirstMb_;
+    }
+
     /** Get nC (CAVLC context) for a luma 4x4 block.
      *  nC = (leftNnz + topNnz + 1) >> 1
      */
@@ -317,7 +348,7 @@ private:
             leftNnz = nnzLuma_[(mbY * widthInMbs_ + mbX) * 16U + leftBlk];
             hasLeft = true;
         }
-        else if (mbX > 0U)
+        else if (leftInSlice_)
         {
             // From left MB, rightmost column
             uint32_t leftBlk = blkY * 4U + 3U;
@@ -333,7 +364,7 @@ private:
             topNnz = nnzLuma_[(mbY * widthInMbs_ + mbX) * 16U + topBlk];
             hasTop = true;
         }
-        else if (mbY > 0U)
+        else if (topInSlice_)
         {
             // From top MB, bottom row
             uint32_t topBlk = 12U + blkX;
@@ -375,7 +406,7 @@ private:
             leftNnz = nnz[(mbY * widthInMbs_ + mbX) * 4U + blkIdx - 1U];
             hasLeft = true;
         }
-        else if (mbX > 0U)
+        else if (leftInSlice_)
         {
             /// Right column of left MB: blkY * 2 + 1
             uint32_t leftBlk = blkY * 2U + 1U;
@@ -389,7 +420,7 @@ private:
             topNnz = nnz[(mbY * widthInMbs_ + mbX) * 4U + blkIdx - 2U];
             hasTop = true;
         }
-        else if (mbY > 0U)
+        else if (topInSlice_)
         {
             /// Bottom row of top MB: 2 + blkX
             uint32_t topBlk = 2U + blkX;
@@ -594,7 +625,16 @@ private:
         top = nullptr; topRight = nullptr; left = nullptr; topLeft = nullptr;
         topLeftVal = cDefaultPredValue;
 
-        if (absY > 0U)
+        // Samples across an MB edge come only from neighbouring MBs of the
+        // current slice (§6.4.11.4, flags from enterMb); within the MB the
+        // scan-order table below decides.
+        const bool mbLeftEdge = absX % cMbSize == 0U, mbTopEdge = absY % cMbSize == 0U;
+        const bool topAvail = !mbTopEdge || topInSlice_;
+        const bool leftAvail = !mbLeftEdge || leftInSlice_;
+        const bool topLeftAvail = mbTopEdge ? (mbLeftEdge ? topLeftInSlice_ : topInSlice_)
+                                            : (!mbLeftEdge || leftInSlice_);
+
+        if (topAvail)
         {
             const uint8_t* row = activeFrame_->yRow(absY - 1U);
             for (uint32_t i = 0U; i < 4U; ++i) topBuf[i] = row[absX + i];
@@ -602,16 +642,20 @@ private:
             // Top-right availability — §6.4.11. [CHECKED §6.4.11]
             // cTopRightUnavailScan derived at compile time from §6.4.3 scan
             // order (see tables.hpp). Covers: same-MB scan ordering + right-
-            // edge. Caller checks absX+4 for frame boundary.
+            // edge. Caller checks absX+4 for frame boundary. On the MB's top
+            // row the samples lie in the top MB, or the top-right MB for the
+            // right column.
             bool topRightAvail = (absX + 4U < activeFrame_->width())
-                                 && !cTopRightUnavailScan[blkIdx];
+                                 && !cTopRightUnavailScan[blkIdx]
+                                 && (!mbTopEdge || (absX % cMbSize == 12U ? topRightInSlice_
+                                                                          : topInSlice_));
             if (topRightAvail)
             {
                 for (uint32_t i = 0U; i < 4U; ++i) topBuf[4U + i] = row[absX + 4U + i];
                 topRight = topBuf + 4U;
             }
         }
-        if (absX > 0U)
+        if (leftAvail)
         {
             // Stride arithmetic avoids per-row y(x,y) multiply.
             const uint8_t* leftCol = activeFrame_->yRow(absY) + (absX - 1U);
@@ -619,7 +663,7 @@ private:
             for (uint32_t i = 0U; i < 4U; ++i) leftBuf[i] = leftCol[i * stride];
             left = leftBuf;
         }
-        if (absX > 0U && absY > 0U)
+        if (topLeftAvail)
         {
             topLeftVal = activeFrame_->y(absX - 1U, absY - 1U);
             topLeft = &topLeftVal;
@@ -678,8 +722,29 @@ private:
             dpbInitialized_ = true;
         }
 
+        // A picture starts with first_mb_in_slice 0. A later slice continues the
+        // open picture in raster order (no ASO/FMO) with the same frame_num and
+        // deblocking parameters. Only CAVLC pictures without the 8x8 transform
+        // may have several slices; any other split picture is refused.
+        const bool continuesPicture = sh.firstMbInSlice_ != 0U;
+        if (continuesPicture)
+        {
+            if (!pictureOpen_ || sh.firstMbInSlice_ != nextSliceMb_ ||
+                sh.frameNum_ != openFrameNum_ || isIdr != openIdr_ ||
+                pps->isCabac() || pps->transform8x8Mode_ != 0U ||
+                sh.disableDeblockingFilter_ != openDeblockIdc_ ||
+                sh.sliceAlphaC0Offset_ != openAlphaOffset_ ||
+                sh.sliceBetaOffset_ != openBetaOffset_)
+            {
+                pictureOpen_ = false;
+                return DecodeStatus::Error;
+            }
+        }
+        pictureOpen_ = false; // set again below if this slice leaves MBs undecoded
+        sliceFirstMb_ = sh.firstMbInSlice_;
+
         // IDR resets all previous DPB state before selecting the decode target.
-        if (isIdr)
+        if (isIdr && !continuesPicture)
         {
             dpb_.flush();
             prevRefFrameNum_ = sh.frameNum_; // §8.2.5.2: reset at IDR
@@ -687,7 +752,8 @@ private:
 
         // Get exactly one frame buffer for this picture.
         uint32_t maxFrameNumForDpb = 1U << sps->bitsInFrameNum_;
-        Frame* decodeTarget = dpb_.getDecodeTarget(sh.frameNum_, maxFrameNumForDpb);
+        Frame* decodeTarget = continuesPicture
+            ? openTarget_ : dpb_.getDecodeTarget(sh.frameNum_, maxFrameNumForDpb);
         if (!decodeTarget)
         {
             allocationFailure_ = dpb_.allocationFailure();
@@ -762,13 +828,26 @@ private:
 
         // TODO; We should reason over if these all need to be zeroed - document if they do or don't etc.
         //TODO: We should consider using a more efficient way to clear these large context arrays, such as std::fill or memset, instead of a loop. For example, we could use std::fill(nnzLuma_.begin(), nnzLuma_.end(), 0U) to set all values to zero in one call, which is likely optimized and more efficient than a manual loop. This would also improve readability by clearly indicating that we are initializing the entire array to zero.
-        std::fill(nnzLuma_.begin(), nnzLuma_.end(), static_cast<uint8_t>(0U));
-        std::fill(nnzCb_.begin(), nnzCb_.end(), static_cast<uint8_t>(0U));
-        std::fill(nnzCr_.begin(), nnzCr_.end(), static_cast<uint8_t>(0U));
-        std::fill(mbQps_.begin(), mbQps_.end(), 0);
-        std::fill(mbTransform8x8_.begin(), mbTransform8x8_.end(), static_cast<uint8_t>(0U));
-        std::fill(mbMotion_.begin(), mbMotion_.end(), MbMotionInfo{});
-        std::fill(mbIntra4x4Modes_.begin(), mbIntra4x4Modes_.end(), static_cast<uint8_t>(2U));
+        // Per-picture state: a continuing slice keeps the earlier slices' MBs,
+        // which deblocking reads once the picture is complete.
+        if (!continuesPicture)
+        {
+            std::fill(nnzLuma_.begin(), nnzLuma_.end(), static_cast<uint8_t>(0U));
+            std::fill(nnzCb_.begin(), nnzCb_.end(), static_cast<uint8_t>(0U));
+            std::fill(nnzCr_.begin(), nnzCr_.end(), static_cast<uint8_t>(0U));
+            std::fill(mbQps_.begin(), mbQps_.end(), 0);
+            std::fill(mbTransform8x8_.begin(), mbTransform8x8_.end(), static_cast<uint8_t>(0U));
+            std::fill(mbMotion_.begin(), mbMotion_.end(), MbMotionInfo{});
+            std::fill(mbIntra4x4Modes_.begin(), mbIntra4x4Modes_.end(), static_cast<uint8_t>(2U));
+        }
+        else
+        {
+            // Earlier slices' MBs are unavailable for motion prediction (§6.4.8);
+            // every reader checks .available, while deblocking still reads their
+            // motion vectors and references.
+            for (uint32_t i = 0U; i < sh.firstMbInSlice_ * 16U; ++i)
+                mbMotion_[i].available = false;
+        }
 
 #if SUB0H264_TRACE
         std::printf("[DBG] Slice header parsed: type=%u firstMb=%lu frameNum=%u qpDelta=%d bitOffset=%lu cabacIdc=%u numRefL0=%u weightedPred=%u\n",
@@ -833,6 +912,12 @@ private:
         else
             activeFrame_ = &currentFrame_;
 
+        // CAVLC slices end where their data does (more_rbsp_data(), §7.3.4);
+        // endMb records how far this slice reached.
+        const uint32_t stopBit = br.rbspStopBit();
+        uint32_t endMb = sh.firstMbInSlice_;
+        bool mbFailed = false;
+
         // Decode macroblocks
         if (sh.sliceType_ == SliceType::I)
         {
@@ -844,6 +929,7 @@ private:
             {
                 uint32_t mbX = mbAddr % widthInMbs_;
                 uint32_t mbY = mbAddr / widthInMbs_;
+                enterMb(mbAddr, mbX, mbY);
 
                 if (useCabac)
                 {
@@ -879,7 +965,10 @@ private:
                     diagBitOffset_ = static_cast<uint32_t>(br.bitOffset());
 
                     if (!decodeIntraMb(br, *sps, *pps, sh, mbQp, mbX, mbY))
+                    {
+                        mbFailed = true;
                         break;
+                    }
 
                     diagMbCompleted_ = mbAddr;
                     diagBitOffset_ = static_cast<uint32_t>(br.bitOffset());
@@ -891,6 +980,9 @@ private:
                 SUB0H264_TRACE_EVENT(trace_.onMbStart(mbX, mbY, 201U, static_cast<uint32_t>(br.bitOffset())));
                 // Store accumulated QP for deblocking pass — ITU-T H.264 §8.7.2.2.
                 mbQps_[mbAddr] = mbQp;
+                endMb = mbAddr + 1U;
+                if (!useCabac && br.bitOffset() >= stopBit)
+                    break; // end of slice data
             }
         }
         else if (sh.sliceType_ == SliceType::P)
@@ -920,6 +1012,7 @@ private:
                 {
                     uint32_t mbX = mbAddr % widthInMbs_;
                     uint32_t mbY = mbAddr / widthInMbs_;
+                    enterMb(mbAddr, mbX, mbY);
 
                     // CABAC has 16-bit lookahead beyond the underlying BitReader's
                     // current bitOffset, so isExhausted() returns true while the
@@ -1022,12 +1115,14 @@ private:
                 // CAVLC P-slice: skip run based
                 uint32_t mbSkipRun = 0U;
                 bool needSkipRun = true;
+                bool skipRunEndsSlice = false;
 
                 //TODO: We should reason about how to optimize the skip_run handling in CAVLC P-slice decoding. Currently we read skip_run at the start of the loop when needSkipRun is true, and then decrement mbSkipRun for each skipped MB until it reaches zero. This means we check the needSkipRun condition on every MB, which adds some overhead. We could consider restructuring this to read skip_run once and then have an inner loop that processes all the skipped MBs before reading the next skip_run, which would reduce the number of condition checks and might be more efficient. Alternatively, we could encapsulate the skip_run logic into a helper function that manages the state and returns whether the current MB is skipped or coded, which would simplify the main decoding loop and potentially improve readability.
                 for (uint32_t mbAddr = sh.firstMbInSlice_; mbAddr < totalMbs; ++mbAddr)
                 {
                     uint32_t mbX = mbAddr % widthInMbs_;
                     uint32_t mbY = mbAddr / widthInMbs_;
+                    enterMb(mbAddr, mbX, mbY);
 
                     //TODO: Optimize - occurs always first iteraton, we can just read this once before the loop and then only read again when needed.
                     //TODO: We should reason about the best way to handle the skip_run state in the CAVLC P-slice decoding. Currently we have a boolean flag needSkipRun that indicates when we need to read a new skip_run value from the bitstream, and then we decrement mbSkipRun for each skipped MB until it reaches zero. This works, but it might be cleaner to structure this as an explicit loop that reads skip_run and then processes that many skipped MBs before reading the next coded MB. This would more closely follow the structure of the bitstream and might be easier to understand and maintain. We could also consider encapsulating this logic into a helper function that manages the skip_run state and returns whether the current MB is skipped or coded, which would simplify the main decoding loop.
@@ -1036,6 +1131,8 @@ private:
                         mbSkipRun = br.readUev();
                         SUB0H264_TRACE_EVENT(trace_.onMbStart(mbX, mbY, 98U, mbSkipRun)); // 98 = skip_run value
                         needSkipRun = false;
+                        // §7.3.4: a skip run with no data after it ends the slice.
+                        skipRunEndsSlice = mbSkipRun > 0U && br.bitOffset() >= stopBit;
                     }
 
                     if (mbSkipRun > 0U)
@@ -1062,7 +1159,10 @@ private:
                             mbTypeRaw -= 5U;
                             if (!decodeIntraMbInPSlice(br, *sps, *pps, sh, mbQp,
                                                         mbTypeRaw, *decodeTarget, mbX, mbY))
+                            {
+                                mbFailed = true;
                                 break;
+                            }
                         }
                         else
                         {
@@ -1075,6 +1175,12 @@ private:
                     }
                     // Store accumulated QP for deblocking pass — §8.7.2.2.
                     mbQps_[mbAddr] = mbQp;
+                    endMb = mbAddr + 1U;
+                    // After a coded MB the data may end; after the last MB of a
+                    // skip run the run itself says whether the slice ends.
+                    if (mbSkipRun == 0U &&
+                        (needSkipRun ? br.bitOffset() >= stopBit : skipRunEndsSlice))
+                        break; // end of slice data
                 }
             }
         }
@@ -1088,6 +1194,22 @@ private:
         }
         diagStage_ = 5U;
         diagBitOffset_ = static_cast<uint32_t>(br.bitOffset());
+
+        // A CAVLC slice that ended before the picture's last MB leaves the
+        // picture open for its next slice; deblocking and output wait for it.
+        // An MB that failed to decode still ends the picture, as before.
+        if (!useCabac && !mbFailed && endMb < totalMbs)
+        {
+            pictureOpen_ = true;
+            nextSliceMb_ = endMb;
+            openTarget_ = decodeTarget;
+            openFrameNum_ = sh.frameNum_;
+            openIdr_ = isIdr;
+            openDeblockIdc_ = sh.disableDeblockingFilter_;
+            openAlphaOffset_ = sh.sliceAlphaC0Offset_;
+            openBetaOffset_ = sh.sliceBetaOffset_;
+            return DecodeStatus::NeedMoreData;
+        }
 
         // Deblocking filter pass (entire frame, after all MBs decoded)
         // Per-MB QP is used; boundary edges use (qpP + qpQ + 1) >> 1 per §8.7.2.2.
@@ -1325,7 +1447,8 @@ private:
         // 1. Generate 16x16 luma prediction
         uint8_t lumaPred[256];
         intraPred16x16(static_cast<Intra16x16Mode>(predMode),
-                       *activeFrame_, mbX, mbY, lumaPred);
+                       *activeFrame_, mbX, mbY, lumaPred,
+                       leftInSlice_, topInSlice_);
 
 #if SUB0H264_TRACE
         if (mbY == 0U && (mbX == 7U || mbX == 8U))
@@ -1462,7 +1585,7 @@ private:
         {
             if (blkX > 0U)
                 return curMbModes[blkIdx - 1U]; // Within same MB
-            if (mbX == 0U)
+            if (!leftInSlice_)
                 return cDefaultIntra4x4Mode; // No left MB
             // Left MB's rightmost column: same row, column 3
             uint32_t leftMbIdx = mbY * widthInMbs_ + (mbX - 1U);
@@ -1473,7 +1596,7 @@ private:
         {
             if (blkY > 0U)
                 return curMbModes[blkIdx - 4U]; // Within same MB
-            if (mbY == 0U)
+            if (!topInSlice_)
                 return cDefaultIntra4x4Mode; // No top MB
             // Top MB's bottom row: same column, row 3
             uint32_t topMbIdx = (mbY - 1U) * widthInMbs_ + mbX;
@@ -1538,8 +1661,8 @@ private:
             // getNeighborIntra4x4Mode returns DC(2) for unavailable. But for the OTHER
             // neighbor (which IS available, in the same MB), we must ALSO force DC(2)
             // when dcPredModePredictedFlag=1. [FM-22 fixed: was not forcing both to DC]
-            bool leftMbUnavail = (rasterIdx % 4U == 0U) && (mbX == 0U);
-            bool topMbUnavail  = (rasterIdx < 4U) && (mbY == 0U);
+            bool leftMbUnavail = (rasterIdx % 4U == 0U) && !leftInSlice_;
+            bool topMbUnavail  = (rasterIdx < 4U) && !topInSlice_;
             if (leftMbUnavail || topMbUnavail)
             {
                 leftMode = 2U; // DC
@@ -1858,8 +1981,10 @@ private:
 
         uint8_t predU[64], predV[64];
         auto chromaMode = static_cast<IntraChromaMode>(chromaPredMode);
-        intraPredChroma8x8(chromaMode, *activeFrame_, mbX, mbY, true, predU);
-        intraPredChroma8x8(chromaMode, *activeFrame_, mbX, mbY, false, predV);
+        intraPredChroma8x8(chromaMode, *activeFrame_, mbX, mbY, true, predU,
+                           leftInSlice_, topInSlice_);
+        intraPredChroma8x8(chromaMode, *activeFrame_, mbX, mbY, false, predV,
+                           leftInSlice_, topInSlice_);
         int32_t chromaQp = computeChromaQp(qp, pps.chromaQpIndexOffset_);
         if (cbpChroma >= 1U)
         {
