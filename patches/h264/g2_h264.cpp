@@ -143,7 +143,7 @@ extern "C" int g2_h264_sections(const void *handle, g2_h264_sections_info *info)
              p.motion.cycles, p.residual.cycles, p.transform.cycles, p.intra.cycles,
              p.motion.calls, p.residual.calls, p.transform.calls, p.intra.calls,
              p.zeroTransforms, p.frameCount, state->timerCost,
-             p.sliceSetupUs.cycles, p.mbLoopUs.cycles, p.inputUs.cycles};
+             p.sliceSetupUs.cycles, p.mbLoopUs.cycles, p.inputUs.cycles, p.deblockUs.cycles};
     return 1;
 }
 

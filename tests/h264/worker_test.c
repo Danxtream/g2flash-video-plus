@@ -252,6 +252,7 @@ static uint32_t test_crc(const g2_h264_frame_info *);
 #define VIDEO_CYCLES test_cycles()
 /* System control registers exist only on the core: CCR reads with both caches on. */
 #define VIDEO_CORE_REGISTER(address) ((address) == 0xE000ED14u ? 0x30000u : 0u)
+#define VIDEO_BENCH_COUNTER_ON() ((void)0)
 #define VIDEO_CLOCK_INIT test_clock_init
 #define VIDEO_CLOCK_CALIBRATE test_calibrate
 #define VIDEO_FRAME_CRC test_crc
@@ -2230,6 +2231,11 @@ static void profile_mailboxes(void) {
     assert(video_read32(sections + 36) == 1 && video_read32(sections + 40) == 0x30000u);
     assert(video_read32(sections + 48) == 0x20200000u && video_read32(sections + 64) == 41);
     assert(video_read32(sections + 92) == 16128);
+    context.video_bench.counter_before = 0x40000000u; context.video_bench.counter_after = 0x40000001u;
+    context.video_sections.deblock = 0x900000009ull;
+    assert(!video_sections_detail_locked(&context, CFW_MESSAGE_LEFT, sections));
+    assert(video_read32(sections + 96) == 0x40000000u && video_read32(sections + 100) == 0x40000001u);
+    assert(video_read32(sections + 104) == 9 && video_read32(sections + 108) == 9);
     assert(video_sections_detail_locked(&context, CFW_MESSAGE_RIGHT, sections) == VIDEO_CONTROL_STALE &&
            sections[3] == VIDEO_SECTION_DIAGNOSTICS);
     control_command(command, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_SECTION_DIAGNOSTICS);

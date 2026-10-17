@@ -18,6 +18,7 @@ typedef struct {
     uint32_t done, ccr, mpu_ctrl, frame_address, stride, width, height;
     uint32_t alu, frame_read, frame_bytes, block_cold, block_hot, block_bytes;
     uint32_t windows, window_bytes;
+    uint32_t counter_before, counter_after; /* DWT_CTRL around the check. */
 } video_bench_result;
 typedef struct {
     volatile uint32_t phase;

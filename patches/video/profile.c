@@ -109,6 +109,13 @@ static int video_profile_snapshot_locked(customCfwContext *ctx, uint8_t page, ui
 /* The memory check reads the cycle counter directly, apart from the decode
  * timing's VIDEO_CYCLES, so it never counts as playback measurement work. */
 #define VIDEO_BENCH_CYCLES VIDEO_CORE_REGISTER(0xE0001004u)
+/* The first check on the glasses read zero for every interval: the counter
+ * can be off between pictures (seen in the clock reports), so the check turns
+ * it on with the same writes as the decode timing's start and records DWT_CTRL
+ * before and after. */
+#ifndef VIDEO_BENCH_COUNTER_ON
+#define VIDEO_BENCH_COUNTER_ON() video_clock_init()
+#endif
 
 /* Measuring build: once per stream, on the decoder worker right after its
  * second picture, read the core's cache and MPU control registers (read only;
@@ -128,6 +135,8 @@ static void video_bench_run(const g2_h264_frame_info *frame, video_bench_result 
     r->frame_address = (uint32_t)(uintptr_t)frame->y;
     r->stride = stride; r->width = width; r->height = height;
     if (!y || width <= 24 || height <= 21) return;
+    r->counter_before = VIDEO_CORE_REGISTER(0xE0001000u);
+    VIDEO_BENCH_COUNTER_ON();
     start = VIDEO_BENCH_CYCLES;
     for (uint32_t i = 0; i < 4096; ++i) sum = sum * 3u + i;
     r->alu = VIDEO_BENCH_CYCLES - start;
@@ -156,6 +165,7 @@ static void video_bench_run(const g2_h264_frame_info *frame, video_bench_result 
     r->windows = VIDEO_BENCH_CYCLES - start;
     r->window_bytes = 32 * 21 * 24;
     sink += sum;
+    r->counter_after = VIDEO_CORE_REGISTER(0xE0001000u);
     r->done = 1;
 }
 
@@ -205,8 +215,10 @@ static int video_sections_detail_locked(customCfwContext *ctx, uint8_t origin, u
     video_sections_write64(out + 28, s->input);
     const uint32_t words[] = {b->done, b->ccr, b->mpu_ctrl, b->frame_address, b->stride, b->width,
                               b->height, b->alu, b->frame_read, b->frame_bytes, b->block_cold,
-                              b->block_hot, b->block_bytes, b->windows, b->window_bytes};
-    for (uint32_t i = 0; i < 15; ++i) video_profile_write(out + 36 + i * 4, words[i]);
+                              b->block_hot, b->block_bytes, b->windows, b->window_bytes,
+                              b->counter_before, b->counter_after};
+    for (uint32_t i = 0; i < 17; ++i) video_profile_write(out + 36 + i * 4, words[i]);
+    video_sections_write64(out + 104, s->deblock);
     return VIDEO_CONTROL_ACCEPTED;
 }
 #pragma clang section text=""
