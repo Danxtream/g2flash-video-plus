@@ -17,6 +17,14 @@ int main(void) {
         assert(video_pacing_anchor(&p, 7, UINT32_MAX - 2, 100, fps));
         assert(video_pacing_deadline(&p, 7, UINT32_MAX, &tick) && tick == 100 + 2000 / fps);
         assert(!video_pacing_deadline(&p, 7, 1, &tick));
+        /* A commanded anchor moves to the presenter's next ordinal in either
+         * direction and keeps the commanded picture's own deadline. */
+        assert(video_pacing_retime(&p, 7, 50, 5000, 40, fps) && p.ordinal == 40);
+        assert(video_pacing_deadline(&p, 7, 50, &tick) && tick == 5000);
+        assert(video_pacing_retime(&p, 7, 40, 5000, 50, fps) && p.ordinal == 50 && p.tick == 5000 + 10000 / fps);
+        assert(video_pacing_retime(&p, 7, 3, 10, 1, fps) && p.tick == 10 - 2000 / fps); /* wraps below zero */
+        assert(video_pacing_deadline(&p, 7, 3, &tick) && tick == 10);
+        assert(!video_pacing_retime(&p, 7, 5, 0, 0, fps) && !video_pacing_retime(&p, 7, 5, 0, 1, 16));
     }
     return 0;
 }

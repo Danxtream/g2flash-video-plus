@@ -113,6 +113,23 @@ int video_menu_control_locked(const uint8_t *data, uint32_t bytes, uint8_t origi
     return VIDEO_CONTROL_ACCEPTED;
 }
 
+int video_pace_control_locked(const uint8_t *data, uint32_t bytes, uint8_t origin, uint8_t *out) {
+    if (bytes != VIDEO_PACE_BYTES || !video_read32(data + 20)) return VIDEO_CONTROL_FORMAT;
+    uint8_t query[20]; memcpy(query, data, 20); query[1] = VIDEO_CONTROL_PLAYBACK;
+    int result = video_playback_control_locked(query, 20, origin, out);
+    if (result) return result;
+    video_owner *owner = video_current_owner(); video_presenter *p = owner->presenter;
+    /* Only the timing coordinator schedules; the paired LEFT lens follows its triggers. */
+    if (!p->paired || p->sync.side == CFW_MESSAGE_RIGHT) {
+        p->pace_ordinal = video_read32(data + 20);
+        p->pace_tick = video_read32(data +
+            (owner->context->video_control.owner_here == CFW_MESSAGE_LEFT ? 24 : 28));
+        ++p->pace_serial;
+        video_presenter_wake_locked(owner);
+    }
+    return VIDEO_CONTROL_ACCEPTED;
+}
+
 /* A separate callback section lets the linker resolve its ROPI address;
  * same-section MOVW/MOVT folding overflows as the surrounding player grows. */
 __attribute__((section(".text.presenter"))) static void video_presenter_entry(void *argument) {
@@ -172,6 +189,8 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
             if (p->menu_actual != p->control_menu) p->menu_dirty = 1;
             p->menu_actual = p->control_menu;
             buffering = 1;
+            /* A PACE computed before pause/resume is stale; the phone re-paces after it. */
+            p->phone_paced = 0; p->pace_applied = p->pace_serial;
             if (p->paired) p->control_deadline = control_now + VIDEO_STOP_LIMIT_MS;
             else p->control_ack = p->control_serial;
             p->control_sent = control_now - 100;
@@ -212,6 +231,16 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
                q->slots[(q->head + ready_depth) % q->depth].state == VIDEO_DECODED_READY) ++ready_depth;
         /* Prebuffer two pictures, except an explicitly timed terminal picture.
          * After starvation re-anchor, never run a catch-up presentation burst. */
+        /* A phone PACE puts this schedule on the audio clock, moved to the next
+         * picture. One landing over 10 s from now is stale or misread: ignore it. */
+        if (p->pace_serial != p->pace_applied) {
+            video_pacing paced;
+            p->pace_applied = p->pace_serial;
+            if (video_pacing_retime(&paced, p->generation, p->pace_ordinal, p->pace_tick, ordinal, fps) &&
+                (int32_t)(paced.tick - now) > -10000 && (int32_t)(paced.tick - now) < 10000) {
+                p->pacing = paced; p->phone_paced = 1;
+            }
+        }
         int terminal = available && ctx->video_control.timeline.duration - q->slots[q->head].media.pts <= period_ms;
         uint32_t ready_pts = available ? q->slots[q->head].media.pts : 0;
         int advertise = 0;
@@ -229,7 +258,8 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         if (available && buffering && (ready_depth == q->depth || terminal) &&
             (!p->paired || p->sync.side == 1 ||
              (p->sync.peer_ordinal == ordinal && (p->sync.peer_depth == q->depth || p->sync.peer_terminal)))) {
-            video_pacing_anchor(&p->pacing, p->generation, ordinal, now, fps);
+            /* Phone-paced pictures keep the commanded schedule and catch up. */
+            if (!p->phone_paced) video_pacing_anchor(&p->pacing, p->generation, ordinal, now, fps);
             buffering = 0;
         }
         if (available && !buffering &&
@@ -320,10 +350,12 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         }
         p->done_pts = media.pts;
         /* Copy/decode overrun holds the cadence instead of showing overdue
-         * pictures back-to-back. RIGHT paired coordination extends this later. */
+         * pictures back-to-back, unless the phone paces to its audio clock:
+         * then the schedule stays put and later pictures catch up. */
         if ((int32_t)(VIDEO_TICK - deadline) >= (int32_t)period_ms) {
             ++p->holds;
-            video_pacing_anchor(&p->pacing, p->generation, ordinal + 1, VIDEO_TICK + period_ms, fps);
+            if (!p->phone_paced)
+                video_pacing_anchor(&p->pacing, p->generation, ordinal + 1, VIDEO_TICK + period_ms, fps);
         }
         VIDEO_OS_EVENT_SET(owner->wake, VIDEO_WAKE_INPUT);
         video_control_give(ctx);

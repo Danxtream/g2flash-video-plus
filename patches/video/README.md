@@ -860,6 +860,18 @@ the cadence after prebuffering. Pausing retains owned queues and the radio
 lifecycle; STOP/RESET still drain and restore. A supplied-link PC client can
 read and control playback without opening any connection itself.
 
+PACE 25 puts the picture schedule on the phone's audio clock: a 32-byte
+request with the control header, stream, LEFT token, RIGHT token, picture
+ordinal, then the due tick in LEFT's and RIGHT's own millisecond clocks. The
+reply is the 36-byte playback state above. Only the timing coordinator (RIGHT,
+or a lone lens) applies it: the commanded anchor is moved to its next picture
+with the same rational spacing, and one landing more than 10 s from now is
+ignored. Once paced, a late picture or the end of a starvation keeps the
+commanded schedule, so later pictures catch up instead of re-anchoring to now.
+A pause or resume drops pacing and any pending PACE until the next one. Firmware
+without PACE refuses it with the generic status reply (operation 7, result
+FORMAT), so the phone can probe for it without a capability bit.
+
 ## Seek Generation
 
 Advanced capability bit 32 advertises seek version 1 with maximum 255 decoded

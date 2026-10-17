@@ -31,6 +31,10 @@ enum {
     /* A picture's VCL NAL carrying its own frame time, so the phone needs no
      * separate FRAME_TIME_FAST round trip per picture. 23 stays retired. */
     VIDEO_CONTROL_NAL_TIMED = 24,
+    /* The phone's audio clock re-anchors the coordinator's picture schedule:
+     * stream, both owner tokens, picture ordinal, then left and right lens ticks. */
+    VIDEO_CONTROL_PACE = 25,
+    VIDEO_PACE_BYTES = 32,
     VIDEO_NAL_TIMED_HEADER_BYTES = 18,
     VIDEO_TIMED_TIMELINE_REFUSED = -4,
     VIDEO_TRIGGER_TIMING_BYTES = 96,

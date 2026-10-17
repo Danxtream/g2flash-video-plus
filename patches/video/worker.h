@@ -89,3 +89,5 @@ int video_worker_get_report(video_worker_report *);
 int video_playback_control_locked(const uint8_t *, uint32_t, uint8_t, uint8_t *);
 /* Menu/scale requests publish bounded intent; drawing never runs on this caller. */
 int video_menu_control_locked(const uint8_t *, uint32_t, uint8_t, uint8_t *);
+/* PACE publishes a commanded due tick for the timing coordinator to apply. */
+int video_pace_control_locked(const uint8_t *, uint32_t, uint8_t, uint8_t *);

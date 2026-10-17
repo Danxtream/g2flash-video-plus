@@ -54,6 +54,9 @@ typedef struct {
     uint32_t preroll, media_shown, pause_after_first;
     uint32_t control_kind, control_menu, wire_kind, menu_actual, menu_dirty, menu_command;
     uint32_t scale_requested, flight_native;
+    /* Phone pacing: the latest commanded ordinal and this lens's due tick;
+     * once applied, late pictures catch up instead of re-anchoring to now. */
+    uint32_t pace_serial, pace_applied, pace_ordinal, pace_tick, phone_paced;
     uint32_t flight_retried, claim_tick, submit_tick;
     video_trigger_timing trigger_timing;
     video_menu menu;

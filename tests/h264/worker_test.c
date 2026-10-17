@@ -72,6 +72,8 @@ static void *display_thread_entry(void *);
 static uint32_t display_gate, display_job, fail_gate, fail_queue, missing_fb;
 static uint32_t picture_relock_refusals;
 static uint32_t playback_pause_fixture, playback_pause_count;
+/* Phone pacing: 1 = coordinator steps through refusal/far/delay/catch-up, 2 = paired LEFT ignores. */
+static uint32_t pace_fixture, pace_state, pace_ordinal, pace_due, pace_from, pace_released, pace_holds;
 static void exercise_pause(void);
 static uint32_t handoff_record[VIDEO_HANDOFF_RECORD_WORDS], handoff_queues, handoff_hold, fail_handoff;
 static uint32_t power_awake = 1, power_starts;
@@ -1579,6 +1581,45 @@ static void exercise_pause(void) {
     ++playback_pause_count;
 }
 
+static int pace_command(video_owner *owner, uint32_t bytes, uint32_t ordinal, uint32_t due, uint32_t token_xor) {
+    uint8_t command[VIDEO_PACE_BYTES] = {0}, playback[VIDEO_PLAYBACK_STATE_BYTES] = {0};
+    command[1] = VIDEO_CONTROL_PACE; video_write32(command + 8, 1);
+    video_write32(command + 12, owner->token ^ token_xor); video_write32(command + 16, owner->token ^ token_xor);
+    video_write32(command + 20, ordinal); video_write32(command + 24, due); video_write32(command + 28, due);
+    return video_pace_control_locked(command, bytes, 1, playback);
+}
+
+/* One step per playback poll, under the image mutex. */
+static void pace_step(video_owner *owner) {
+    video_presenter *p = owner->presenter;
+    uint32_t now = tick();
+    if (pace_state == 0 && p->shown >= 4) {
+        assert(pace_command(owner, VIDEO_PACE_BYTES - 1, p->queue.released + 2, now, 0) == VIDEO_CONTROL_FORMAT);
+        assert(pace_command(owner, VIDEO_PACE_BYTES, 0, now, 0) == VIDEO_CONTROL_FORMAT);
+        assert(pace_command(owner, VIDEO_PACE_BYTES, p->queue.released + 2, now, 1) == VIDEO_CONTROL_STALE);
+        assert(!pace_command(owner, VIDEO_PACE_BYTES, p->queue.released + 2, now + 20000, 0));
+        if (pace_fixture == 2) { assert(!p->pace_serial && !p->phone_paced); pace_state = 4; return; }
+        pace_released = p->queue.released; pace_state = 1;
+    } else if (pace_state == 1 && p->queue.released > pace_released) {
+        assert(!p->phone_paced && p->pace_applied == p->pace_serial); /* 20 s away: ignored */
+        pace_ordinal = p->queue.released + 3; pace_due = now + 600;
+        assert(!pace_command(owner, VIDEO_PACE_BYTES, pace_ordinal, pace_due, 0));
+        pace_state = 2;
+    } else if (pace_state == 2 && p->queue.released >= pace_ordinal) {
+        /* The commanded picture waits for its due tick, not the old cadence. */
+        assert(p->phone_paced && (int32_t)(now - pace_due) >= -2 && (int32_t)(now - pace_due) < 150);
+        pace_ordinal = p->queue.released + 1; pace_due = now - 200; pace_holds = p->holds;
+        pace_released = p->queue.released; pace_from = now;
+        assert(!pace_command(owner, VIDEO_PACE_BYTES, pace_ordinal, pace_due, 0));
+        pace_state = 3;
+    } else if (pace_state == 3 && p->queue.released >= pace_released + 3) {
+        /* Overdue pictures catch up faster than the cadence, and a late picture
+         * no longer re-anchors the schedule to the newest picture. */
+        assert(now - pace_from < 3 * 1000 / 15 && p->holds > pace_holds && p->pacing.ordinal <= pace_released + 2);
+        pace_state = 4;
+    }
+}
+
 static void queued_consumer_mode(uint32_t mode, int with_pause) {
     configure(); request_next = 0; consume_enabled = queued_upload = 1;
     if (dither_fixture) views[0] = (video_heap_view){410024, 400000}; /* Admission model, not a hardware claim. */
@@ -1612,6 +1653,7 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
     for (;;) {
         display_pump(); pool_drain();
         assert(!take(1, 1000));
+        if (pace_fixture) pace_step(owner);
         int done = copied_frames == visible && owner->presenter->shown == visible;
         give(1);
         if (done) break;
@@ -1667,6 +1709,15 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
 }
 
 static void queued_consumer(void) { queued_consumer_mode(0, 0); }
+static void phone_pacing(void) {
+    for (pace_fixture = 1; pace_fixture <= 2; ++pace_fixture) {
+        pace_state = 0;
+        queued_consumer_mode(pace_fixture == 1 ? 0 : 1, 0);
+        assert(pace_state == 4);
+    }
+    pace_fixture = 0;
+    puts("phone PACE re-anchors the coordinator, catches up and is ignored by paired LEFT PASS");
+}
 static void timed_consumer(void) {
     timed_upload = 1;
     queued_consumer_mode(0, 0); queued_consumer_mode(1, 0); queued_consumer_mode(2, 0);
@@ -2801,6 +2852,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "recovery")) recovery();
     else if (!strcmp(argv[1], "consumer")) consumer();
     else if (!strcmp(argv[1], "queued-consumer")) queued_consumer();
+    else if (!strcmp(argv[1], "phone-pacing")) phone_pacing();
     else if (!strcmp(argv[1], "timed-consumer")) timed_consumer();
     else if (!strcmp(argv[1], "timed-input")) timed_input();
     else if (!strcmp(argv[1], "dither-consumer")) dither_consumer();

@@ -117,6 +117,9 @@ class WorkerTests(unittest.TestCase):
     def test_owned_pictures_use_independent_fixed_clock_presenter_and_drain(self):
         self.check_case("queued-consumer")
 
+    def test_phone_pace_reanchors_coordinator_catches_up_and_left_ignores(self):
+        self.check_case("phone-pacing")
+
     def test_timed_nal_records_feed_presenters_without_separate_frame_time(self):
         self.check_case("timed-consumer")
 

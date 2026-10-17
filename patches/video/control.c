@@ -353,6 +353,13 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             entry->snapshot[0] = VIDEO_PROTOCOL_VERSION;
             entry->snapshot[1] = data[1]; entry->snapshot[2] = entry->result;
         }
+        if (data[1] == VIDEO_CONTROL_PACE) {
+            bzero(entry->snapshot, VIDEO_PLAYBACK_STATE_BYTES);
+            entry->snapshot_bytes = VIDEO_PLAYBACK_STATE_BYTES;
+            entry->result = video_pace_control_locked(data, size, route->origin, entry->snapshot);
+            entry->snapshot[0] = VIDEO_PROTOCOL_VERSION;
+            entry->snapshot[1] = data[1]; entry->snapshot[2] = entry->result;
+        }
         if (data[1] == VIDEO_CONTROL_SHOWN) {
             bzero(entry->snapshot, VIDEO_SHOWN_BYTES);
             entry->snapshot_bytes = VIDEO_SHOWN_BYTES;
