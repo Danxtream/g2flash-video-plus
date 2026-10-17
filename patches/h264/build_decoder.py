@@ -76,9 +76,11 @@ def validate_target_ownership(base, target, cold):
     scalar_only = {name for name in base['functions'].keys() - target['functions'].keys()
                    if base['functions'][name] == 'hot'}
     target_only = target['functions'].keys() - base['functions'].keys()
-    for membership, names in ((base, scalar_only), (target, target_only)):
+    for membership, names, groups in (
+            (base, scalar_only, ('lumaMotionComp', 'filterLumaWeak', 'filterLumaStrong')),
+            (target, target_only, ('lumaMotionCompMve', 'filterLumaMve'))):
         if any(membership['functions'][name] != 'hot' or 'sub0h264' not in name or
-               not any(group in name for group in ('lumaMotionComp', 'filterLumaMve'))
+               not any(group in name for group in groups)
                for name in names):
             raise ValueError('target-only definition violates hot luma ownership')
     cold_references = {match.group()[1:] for body in partition_ir.definitions(cold).values()

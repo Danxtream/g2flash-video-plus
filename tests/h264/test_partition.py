@@ -238,7 +238,7 @@ class PartitionBuildTests(unittest.TestCase):
     def test_real_arm_selection_and_table_ownership(self):
         self.assertEqual(self.manifest["name"], "h264-decoder")
         self.assertEqual(len(self.membership["promotion_mapping"]), 209)
-        self.assertEqual(sum(v == "hot" for v in self.membership["functions"].values()), 232)
+        self.assertEqual(sum(v == "hot" for v in self.membership["functions"].values()), 235)
         preopt = (self.arm / "preopt.ll").read_text(encoding="utf-8")
         for helper in ("chromaMotionComp", "inverseHadamard2x2", "dequantChromaDcValues"):
             self.assertNotIn(helper, preopt)

@@ -117,6 +117,107 @@ inline void lumaMotionCompMve(const uint8_t* src, uint32_t stride,
         }
 }
 
+/** Gather four independent edge crossings in either panel orientation. */
+__attribute__((always_inline)) inline int32x4_t filterLumaMveLoad(
+    const uint8_t* p, uint32x4_t offsets) noexcept
+{
+    return vreinterpretq_s32_u32(vldrbq_gather_offset_u32(p, offsets));
+}
+
+/** Clip signed filter results before the narrowing byte store. */
+__attribute__((always_inline)) inline int32x4_t filterLumaMveClip(int32x4_t value) noexcept
+{
+    return vmaxq_s32(vdupq_n_s32(0), vminq_s32(vdupq_n_s32(255), value));
+}
+
+/** Clamp the normal-filter delta symmetrically around zero. */
+__attribute__((always_inline)) inline int32x4_t filterLumaMveClamp(
+    int32x4_t value, int32x4_t limit) noexcept
+{
+    return vmaxq_s32(vnegq_s32(limit), vminq_s32(limit, value));
+}
+
+/** Normal luma filtering of four crossings sharing a boundary strength. */
+inline void filterLumaMveWeak(uint8_t* q, uint32_t across, uint32_t along,
+    int32_t alpha, int32_t beta, int32_t tc0) noexcept
+{
+    if (alpha == 0 || beta == 0) return;
+    auto offsets = vmulq_n_u32(vidupq_n_u32(0, 1), along);
+    auto p0 = filterLumaMveLoad(q - across, offsets);
+    auto p1 = filterLumaMveLoad(q - 2U * across, offsets);
+    auto p2 = filterLumaMveLoad(q - 3U * across, offsets);
+    auto q0 = filterLumaMveLoad(q, offsets);
+    auto q1 = filterLumaMveLoad(q + across, offsets);
+    auto q2 = filterLumaMveLoad(q + 2U * across, offsets);
+    mve_pred16_t enabled = vcmpltq_n_s32(vabdq_s32(p0, q0), alpha) &
+        vcmpltq_n_s32(vabdq_s32(q1, q0), beta) & vcmpltq_n_s32(vabdq_s32(p1, p0), beta);
+    if (!enabled) return;
+    mve_pred16_t ap = vcmpltq_n_s32(vabdq_s32(p2, p0), beta);
+    mve_pred16_t aq = vcmpltq_n_s32(vabdq_s32(q2, q0), beta);
+    auto tc = vaddq_n_s32(vaddq_s32(vpselq_s32(vdupq_n_s32(1), vdupq_n_s32(0), ap),
+        vpselq_s32(vdupq_n_s32(1), vdupq_n_s32(0), aq)), tc0);
+    auto delta = vshrq_n_s32(vaddq_n_s32(vaddq_s32(vmulq_n_s32(vsubq_s32(q0, p0), 4),
+        vsubq_s32(p1, q1)), 4), 3);
+    delta = filterLumaMveClamp(delta, tc);
+    auto average = vrhaddq_s32(p0, q0);
+    auto dp1 = vshrq_n_s32(vsubq_s32(vaddq_s32(p2, average), vmulq_n_s32(p1, 2)), 1);
+    auto dq1 = vshrq_n_s32(vsubq_s32(vaddq_s32(q2, average), vmulq_n_s32(q1, 2)), 1);
+    dp1 = filterLumaMveClamp(dp1, vdupq_n_s32(tc0));
+    dq1 = filterLumaMveClamp(dq1, vdupq_n_s32(tc0));
+    auto outP0 = vpselq_s32(filterLumaMveClip(vaddq_s32(p0, delta)), p0, enabled);
+    auto outQ0 = vpselq_s32(filterLumaMveClip(vsubq_s32(q0, delta)), q0, enabled);
+    auto outP1 = vpselq_s32(filterLumaMveClip(vaddq_s32(p1, dp1)), p1, enabled & ap);
+    auto outQ1 = vpselq_s32(filterLumaMveClip(vaddq_s32(q1, dq1)), q1, enabled & aq);
+    vstrbq_scatter_offset_u32(q - across, offsets, vreinterpretq_u32_s32(outP0));
+    vstrbq_scatter_offset_u32(q, offsets, vreinterpretq_u32_s32(outQ0));
+    vstrbq_scatter_offset_u32(q - 2U * across, offsets, vreinterpretq_u32_s32(outP1));
+    vstrbq_scatter_offset_u32(q + across, offsets, vreinterpretq_u32_s32(outQ1));
+}
+
+/** Strong luma filtering; each side uses the original, unmodified samples. */
+inline void filterLumaMveStrong(uint8_t* q, uint32_t across, uint32_t along,
+    int32_t alpha, int32_t beta) noexcept
+{
+    if (alpha == 0 || beta == 0) return;
+    auto offsets = vmulq_n_u32(vidupq_n_u32(0, 1), along);
+    auto p0 = filterLumaMveLoad(q - across, offsets);
+    auto p1 = filterLumaMveLoad(q - 2U * across, offsets);
+    auto p2 = filterLumaMveLoad(q - 3U * across, offsets);
+    auto p3 = filterLumaMveLoad(q - 4U * across, offsets);
+    auto q0 = filterLumaMveLoad(q, offsets);
+    auto q1 = filterLumaMveLoad(q + across, offsets);
+    auto q2 = filterLumaMveLoad(q + 2U * across, offsets);
+    auto q3 = filterLumaMveLoad(q + 3U * across, offsets);
+    auto difference = vabdq_s32(p0, q0);
+    mve_pred16_t enabled = vcmpltq_n_s32(difference, alpha) &
+        vcmpltq_n_s32(vabdq_s32(q1, q0), beta) & vcmpltq_n_s32(vabdq_s32(p1, p0), beta);
+    if (!enabled) return;
+    mve_pred16_t strong = enabled & vcmpltq_n_s32(difference, (alpha >> 2) + 2);
+    mve_pred16_t ps = strong & vcmpltq_n_s32(vabdq_s32(p2, p0), beta);
+    mve_pred16_t qs = strong & vcmpltq_n_s32(vabdq_s32(q2, q0), beta);
+    auto sum0 = vaddq_s32(p0, q0);
+    auto pWeak = vshrq_n_s32(vaddq_n_s32(vaddq_s32(vmulq_n_s32(p1, 2), vaddq_s32(p0, q1)), 2), 2);
+    auto qWeak = vshrq_n_s32(vaddq_n_s32(vaddq_s32(vmulq_n_s32(q1, 2), vaddq_s32(q0, p1)), 2), 2);
+    auto pStrong = vshrq_n_s32(vaddq_n_s32(vaddq_s32(vaddq_s32(p2, q1),
+        vmulq_n_s32(vaddq_s32(p1, sum0), 2)), 4), 3);
+    auto qStrong = vshrq_n_s32(vaddq_n_s32(vaddq_s32(vaddq_s32(q2, p1),
+        vmulq_n_s32(vaddq_s32(q1, sum0), 2)), 4), 3);
+    auto pOne = vshrq_n_s32(vaddq_n_s32(vaddq_s32(vaddq_s32(p2, p1), sum0), 2), 2);
+    auto qOne = vshrq_n_s32(vaddq_n_s32(vaddq_s32(vaddq_s32(q2, q1), sum0), 2), 2);
+    auto pTwo = vshrq_n_s32(vaddq_n_s32(vaddq_s32(vaddq_s32(vmulq_n_s32(p3, 2),
+        vmulq_n_s32(p2, 3)), vaddq_s32(p1, sum0)), 4), 3);
+    auto qTwo = vshrq_n_s32(vaddq_n_s32(vaddq_s32(vaddq_s32(vmulq_n_s32(q3, 2),
+        vmulq_n_s32(q2, 3)), vaddq_s32(q1, sum0)), 4), 3);
+    auto outP0 = vpselq_s32(vpselq_s32(pStrong, pWeak, ps), p0, enabled);
+    auto outQ0 = vpselq_s32(vpselq_s32(qStrong, qWeak, qs), q0, enabled);
+    vstrbq_scatter_offset_u32(q - across, offsets, vreinterpretq_u32_s32(outP0));
+    vstrbq_scatter_offset_u32(q, offsets, vreinterpretq_u32_s32(outQ0));
+    vstrbq_scatter_offset_u32(q - 2U * across, offsets, vreinterpretq_u32_s32(vpselq_s32(pOne, p1, ps)));
+    vstrbq_scatter_offset_u32(q + across, offsets, vreinterpretq_u32_s32(vpselq_s32(qOne, q1, qs)));
+    vstrbq_scatter_offset_u32(q - 3U * across, offsets, vreinterpretq_u32_s32(vpselq_s32(pTwo, p2, ps)));
+    vstrbq_scatter_offset_u32(q + 2U * across, offsets, vreinterpretq_u32_s32(vpselq_s32(qTwo, q2, qs)));
+}
+
 } // namespace sub0h264
 #endif
 #endif

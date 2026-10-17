@@ -28,6 +28,7 @@
 #define CROG_SUB0H264_DEBLOCK_HPP
 
 #include "frame.hpp"
+#include "luma_mve.hpp"
 #include "motion.hpp"    // MbMotionInfo
 #include "tables.hpp"    // cChromaQpTable
 #include "transform.hpp" // clipU8, clampQpIdx
@@ -486,10 +487,17 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
         for (uint32_t row = 0U; row < 16U; ++row)
         {
             uint8_t bs = edgeBs[row >> 2U];
-            if (bs == 0U) continue;
+            if (bs == 0U) { row += 3U; continue; }
 
             uint8_t* yPtr = frame.yRow(pixY + row) + edgeX;
 
+#if defined(__ARM_FEATURE_MVE) && (__ARM_FEATURE_MVE & 1)
+            if (bs == 4U)
+                filterLumaMveStrong(yPtr, 1U, frame.yStride(), edgeAlpha, edgeBeta);
+            else
+                filterLumaMveWeak(yPtr, 1U, frame.yStride(), edgeAlpha, edgeBeta, cTc0Table[edgeIndexA][bs]);
+            row += 3U;
+#else
             if (bs == 4U)
             {
                 filterLumaStrong(yPtr[-1], yPtr[-2], yPtr[-3],
@@ -507,6 +515,7 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
                                yPtr[0], yPtr[1], q2,
                                edgeAlpha, edgeBeta, tc0);
             }
+#endif
         }
     }
 
@@ -557,9 +566,16 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
         for (uint32_t col = 0U; col < 16U; ++col)
         {
             uint8_t bs = hEdgeBs[col >> 2U];
-            if (bs == 0U) continue;
+            if (bs == 0U) { col += 3U; continue; }
 
             uint8_t* yQ = frame.yRow(edgeY) + pixX + col;
+#if defined(__ARM_FEATURE_MVE) && (__ARM_FEATURE_MVE & 1)
+            if (bs == 4U)
+                filterLumaMveStrong(yQ, frame.yStride(), 1U, edgeAlpha, edgeBeta);
+            else
+                filterLumaMveWeak(yQ, frame.yStride(), 1U, edgeAlpha, edgeBeta, cTc0Table[edgeIndexA][bs]);
+            col += 3U;
+#else
             uint8_t* yP = frame.yRow(edgeY - 1U) + pixX + col;
 
             if (bs == 4U)
@@ -583,6 +599,7 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
 
                 filterLumaWeak(*yP, p1, p2, *yQ, q1, q2, edgeAlpha, edgeBeta, tc0);
             }
+#endif
         }
     }
     // Chroma filtering is independent of Y, so choose once for the whole MB.
