@@ -233,6 +233,59 @@ private:
 #endif
     DecodeTrace trace_;
     SectionProfile* profile_ = nullptr;
+#if SUB0H264_SECTION_PROFILE
+    // Measuring builds only. These same-named members take precedence over
+    // the namespace helpers for every unqualified call inside this class, so
+    // each call is timed without editing its call sites. One out-of-line copy
+    // each keeps the timing code from growing every call site.
+    [[gnu::noinline]] void lumaMotionComp(const Frame& ref, int32_t refX, int32_t refY,
+                                          uint32_t dx, uint32_t dy, uint32_t width, uint32_t height,
+                                          uint8_t* dst, uint32_t dstStride) noexcept
+    {
+        const int64_t start = profile_ ? sub0h264TimerUs() : 0;
+        sub0h264::lumaMotionComp(ref, refX, refY, dx, dy, width, height, dst, dstStride);
+        if (profile_) profile_->motion.add(sub0h264TimerUs() - start);
+    }
+    [[gnu::noinline]] Result decodeResidualBlock4x4(BitReader& br, int32_t nC, uint32_t maxCoeff,
+                                                    uint32_t startIdx, ResidualBlock4x4& block,
+                                                    const DecodeTrace* trace = nullptr) noexcept
+    {
+        const int64_t start = profile_ ? sub0h264TimerUs() : 0;
+        const Result result = sub0h264::decodeResidualBlock4x4(br, nC, maxCoeff, startIdx, block, trace);
+        if (profile_) profile_->residual.add(sub0h264TimerUs() - start);
+        return result;
+    }
+    [[gnu::noinline]] void inverseDct4x4AddPred(const int16_t* coeffs, const uint8_t* pred,
+                                                uint32_t predStride, uint8_t* out,
+                                                uint32_t outStride) noexcept
+    {
+        const int64_t start = profile_ ? sub0h264TimerUs() : 0;
+        sub0h264::inverseDct4x4AddPred(coeffs, pred, predStride, out, outStride);
+        if (!profile_) return;
+        profile_->transform.add(sub0h264TimerUs() - start);
+        // Counted after the timed call: blocks with no coefficients still run
+        // the full inverse transform, and this shows how many could skip it.
+        uint32_t any = 0U;
+        for (uint32_t i = 0U; i < 16U; ++i) any |= static_cast<uint16_t>(coeffs[i]);
+        if (!any) ++profile_->zeroTransforms;
+    }
+    [[gnu::noinline]] void intraPred4x4(Intra4x4Mode mode, const uint8_t* top,
+                                        const uint8_t* topRight, const uint8_t* left,
+                                        const uint8_t* topLeft, uint8_t* pred) noexcept
+    {
+        const int64_t start = profile_ ? sub0h264TimerUs() : 0;
+        sub0h264::intraPred4x4(mode, top, topRight, left, topLeft, pred);
+        if (profile_) profile_->intra.add(sub0h264TimerUs() - start);
+    }
+    [[gnu::noinline]] void intraPred16x16(Intra16x16Mode mode, const Frame& frame,
+                                          uint32_t mbX, uint32_t mbY, uint8_t* pred,
+                                          bool leftInSlice = true, bool topInSlice = true) noexcept
+    {
+        const int64_t start = profile_ ? sub0h264TimerUs() : 0;
+        sub0h264::intraPred16x16(mode, frame, mbX, mbY, pred, leftInSlice, topInSlice);
+        if (profile_) profile_->intra.add(sub0h264TimerUs() - start);
+    }
+#endif
     ParamSets paramSets_;
     Frame currentFrame_;
     Frame* activeFrame_ = nullptr; ///< Frame being decoded into (DPB target or currentFrame_)
@@ -1157,12 +1210,18 @@ private:
                         if (mbTypeRaw >= 5U)
                         {
                             mbTypeRaw -= 5U;
+#if SUB0H264_SECTION_PROFILE
+                            int64_t intraPT0 = profile_ ? sub0h264TimerUs() : 0;
+#endif
                             if (!decodeIntraMbInPSlice(br, *sps, *pps, sh, mbQp,
                                                         mbTypeRaw, *decodeTarget, mbX, mbY))
                             {
                                 mbFailed = true;
                                 break;
                             }
+#if SUB0H264_SECTION_PROFILE
+                            if (profile_) profile_->intraInPUs += sub0h264TimerUs() - intraPT0;
+#endif
                         }
                         else
                         {

@@ -194,6 +194,7 @@ static int video_worker_consume(video_owner *owner) {
     if (decoded == G2_H264_FRAME_READY && owner->evidence) video_evidence_frame(owner, &frame);
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
     ctx->video_decode_last = owner->timing.totals;
+    g2_h264_sections(owner->decoder, &ctx->video_sections);
     int released = decoded != G2_H264_ERROR && video_queue_release(&owner->queue, &view);
     if (decoded == G2_H264_FRAME_READY) video_rate_post_worker(&ctx->video_rate, VIDEO_TICK, VIDEO_RATE_FRAME);
     video_rate_post_worker(&ctx->video_rate, VIDEO_TICK,

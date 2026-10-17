@@ -20,6 +20,9 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = ROOT / "patches/h264"
+# 233 decoder functions plus the measuring build's four timing wrappers whose
+# names match hot groups (motion, inverse transform, both intra predictions).
+HOT_FUNCTIONS = 237
 
 
 def load_module(name, path):
@@ -221,7 +224,7 @@ class PartitionBuildTests(unittest.TestCase):
     def test_real_arm_selection_and_table_ownership(self):
         self.assertEqual(self.manifest["name"], "h264-decoder")
         self.assertEqual(len(self.membership["promotion_mapping"]), 209)
-        self.assertEqual(sum(v == "hot" for v in self.membership["functions"].values()), 233)
+        self.assertEqual(sum(v == "hot" for v in self.membership["functions"].values()), HOT_FUNCTIONS)
         preopt = (self.arm / "preopt.ll").read_text(encoding="utf-8")
         for helper in ("chromaMotionComp", "inverseHadamard2x2", "dequantChromaDcValues"):
             self.assertNotIn(helper, preopt)
@@ -276,7 +279,7 @@ class PartitionBuildTests(unittest.TestCase):
         mapping = self.native_membership["promotion_mapping"]
         self.assertEqual(len(mapping), 209)
         self.assertEqual(len(set(mapping.values())), 209)
-        self.assertEqual(sum(v == "hot" for v in self.native_membership["functions"].values()), 233)
+        self.assertEqual(sum(v == "hot" for v in self.native_membership["functions"].values()), HOT_FUNCTIONS)
 
     def test_independent_lld_at_three_addresses(self):
         blob = (self.arm / "decoder.bin").read_bytes()

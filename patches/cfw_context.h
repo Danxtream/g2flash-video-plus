@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "message_transport.h"
 #include "h264/runtime.h"
+#include "h264/g2_h264.h"
 #include "video/lifecycle.h"
 #include "video/worker.h"
 #include "video/control.h"
@@ -146,6 +147,7 @@ typedef struct {
     video_presentation_state video_presentation;
     video_profile_state video_profile;
     video_decode_totals video_decode_last;
+    g2_h264_sections_info video_sections; /* Measuring build: decoder section counters. */
     video_power_state video_power;
     volatile uint32_t video_output_epoch;
     video_handoff_state video_handoff;

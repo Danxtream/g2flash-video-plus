@@ -68,16 +68,31 @@ extern "C" bool g2_h264_preflight(const sub0h264::AllocationRequest *input, size
     return ok != 0;
 }
 
+/* The cheapest of several empty timer brackets: what one timed call costs
+ * the measurement itself, so the report can subtract it per counted call. */
+static uint32_t timerCost() {
+    uint32_t best = UINT32_MAX;
+    for (uint32_t i = 0; i < 16U; ++i) {
+        const int64_t start = sub0h264TimerUs();
+        const uint32_t elapsed = static_cast<uint32_t>(sub0h264TimerUs() - start);
+        if (elapsed < best) best = elapsed;
+    }
+    return best;
+}
+
 struct State {
     sub0h264::H264Decoder decoder;
     sub0h264::NalUnit nal;
+    sub0h264::SectionProfile profile;
     bool frameReady = false;
     bool inputStarted = false;
     uint32_t width = 0, height = 0, references = 0, frameCapacity = 0;
-    State() : decoder(sub0h264::H264Decoder::Settings{true}) {
+    uint32_t timerCost = 0;
+    State() : decoder(sub0h264::H264Decoder::Settings{true}), timerCost(::timerCost()) {
         /* EBSP removal never grows beyond a NAL. Reserve the entire record
          * once, so accepted 4086-byte NALs cannot reallocate scratch storage. */
         nal.rbspData.reserve(G2_H264_RECORD_BYTES);
+        decoder.setProfile(&profile);
     }
 };
 static_assert(sizeof(State) <= G2_H264_RECORD_BYTES);
@@ -115,6 +130,19 @@ extern "C" int g2_h264_dpb(const void *handle, g2_h264_dpb_info *info) {
     const auto &decoder = static_cast<const State *>(handle)->decoder;
     *info = {decoder.dpbFrameCapacity(), decoder.dpbAllocatedFrameCount(),
              static_cast<uint32_t>(decoder.dpbAllocatedFrameBytes())};
+    return 1;
+}
+
+extern "C" int g2_h264_sections(const void *handle, g2_h264_sections_info *info) {
+    if (!info) return 0;
+    *info = {};
+    if (!handle) return 0;
+    const auto *state = static_cast<const State *>(handle);
+    const auto &p = state->profile;
+    *info = {p.intraPredUs.cycles, p.interPredUs.cycles, p.intraInPUs.cycles, p.overheadUs.cycles,
+             p.motion.cycles, p.residual.cycles, p.transform.cycles, p.intra.cycles,
+             p.motion.calls, p.residual.calls, p.transform.calls, p.intra.calls,
+             p.zeroTransforms, p.frameCount, state->timerCost};
     return 1;
 }
 

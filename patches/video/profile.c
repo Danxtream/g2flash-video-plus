@@ -102,4 +102,32 @@ static int video_profile_snapshot_locked(customCfwContext *ctx, uint8_t page, ui
     }
     return VIDEO_CONTROL_ACCEPTED;
 }
+
+static void video_sections_write64(uint8_t *p, uint64_t value) {
+    video_profile_write(p, (uint32_t)value);
+    video_profile_write(p + 4, (uint32_t)(value >> 32));
+}
+
+/* Measuring build. The worker publishes both blocks under the control lock
+ * after every decode call; all counters are cumulative for the stream, so a
+ * reader takes differences and a missed read loses nothing. */
+static int video_sections_snapshot_locked(customCfwContext *ctx, uint8_t origin, uint8_t *out) {
+    uint32_t generation = ctx->video_control.control_generation;
+    if (!generation || origin != ctx->video_control.owner_origin) return VIDEO_CONTROL_STALE;
+    const video_decode_totals *d = &ctx->video_decode_last;
+    const g2_h264_sections_info *s = &ctx->video_sections;
+    out[3] = VIDEO_SECTION_DIAGNOSTICS; out[4] = 0; out[5] = 1; out[6] = ctx->video_control.owner_here;
+    video_profile_write(out + 8, generation);
+    video_profile_write(out + 12, d->pictures);
+    video_sections_write64(out + 16, d->cycles);
+    video_profile_write(out + 24, d->max_cycles);
+    video_profile_write(out + 28, s->pictures);
+    const uint64_t cycles[] = {s->intra_i, s->inter_p, s->intra_p, s->completion,
+                               s->motion, s->residual, s->transform, s->intra};
+    for (uint32_t i = 0; i < 8; ++i) video_sections_write64(out + 32 + i * 8, cycles[i]);
+    const uint32_t words[] = {s->motion_calls, s->residual_calls, s->transform_calls, s->intra_calls,
+                              s->zero_transforms, s->timer_cost, d->header_cycles};
+    for (uint32_t i = 0; i < 7; ++i) video_profile_write(out + 96 + i * 4, words[i]);
+    return VIDEO_CONTROL_ACCEPTED;
+}
 #pragma clang section text=""

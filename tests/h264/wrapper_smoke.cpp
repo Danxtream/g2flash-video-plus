@@ -241,7 +241,14 @@ static void format_limits() {
               dpb.allocated_frames == 1 && dpb.allocated_bytes == 256);
         CHECK(feed(h.value, predicted()) == G2_H264_FRAME_READY);
         CHECK(g2_h264_dpb(h.value, &dpb) && dpb.allocated_frames == 2 && dpb.allocated_bytes == 512);
+        // The section profile is attached from construction and counts both
+        // completed pictures; native builds have no cycle counter to read.
+        g2_h264_sections_info sections = {};
+        CHECK(g2_h264_sections(h.value, &sections) && sections.pictures == 2 && !sections.timer_cost);
     }
+    g2_h264_sections_info empty = {7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7};
+    CHECK(!g2_h264_sections(nullptr, &empty) && !empty.pictures && !empty.inter_p);
+    CHECK(!g2_h264_sections(nullptr, nullptr));
     {
         Handle h;
         CHECK(g2_h264_limit_format(h.value, 320, 192, 1, 2));

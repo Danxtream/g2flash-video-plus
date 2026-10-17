@@ -29,6 +29,16 @@ typedef struct {
     uint32_t capacity, allocated_frames, allocated_bytes;
 } g2_h264_dpb_info;
 
+/* Measuring build: cumulative decoder section cycles since construction.
+ * Macroblock totals by kind contain the timed helper calls below them;
+ * timer_cost is one empty timer bracket, to subtract per counted call. */
+typedef struct {
+    uint64_t intra_i, inter_p, intra_p, completion;
+    uint64_t motion, residual, transform, intra;
+    uint32_t motion_calls, residual_calls, transform_calls, intra_calls;
+    uint32_t zero_transforms, pictures, timer_cost;
+} g2_h264_sections_info;
+
 /* Object storage only; runtime allocations are additional caller-owned RAM. */
 uint32_t g2_h264_size(void);
 uint32_t g2_h264_alignment(void);
@@ -52,6 +62,9 @@ int g2_h264_limit_format(void *handle, uint32_t width, uint32_t height,
 /* Query actual DPB storage, on the decoder worker outside publication locks.
  * Capacity is distinct from lazily allocated planes; no allocation occurs. */
 int g2_h264_dpb(const void *handle, g2_h264_dpb_info *info);
+
+/* Copy the section counters, on the decoder worker between decode calls. */
+int g2_h264_sections(const void *handle, g2_h264_sections_info *info);
 
 /* Feed one NAL, beginning with its header (no Annex-B prefix), at most 4086 B.
  * CONSUMED acknowledges input without promising a picture. FRAME_READY comes

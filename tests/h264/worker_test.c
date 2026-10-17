@@ -2187,7 +2187,30 @@ static void profile_mailboxes(void) {
     video_profile_end(captured, 0, 1); assert(!s->mail[0][0].phase);
     context.video_control.start_guard = 0;
     assert(!video_profile_begin().generation);
+    context.video_decode_last = (video_decode_totals){.pictures = 5, .cycles = 0x100000002ull, .max_cycles = 9,
+                                                      .header_cycles = 21};
+    context.video_sections = (g2_h264_sections_info){.intra_i = 1, .inter_p = 0x300000004ull, .intra_p = 5,
+        .completion = 6, .motion = 7, .residual = 8, .transform = 9, .intra = 10, .motion_calls = 11,
+        .residual_calls = 12, .transform_calls = 13, .intra_calls = 14, .zero_transforms = 15,
+        .pictures = 5, .timer_cost = 3};
+    uint8_t sections[VIDEO_DIAGNOSTICS_BYTES] = {0};
+    assert(!video_sections_snapshot_locked(&context, CFW_MESSAGE_LEFT, sections));
+    assert(sections[3] == VIDEO_SECTION_DIAGNOSTICS && sections[5] == 1 && sections[6] == CFW_MESSAGE_LEFT);
+    assert(video_read32(sections + 8) == 8 && video_read32(sections + 12) == 5);
+    assert(video_read32(sections + 16) == 2 && video_read32(sections + 20) == 1 && video_read32(sections + 24) == 9);
+    assert(video_read32(sections + 28) == 5 && video_read32(sections + 32) == 1);
+    assert(video_read32(sections + 40) == 4 && video_read32(sections + 44) == 3 && video_read32(sections + 88) == 10);
+    assert(video_read32(sections + 96) == 11 && video_read32(sections + 112) == 15);
+    assert(video_read32(sections + 116) == 3 && video_read32(sections + 120) == 21);
+    assert(video_sections_snapshot_locked(&context, CFW_MESSAGE_RIGHT, sections) == VIDEO_CONTROL_STALE);
+    control_command(command, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_SECTION_DIAGNOSTICS);
+    assert(!control_response(command, 12, frozen, VIDEO_DIAGNOSTICS_BYTES));
+    assert(frozen[3] == VIDEO_SECTION_DIAGNOSTICS && video_read32(frozen + 40) == 4);
+    control_command(command, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_SECTION_DIAGNOSTICS);
+    command[9] = 1; /* One page only. */
+    assert(control_response(command, 12, replayed, VIDEO_DIAGNOSTICS_BYTES) == VIDEO_CONTROL_FORMAT);
     puts("bounded profile posts, cycle carry, long-span uncertainty, saturation, stale mail and read-only pages PASS");
+    puts("decoder section page: cumulative 64-bit counters, owner check and control route PASS");
 }
 
 static void recovery(void) {
