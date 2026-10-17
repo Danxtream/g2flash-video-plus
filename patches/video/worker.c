@@ -31,6 +31,7 @@ typedef struct video_owner {
     video_decode_accumulator timing;
     video_presenter *presenter;
     g2_h264_runtime runtime;
+    uint32_t bench_done; /* Measuring build: this stream's memory/CPU check ran. */
 } video_owner;
 
 static int video_presenter_prepare(video_owner *);
@@ -49,6 +50,7 @@ static int video_refusal_snapshot(customCfwContext *, uint8_t, uint8_t, uint8_t 
 
 static void video_decode_before(video_owner *, uint32_t, uint8_t);
 static void video_decode_after(video_owner *, g2_h264_result);
+static void video_bench_run(const g2_h264_frame_info *, video_bench_result *);
 static int video_evidence_space(video_owner *);
 static void video_evidence_before(video_owner *, uint32_t);
 static void video_evidence_after(video_owner *, g2_h264_result, uint32_t, uint32_t, uint32_t);
@@ -192,9 +194,14 @@ static int video_worker_consume(video_owner *owner) {
          dpb.capacity != VIDEO_FRAME_DPB || dpb.allocated_frames > dpb.capacity))
         decoded = G2_H264_ERROR;
     if (decoded == G2_H264_FRAME_READY && owner->evidence) video_evidence_frame(owner, &frame);
+    /* Measuring build: one memory and CPU check per stream, outside the lock. */
+    video_bench_result bench;
+    int benched = decoded == G2_H264_FRAME_READY && frame.count >= 2 && !owner->bench_done;
+    if (benched) { owner->bench_done = 1; video_bench_run(&frame, &bench); }
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_runtime_fail(VIDEO_FAULT_OWNERSHIP);
     ctx->video_decode_last = owner->timing.totals;
     g2_h264_sections(owner->decoder, &ctx->video_sections);
+    if (benched) ctx->video_bench = bench;
     int released = decoded != G2_H264_ERROR && video_queue_release(&owner->queue, &view);
     if (decoded == G2_H264_FRAME_READY) video_rate_post_worker(&ctx->video_rate, VIDEO_TICK, VIDEO_RATE_FRAME);
     video_rate_post_worker(&ctx->video_rate, VIDEO_TICK,

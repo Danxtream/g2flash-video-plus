@@ -37,6 +37,7 @@ typedef struct {
     uint64_t motion, residual, transform, intra;
     uint32_t motion_calls, residual_calls, transform_calls, intra_calls;
     uint32_t zero_transforms, pictures, timer_cost;
+    uint64_t slice_setup, mb_loop, input; /* Time outside the macroblock totals. */
 } g2_h264_sections_info;
 
 /* Object storage only; runtime allocations are additional caller-owned RAM. */

@@ -726,6 +726,9 @@ private:
     /** Decode a slice (IDR or non-IDR). */
     DecodeStatus decodeSlice(BitReader& br, const NalUnit& nal) noexcept
     {
+#if SUB0H264_SECTION_PROFILE
+        int64_t sliceT0 = profile_ ? sub0h264TimerUs() : 0;
+#endif
         allocationFailure_ = {};
         diagStage_ = 1U;
         diagMbEntered_ = UINT32_MAX;
@@ -970,6 +973,10 @@ private:
         const uint32_t stopBit = br.rbspStopBit();
         uint32_t endMb = sh.firstMbInSlice_;
         bool mbFailed = false;
+#if SUB0H264_SECTION_PROFILE
+        int64_t loopT0 = profile_ ? sub0h264TimerUs() : 0;
+        if (profile_) profile_->sliceSetupUs += loopT0 - sliceT0;
+#endif
 
         // Decode macroblocks
         if (sh.sliceType_ == SliceType::I)
@@ -1251,6 +1258,9 @@ private:
                 "B-slices (§7.3.4), SI-slices, SP-slices are not supported.");
             return DecodeStatus::Error;
         }
+#if SUB0H264_SECTION_PROFILE
+        if (profile_) profile_->mbLoopUs += sub0h264TimerUs() - loopT0;
+#endif
         diagStage_ = 5U;
         diagBitOffset_ = static_cast<uint32_t>(br.bitOffset());
 

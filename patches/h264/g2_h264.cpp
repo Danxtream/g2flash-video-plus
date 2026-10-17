@@ -142,7 +142,8 @@ extern "C" int g2_h264_sections(const void *handle, g2_h264_sections_info *info)
     *info = {p.intraPredUs.cycles, p.interPredUs.cycles, p.intraInPUs.cycles, p.overheadUs.cycles,
              p.motion.cycles, p.residual.cycles, p.transform.cycles, p.intra.cycles,
              p.motion.calls, p.residual.calls, p.transform.calls, p.intra.calls,
-             p.zeroTransforms, p.frameCount, state->timerCost};
+             p.zeroTransforms, p.frameCount, state->timerCost,
+             p.sliceSetupUs.cycles, p.mbLoopUs.cycles, p.inputUs.cycles};
     return 1;
 }
 
@@ -205,8 +206,10 @@ extern "C" g2_h264_result g2_h264_decode(void *handle, const uint8_t *data, uint
     state->frameReady = false;
     if (!data || !size || size > G2_H264_MAX_NAL_BYTES) return G2_H264_ERROR;
     state->inputStarted = true;
+    const int64_t inputT0 = sub0h264TimerUs();
     if (!sub0h264::parseNalUnit(data, size, state->nal)) return G2_H264_ERROR;
     if (state->width && !validInput(*state)) return G2_H264_ERROR;
+    state->profile.inputUs += sub0h264TimerUs() - inputT0;
     switch (state->decoder.processNal(state->nal)) {
         case sub0h264::DecodeStatus::FrameDecoded:
             state->frameReady = true;

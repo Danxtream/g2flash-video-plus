@@ -235,6 +235,7 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         s->error = 0;
         ctx->video_decode_last = (video_decode_totals){0};
         ctx->video_sections = (g2_h264_sections_info){0};
+        ctx->video_bench = (video_bench_result){0};
         if (!video_controller_request_locked(VIDEO_CONTROLLER_START)) {
             __atomic_store_n(&s->start_guard, 0, __ATOMIC_RELEASE); s->error = VIDEO_CONTROL_DISPATCH;
             __atomic_fetch_and(&s->controller_reasons, ~VIDEO_CONTROLLER_START, __ATOMIC_ACQ_REL);
@@ -422,7 +423,8 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             data[8] == VIDEO_SECTION_DIAGNOSTICS && !data[10] && !data[11]) {
             bzero(entry->snapshot, VIDEO_DIAGNOSTICS_BYTES);
             entry->snapshot_bytes = VIDEO_DIAGNOSTICS_BYTES;
-            entry->result = data[9] ? VIDEO_CONTROL_FORMAT :
+            entry->result = data[9] > 1 ? VIDEO_CONTROL_FORMAT : data[9] ?
+                video_sections_detail_locked(ctx, route->origin, entry->snapshot) :
                 video_sections_snapshot_locked(ctx, route->origin, entry->snapshot);
             entry->snapshot[0] = VIDEO_PROTOCOL_VERSION; entry->snapshot[1] = VIDEO_CONTROL_DIAGNOSTICS;
             entry->snapshot[2] = entry->result;

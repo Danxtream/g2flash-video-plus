@@ -13,6 +13,12 @@ enum {
     VIDEO_PROFILE_DROPPED = 1, VIDEO_PROFILE_SPAN = 2, VIDEO_PROFILE_SATURATED = 4
 };
 typedef struct { uint32_t generation, tick, cycles; } video_profile_capture;
+/* Measuring build: one memory and CPU check per stream (cycles unless named). */
+typedef struct {
+    uint32_t done, ccr, mpu_ctrl, frame_address, stride, width, height;
+    uint32_t alu, frame_read, frame_bytes, block_cold, block_hot, block_bytes;
+    uint32_t windows, window_bytes;
+} video_bench_result;
 typedef struct {
     volatile uint32_t phase;
     uint32_t generation, ticks, cycles, bytes;

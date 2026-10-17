@@ -148,6 +148,7 @@ typedef struct {
     video_profile_state video_profile;
     video_decode_totals video_decode_last;
     g2_h264_sections_info video_sections; /* Measuring build: decoder section counters. */
+    video_bench_result video_bench;       /* Measuring build: per-stream memory/CPU check. */
     video_power_state video_power;
     volatile uint32_t video_output_epoch;
     video_handoff_state video_handoff;

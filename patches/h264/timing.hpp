@@ -55,6 +55,10 @@ struct SectionProfile {
     SectionCycles intraInPUs;
     SectionCalls motion, residual, transform, intra;
     uint32_t zeroTransforms = 0; /* 4x4 inverse transforms of all-zero input. */
+    /* Time outside macroblocks: slice start to the first macroblock, the
+     * whole macroblock loop (so its own bookkeeping is the loop minus the
+     * macroblock totals) and, in the adapter, NAL parsing and input checks. */
+    SectionCycles sliceSetupUs, mbLoopUs, inputUs;
 };
 }
 #endif

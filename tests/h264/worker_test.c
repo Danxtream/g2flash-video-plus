@@ -250,6 +250,8 @@ static uint32_t test_calibrate(void) {
 }
 static uint32_t test_crc(const g2_h264_frame_info *);
 #define VIDEO_CYCLES test_cycles()
+/* System control registers exist only on the core: CCR reads with both caches on. */
+#define VIDEO_CORE_REGISTER(address) ((address) == 0xE000ED14u ? 0x30000u : 0u)
 #define VIDEO_CLOCK_INIT test_clock_init
 #define VIDEO_CLOCK_CALIBRATE test_calibrate
 #define VIDEO_FRAME_CRC test_crc
@@ -2206,8 +2208,35 @@ static void profile_mailboxes(void) {
     control_command(command, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_SECTION_DIAGNOSTICS);
     assert(!control_response(command, 12, frozen, VIDEO_DIAGNOSTICS_BYTES));
     assert(frozen[3] == VIDEO_SECTION_DIAGNOSTICS && video_read32(frozen + 40) == 4);
+    static uint8_t picture[32 * 64];
+    for (uint32_t i = 0; i < sizeof(picture); ++i) picture[i] = (uint8_t)i;
+    const g2_h264_frame_info frame = {picture, 60, 32, 64, 2, 0};
+    video_bench_result bench = {0};
+    video_bench_run(&frame, &bench);
+    assert(bench.done && bench.ccr == 0x30000u && bench.frame_address == (uint32_t)(uintptr_t)picture);
+    assert(bench.stride == 64 && bench.frame_bytes == 60 * 32 && bench.block_bytes == 16 * 60);
+    assert(bench.window_bytes == 32 * 21 * 24);
+    const g2_h264_frame_info narrow = {picture, 24, 32, 64, 2, 0};
+    video_bench_run(&narrow, &bench);
+    assert(!bench.done && bench.ccr == 0x30000u && !bench.window_bytes);
+    context.video_sections.slice_setup = 0x500000006ull; context.video_sections.mb_loop = 7;
+    context.video_sections.input = 8;
+    context.video_bench = (video_bench_result){.done = 1, .ccr = 0x30000u, .frame_address = 0x20200000u,
+        .stride = 320, .alu = 41, .window_bytes = 16128};
+    assert(!video_sections_detail_locked(&context, CFW_MESSAGE_LEFT, sections));
+    assert(sections[3] == VIDEO_SECTION_DIAGNOSTICS && sections[4] == 1 && video_read32(sections + 8) == 8);
+    assert(video_read32(sections + 12) == 6 && video_read32(sections + 16) == 5);
+    assert(video_read32(sections + 20) == 7 && video_read32(sections + 28) == 8);
+    assert(video_read32(sections + 36) == 1 && video_read32(sections + 40) == 0x30000u);
+    assert(video_read32(sections + 48) == 0x20200000u && video_read32(sections + 64) == 41);
+    assert(video_read32(sections + 92) == 16128);
+    assert(video_sections_detail_locked(&context, CFW_MESSAGE_RIGHT, sections) == VIDEO_CONTROL_STALE &&
+           sections[3] == VIDEO_SECTION_DIAGNOSTICS);
     control_command(command, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_SECTION_DIAGNOSTICS);
-    command[9] = 1; /* One page only. */
+    command[9] = 1;
+    assert(!control_response(command, 12, replayed, VIDEO_DIAGNOSTICS_BYTES) && replayed[4] == 1);
+    control_command(command, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_SECTION_DIAGNOSTICS);
+    command[9] = 2; /* Two pages only. */
     assert(control_response(command, 12, replayed, VIDEO_DIAGNOSTICS_BYTES) == VIDEO_CONTROL_FORMAT);
     puts("bounded profile posts, cycle carry, long-span uncertainty, saturation, stale mail and read-only pages PASS");
     puts("decoder section page: cumulative 64-bit counters, owner check and control route PASS");
