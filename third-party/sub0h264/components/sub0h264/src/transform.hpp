@@ -122,8 +122,18 @@ static_assert(cDequantScale[3][1] == 23, "qp%6=3, class1 = 23 per Table 8-15");
  */
 inline void inverseDct4x4AddPred(const int16_t* coeffs,
                                   const uint8_t* pred, uint32_t predStride,
-                                  uint8_t* out, uint32_t outStride) noexcept
+                                  uint8_t* out, uint32_t outStride,
+                                  bool hasCoefficients = true) noexcept
 {
+    // The entropy decoder already knows the count. Intra16 callers must
+    // include their separately reconstructed DC, not just the AC count.
+    if (!hasCoefficients)
+    {
+        for (uint32_t row = 0U; row < 4U; ++row)
+            for (uint32_t col = 0U; col < 4U; ++col)
+                out[row * outStride + col] = pred[row * predStride + col];
+        return;
+    }
     // ITU-T H.264 §8.5.12.2: 4x4 inverse integer transform. [CHECKED §8.5.12.2]
     // ffmpeg-style: add rounding bias to block[0] before butterfly, then >>6 at output.
     // This matches ffmpeg's ff_h264_idct_add exactly. [CHECKED FM-6]

@@ -1548,7 +1548,8 @@ private:
             // Inverse DCT + add prediction + clip
             uint8_t* predPtr = lumaPred + blkY * 16U + blkX;
             uint8_t* outPtr = mbLuma + blkY * yStride + blkX;
-            inverseDct4x4AddPred(coeffs, predPtr, 16U, outPtr, yStride);
+            inverseDct4x4AddPred(coeffs, predPtr, 16U, outPtr, yStride,
+                coeffs[0] != 0 || (cbpLuma && nnzLuma_[(mbY * widthInMbs_ + mbX) * 16U + rasterIdx] != 0U));
         }
 
         // 4. Decode chroma (simplified — DC prediction + optional residual)
@@ -1879,7 +1880,8 @@ private:
             }
 #endif
 
-            inverseDct4x4AddPred(coeffs, pred4x4, 4U, outPtr, yStride);
+            inverseDct4x4AddPred(coeffs, pred4x4, 4U, outPtr, yStride,
+                nnzLuma_[(mbY * widthInMbs_ + mbX) * 16U + rasterIdx] != 0U);
 
 #ifdef SUB0H264_TRACE_I4X4_BLOCKS
             if (mbX == 0U && mbY == 0U && blkIdx >= 7U && blkIdx <= 9U)
@@ -2764,7 +2766,6 @@ private:
             uint32_t blkY = cLuma4x4BlkY[blkIdx];
             uint32_t rasterIdx = cLuma4x4ToRaster[blkIdx];
 
-            //TODO: consider tracking non-zero coeffs count per block for early zeroing and/or skipping inverse transform if zero (currently tracked in nnzLuma_ but not used for skipping)
             uint32_t group8x8 = blkIdx >> 2U;
             bool hasResidual = (cbpLuma >> group8x8) & 1U;
 
@@ -2788,7 +2789,8 @@ private:
             //TODO: consider separate handling for DC vs AC blocks (currently combined in single ResidualBlock4x4 and decodeResidualBlock4x4 calls with nc=-1 for DC and nc from getLumaNc for AC, but could be split into separate paths for clarity and/or optimization)
             uint8_t* predPtr = predLuma + blkY * cMbSize + blkX;
             uint8_t* outPtr = target.yMb(mbX, mbY) + blkY * yStride + blkX;
-            inverseDct4x4AddPred(coeffs, predPtr, cMbSize, outPtr, yStride);
+            inverseDct4x4AddPred(coeffs, predPtr, cMbSize, outPtr, yStride,
+                hasResidual && nnzLuma_[mbIdx * 16U + rasterIdx] != 0U);
         }
 
         int16_t dcCb[4] = {}, dcCr[4] = {};
@@ -3304,7 +3306,8 @@ private:
                 }
 #endif
 
-                inverseDct4x4AddPred(coeffs, pred4x4, 4U, outPtr, yStride);
+                inverseDct4x4AddPred(coeffs, pred4x4, 4U, outPtr, yStride,
+                    nnzLuma_[mbIdx * 16U + rasterIdx] != 0U);
 
 #ifdef SUB0H264_TRACE_I4X4_BLOCKS
                 if (mbX == 0U && mbY == 0U)
@@ -3480,7 +3483,8 @@ private:
             coeffs[0] = savedDc;
             uint8_t* predPtr = lumaPred + blkY * 16U + blkX;
             uint8_t* outPtr = mbLuma + blkY * yStride + blkX;
-            inverseDct4x4AddPred(coeffs, predPtr, 16U, outPtr, yStride);
+            inverseDct4x4AddPred(coeffs, predPtr, 16U, outPtr, yStride,
+                coeffs[0] != 0 || (cbpLuma && nnzLuma_[mbIdx * 16U + rasterIdx] != 0U));
         }
 
         decodeChromaCabac(pps, chromaPredMode, cbpChroma, qp, mbX, mbY);
@@ -4020,7 +4024,8 @@ private:
 
                 uint8_t* predPtr = predLuma + blkY * cMbSize + blkX;
                 uint8_t* outPtr = target.yMb(mbX, mbY) + blkY * yStride + blkX;
-                inverseDct4x4AddPred(coeffs, predPtr, cMbSize, outPtr, yStride);
+                inverseDct4x4AddPred(coeffs, predPtr, cMbSize, outPtr, yStride,
+                    nnzLuma_[mbIdx * 16U + rasterIdx] != 0U);
             }
         }
 
