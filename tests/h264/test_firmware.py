@@ -85,8 +85,15 @@ class DecoderBlobTests(unittest.TestCase):
                 self.assertEqual(run.call_args.args[0],
                                  [sys.executable, str(patches / "h264/build_decoder.py"),
                                   "--output", str(output), "--firmware-c", str(patches / "patches_main.c")])
+                for alignment in (4, 8, 16):
+                    aligned = {**manifest, "alignment": alignment}
+                    path.write_text(json.dumps(aligned), encoding="utf-8")
+                    with self.subTest(alignment=alignment):
+                        self.assertEqual(firmware.build_firmware_blob(), {**aligned, "text": blob.hex()})
                 for key, value in (("bytes", 1), ("sha256", "0" * 64),
-                                   ("alignment", 0), ("alignment", 3), ("alignment", 8)):
+                                   ("alignment", -4), ("alignment", 0),
+                                   ("alignment", 1), ("alignment", 2),
+                                   ("alignment", 3), ("alignment", 12), ("alignment", 32)):
                     path.write_text(json.dumps({**manifest, key: value}), encoding="utf-8")
                     with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                         firmware.build_firmware_blob()
@@ -127,10 +134,12 @@ class FirmwareInclusionTests(unittest.TestCase):
             self.assertEqual(bytes.fromhex(guards[firmware.g2f(address)]), bytes.fromhex(old))
         functions = {entry['name']: entry for entry in self.manifest['functions']}
         target = next(new for offset, _, new, _ in patches if offset == firmware.g2f(0x4798f2))
-        address = firmware.mram_addr(firmware.align_up(old_size, firmware.BLOB_ALIGN))
+        alignment = max(firmware.BLOB_ALIGN, self.manifest["alignment"])
+        address = firmware.mram_addr(firmware.align_up(old_size, alignment))
         self.assertEqual(target, firmware.enc_bl(0x4798f2,
                          address + functions['video_display_refresh_gate']['offset']))
-        start = firmware.align_up(old_size, firmware.BLOB_ALIGN) - old_size
+        start = firmware.align_up(old_size, alignment) - old_size
+        self.assertEqual(append[:start], bytes(start))
         self.assertEqual(append[start:], self.blob)
         self.assertEqual(hashlib.sha256(append[start:]).hexdigest(), self.manifest["sha256"])
         self.assertEqual(firmware.mram_addr(old_size + start) % self.manifest["alignment"], 0)
@@ -145,6 +154,18 @@ class FirmwareInclusionTests(unittest.TestCase):
         for offset, old, new, description in patches:
             expected = bytes.fromhex(old)
             self.assertEqual(self.base[offset:offset + len(expected)], expected, description)
+
+    def test_word_aligned_blob_keeps_original_placement_without_padding(self):
+        with mock.patch.object(self, "built", {**self.built, "alignment": 4}):
+            append, patches, (_, _, old_size) = self.layout()
+        self.assertEqual(firmware.BLOB_ALIGN, 4)
+        self.assertEqual(old_size % 4, 0)
+        self.assertEqual(append, self.blob)
+        address = firmware.mram_addr(old_size)
+        functions = {entry["name"]: entry for entry in self.manifest["functions"]}
+        target = next(new for offset, _, new, _ in patches if offset == firmware.g2f(0x4798f2))
+        self.assertEqual(target, firmware.enc_bl(0x4798f2,
+                         address + functions["video_display_refresh_gate"]["offset"]))
 
     def test_ceiling_includes_the_decoder_and_accepts_the_exact_end(self):
         append, _, (_, _, old_size) = self.layout()
@@ -191,7 +212,8 @@ class FirmwareInclusionTests(unittest.TestCase):
     def test_lld_reproduces_combined_blob_at_three_addresses(self):
         obj = self.directory / "firmware-closed.o"
         _, _, (_, _, old_size) = self.layout()
-        actual = firmware.mram_addr(firmware.align_up(old_size, firmware.BLOB_ALIGN))
+        alignment = max(firmware.BLOB_ALIGN, self.manifest["alignment"])
+        actual = firmware.mram_addr(firmware.align_up(old_size, alignment))
         for address in (actual, 0x7C0000, 0x20275000):
             lines = ["SECTIONS {", f".blob 0x{address:x} : {{", "FILL(0);"]
             for name, position, size in self.manifest["layout"]:

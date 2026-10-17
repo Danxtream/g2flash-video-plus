@@ -103,7 +103,7 @@ def resolve_promotions(ir, config, native=False):
 
 
 def compile_modules(output, flags, source=HERE / "g2_h264.cpp", native=False,
-                    object_flags=(), selection=None):
+                    object_flags=(), selection=None, hot_flags=None):
     """Emit preopt IR, single-owner modules, objects and full membership."""
     directory = Path(output).resolve()
     directory.mkdir(parents=True, exist_ok=True)
@@ -124,12 +124,34 @@ def compile_modules(output, flags, source=HERE / "g2_h264.cpp", native=False,
     mapping, external = resolve_promotions(ir, config, native)
     hot, cold, membership = partition_ir.partition(ir, config["hot_groups"], sorted(mapping.values()))
     hot = constant_visibility.expose(hot, cold, membership["constants"])
+    hot_ir_flags = ir_flags
+    if hot_flags is not None:
+        if native or [flag for flag in hot_flags if re.fullmatch(r"-O[0-3szg]", flag)] != ["-O2"] or \
+                any(flag.startswith("-flto") for flag in hot_flags):
+            raise ValueError("hot target requires ARM, one -O2 flag and no LTO")
+        # Frontend attributes carry the CPU features too. Re-emitting only the
+        # hot input avoids retargeting cold code or its table definitions.
+        hot_ir_flags = [flag for flag in hot_flags if flag != "-fstack-usage"]
+        hot_preopt = directory / "hot-preopt.ll"
+        run(["clang++", *hot_ir_flags, "-Xclang", "-disable-llvm-passes", "-S", "-emit-llvm",
+             str(source), "-o", str(hot_preopt)])
+        hot_ir = hot_preopt.read_text(encoding="utf-8")
+        hot_mapping, hot_external = resolve_promotions(hot_ir, config)
+        hot, hot_cold, hot_membership = partition_ir.partition(
+            hot_ir, config["hot_groups"], sorted(hot_mapping.values()))
+        if (hot_mapping != mapping or hot_external != external or
+                hot_membership["functions"] != membership["functions"] or
+                hot_membership["constants"] != membership["constants"]):
+            raise ValueError("hot target changed frozen definition ownership")
+        hot = constant_visibility.expose(hot, hot_cold, membership["constants"])
+        membership["hot_preopt_sha256"] = hashlib.sha256(hot_preopt.read_bytes()).hexdigest()
     membership["constant_policy"] = "available_externally hot initializers; sole cold owner"
     objects = []
     for name, text, optimization in (("hot", hot, "-O2"), ("cold", cold, "-Oz")):
         path = directory / (name + ".ll")
         path.write_text(text, encoding="utf-8")
-        compile_flags = [optimization if flag == "-O2" else flag for flag in ir_flags]
+        module_flags = hot_ir_flags if name == "hot" else ir_flags
+        compile_flags = [optimization if flag == "-O2" else flag for flag in module_flags]
         obj = directory / (name + ".o")
         run(["clang++", *compile_flags, *object_flags, "-ffunction-sections",
              "-fdata-sections", "-fstack-usage", "-c", str(path), "-o", str(obj)])
@@ -148,7 +170,8 @@ def build_decoder(output, headers=None):
     directory = Path(output).resolve()
     headers = toolchain.discover_headers() if headers is None else headers
     flags = toolchain.compiler_flags(headers)
-    objects, membership = compile_modules(directory, flags)
+    hot_flags = toolchain.hot_compiler_flags(headers)
+    objects, membership = compile_modules(directory, flags, hot_flags=hot_flags)
     for name, source in (("runtime", HERE / "runtime.c"), ("memory", ROOT / "patches/memory.c")):
         obj = directory / (name + ".o")
         subprocess.run(["clang", *linker.CFLAGS, "-ffunction-sections", "-fdata-sections",
@@ -173,7 +196,7 @@ def build_decoder(output, headers=None):
                 "sha256": hashlib.sha256(blob).hexdigest(), "exports": exports,
                 "code_bytes": code, "constant_bytes": constants,
                 "padding_bytes": len(blob) - code - constants, "layout": layout,
-                "flags": flags, "c_flags": linker.CFLAGS,
+                "flags": flags, "hot_flags": hot_flags, "c_flags": linker.CFLAGS,
                 "selection_sha256": membership["selection_sha256"],
                 "compiler": subprocess.check_output(["clang++", "--version"], text=True).splitlines()[0]}
     (directory / "decoder.bin").write_bytes(blob)
@@ -190,7 +213,8 @@ def build_firmware(output, source, headers=None):
     directory = Path(output).resolve()
     headers = toolchain.discover_headers() if headers is None else headers
     flags = toolchain.compiler_flags(headers)
-    objects, membership = compile_modules(directory, flags)
+    hot_flags = toolchain.hot_compiler_flags(headers)
+    objects, membership = compile_modules(directory, flags, hot_flags=hot_flags)
     for name, path, extra in (("runtime", HERE / "runtime.c",
                                ("-ffunction-sections", "-fdata-sections")),
                               ("firmware", Path(source).resolve(), ())):
@@ -221,7 +245,7 @@ def build_firmware(output, source, headers=None):
                 "functions": [{"name": name, "offset": offset, "size": size,
                                "bytes": blob[offset:offset + size].hex()}
                               for name, offset, size in functions],
-                "layout": layout, "flags": flags, "c_flags": linker.CFLAGS,
+                "layout": layout, "flags": flags, "hot_flags": hot_flags, "c_flags": linker.CFLAGS,
                 "selection_sha256": membership["selection_sha256"]}
     (directory / "firmware.bin").write_bytes(blob)
     (directory / "firmware.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

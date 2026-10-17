@@ -85,6 +85,10 @@ ambiguous mappings fail the build.
 
 The -O2 frontend emits preopt.ll; hot functions compile at -O2 and cold functions
 at -Oz with minsize/optsize attributes. There is no LTO or automatic promotion.
+Only the hot module uses Cortex-M55 integer MVE (cortex-m55+nofp), with a separate
+hot-preopt.ll frontend pass so its CPU attributes agree with code generation.
+The cold module, C runtime and firmware keep their existing targets. Both decoder
+modules retain the base calling convention and the same softfp header multilib.
 Each function has one owner. Read-only table values are visible to the hot
 optimizer through available_externally initializers, so it can fold constants
 without emitting another table copy. The cold module retains sole ownership of

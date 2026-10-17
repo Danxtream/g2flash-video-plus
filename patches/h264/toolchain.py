@@ -82,6 +82,13 @@ def compiler_flags(headers, optimization="-O2"):
     return flags
 
 
+def hot_compiler_flags(headers):
+    """Enable integer MVE only for hot code, retaining the base calling ABI."""
+    flags = [flag for flag in compiler_flags(headers)
+             if not flag.startswith(("--target=", "-mfpu="))]
+    return ["--target=arm-none-eabi", "-mcpu=cortex-m55+nofp", *flags]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arm-gxx", default="arm-none-eabi-g++")

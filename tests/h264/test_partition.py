@@ -280,7 +280,9 @@ class PartitionBuildTests(unittest.TestCase):
 
     def test_independent_lld_at_three_addresses(self):
         blob = (self.arm / "decoder.bin").read_bytes()
-        for address in (0x7BEA64, 0x7C0000, 0x20275000):
+        alignment = self.manifest["alignment"]
+        actual = (0x7BEA64 + alignment - 1) & ~(alignment - 1)
+        for address in (actual, 0x7C0000, 0x20275000):
             lines = ["SECTIONS {", f".blob 0x{address:x} : {{", "FILL(0);"]
             for name, offset, size in self.manifest["layout"]:
                 lines += [f". = ADDR(.blob) + {offset};", f"KEEP(*({name}))"]

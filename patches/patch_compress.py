@@ -77,6 +77,7 @@ MRAM_END      = 0x00800000
 # OTA flag (0x7FE000) remain above this ceiling.
 APP_MAX_END   = 0x007F5000
 BLOB_ALIGN    = 4            # 4-byte-align each appended blob (Thumb literal pools)
+BLOB_MAX_ALIGN = 16          # Integer MVE may require 16-byte-aligned hot sections.
 
 # BLE policy validated with sustained 2,000-byte/window-3 transfers (~41 KiB/s)
 # and a day of battery use. These are Apollo host changes, not EM9305 ROM edits.
@@ -261,8 +262,8 @@ def build_firmware_blob():
             or manifest["sha256"] != hashlib.sha256(blob).hexdigest()):
         raise ValueError("firmware bytes do not match their build manifest")
     alignment = manifest["alignment"]
-    if (not alignment or alignment & (alignment - 1)
-            or alignment > BLOB_ALIGN):
+    if (alignment < BLOB_ALIGN or alignment & (alignment - 1)
+            or alignment > BLOB_MAX_ALIGN):
         raise ValueError("firmware requires unsupported alignment")
     return {**manifest, "text": blob.hex()}
 
@@ -415,9 +416,9 @@ def layout(img):
     # z_stream zalloc/zfree pair, the seq_tick osTimer callback) does so with plain `&fn`,
     # which -fropi compiles to a PC-relative, relocation-free sequence. So we compile once
     # and each entry address here is just base + the function's offset in the one blob.
-    blob_off = align_up(old_ps, BLOB_ALIGN)
-    base = mram_addr(blob_off)
     built = build_firmware_blob()
+    blob_off = align_up(old_ps, max(BLOB_ALIGN, built["alignment"]))
+    base = mram_addr(blob_off)
     blob = bytes.fromhex(built["text"])
 
     # injected entry points, resolved from the single blob's function table. These are all
