@@ -21,3 +21,15 @@ class MotionCompareTests(unittest.TestCase):
                             '-I' + str(vendor / 'src'), '-I' + str(vendor / 'include'),
                             str(ROOT / 'tests/h264/motion_compare.cpp'), '-o', str(exe)], check=True)
             subprocess.run([str(exe)], check=True, timeout=180)
+
+    def test_mve_source_lane_model_not_arm_instructions(self):
+        vendor = ROOT / 'third-party/sub0h264/components/sub0h264'
+        with tempfile.TemporaryDirectory() as directory:
+            exe = Path(directory) / 'motion-lane-model'
+            subprocess.run(['clang++', '-std=c++23', '-O2', '-g', '-DNDEBUG',
+                            '-D__ARM_FEATURE_MVE=1', '-Wall', '-Wextra', '-Werror',
+                            '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+                            '-I' + str(ROOT / 'tests/h264/mve_model'),
+                            '-I' + str(vendor / 'src'), '-I' + str(vendor / 'include'),
+                            str(ROOT / 'tests/h264/motion_compare.cpp'), '-o', str(exe)], check=True)
+            subprocess.run([str(exe)], check=True, timeout=180)

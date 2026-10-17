@@ -140,6 +140,23 @@ class PartitionTests(unittest.TestCase):
         self.assertEqual(builder.canonical_native_type("f(unsigned long long, long long)"),
                          "f(unsigned long long, long long)")
 
+    def test_target_specific_luma_helpers_keep_shared_owners(self):
+        base = {'functions': {'sub0h264_lumaMotionCompFir': 'hot', 'shared': 'hot', 'cold': 'cold'},
+                'constants': ['table']}
+        target = {'functions': {'sub0h264_lumaMotionCompMve': 'hot', 'shared': 'hot'},
+                  'constants': ['table']}
+        self.assertEqual(builder.validate_target_ownership(base, target, '\n'),
+                         (['sub0h264_lumaMotionCompFir'], ['sub0h264_lumaMotionCompMve']))
+        for changed in ({**target, 'constants': []},
+                        {**target, 'functions': {**target['functions'], 'shared': 'cold'}},
+                        {**target, 'functions': {**target['functions'], 'unapproved': 'hot'}},
+                        {**target, 'functions': {**target['functions'], 'sub0h264_filterLumaMve': 'cold'}}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                builder.validate_target_ownership(base, changed, '\n')
+        cold = 'define void @cold() {\n  call void @sub0h264_lumaMotionCompFir()\n  ret void\n}\n'
+        with self.assertRaisesRegex(ValueError, 'cold code requires'):
+            builder.validate_target_ownership(base, target, cold)
+
     def test_frontend_optimization_and_lto_cannot_change_selection(self):
         with tempfile.TemporaryDirectory() as directory:
             for flags in (["-Oz"], ["-O2", "-Oz"], ["-O2", "-flto"], []):
@@ -221,7 +238,7 @@ class PartitionBuildTests(unittest.TestCase):
     def test_real_arm_selection_and_table_ownership(self):
         self.assertEqual(self.manifest["name"], "h264-decoder")
         self.assertEqual(len(self.membership["promotion_mapping"]), 209)
-        self.assertEqual(sum(v == "hot" for v in self.membership["functions"].values()), 228)
+        self.assertEqual(sum(v == "hot" for v in self.membership["functions"].values()), 232)
         preopt = (self.arm / "preopt.ll").read_text(encoding="utf-8")
         for helper in ("chromaMotionComp", "inverseHadamard2x2", "dequantChromaDcValues"):
             self.assertNotIn(helper, preopt)

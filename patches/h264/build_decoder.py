@@ -65,6 +65,29 @@ def canonical_native_type(name):
     return re.sub(r"(\d+)ul\b", r"\1u", name)
 
 
+def validate_target_ownership(base, target, cold):
+    """Allow target-only hot luma kernels, never a changed shared owner."""
+    common = base['functions'].keys() & target['functions'].keys()
+    if base['constants'] != target['constants'] or any(
+            base['functions'][name] != target['functions'][name] for name in common):
+        raise ValueError('hot target changed frozen definition ownership')
+    # Cold definitions always come from the base frontend and are retained,
+    # even when the hot frontend no longer references a scalar-only helper.
+    scalar_only = {name for name in base['functions'].keys() - target['functions'].keys()
+                   if base['functions'][name] == 'hot'}
+    target_only = target['functions'].keys() - base['functions'].keys()
+    for membership, names in ((base, scalar_only), (target, target_only)):
+        if any(membership['functions'][name] != 'hot' or 'sub0h264' not in name or
+               not any(group in name for group in ('lumaMotionComp', 'filterLumaMve'))
+               for name in names):
+            raise ValueError('target-only definition violates hot luma ownership')
+    cold_references = {match.group()[1:] for body in partition_ir.definitions(cold).values()
+                       for match in re.finditer(partition_ir.SYMBOL, body)}
+    if scalar_only & cold_references:
+        raise ValueError('cold code requires a missing scalar kernel')
+    return sorted(scalar_only), sorted(target_only)
+
+
 def resolve_promotions(ir, config, native=False):
     """Resolve every frozen symbol once; never guess an ambiguous native match."""
     names = set(partition_ir.definitions(ir))
@@ -139,10 +162,15 @@ def compile_modules(output, flags, source=HERE / "g2_h264.cpp", native=False,
         hot_mapping, hot_external = resolve_promotions(hot_ir, config)
         hot, hot_cold, hot_membership = partition_ir.partition(
             hot_ir, config["hot_groups"], sorted(hot_mapping.values()))
-        if (hot_mapping != mapping or hot_external != external or
-                hot_membership["functions"] != membership["functions"] or
-                hot_membership["constants"] != membership["constants"]):
+        if hot_mapping != mapping or hot_external != external:
             raise ValueError("hot target changed frozen definition ownership")
+        scalar_only, target_only = validate_target_ownership(membership, hot_membership, cold)
+        membership['scalar_only_functions'] = scalar_only
+        membership['target_only_functions'] = target_only
+        membership['functions'] = {
+            **{name: owner for name, owner in membership['functions'].items() if owner == 'cold'},
+            **{name: owner for name, owner in hot_membership['functions'].items() if owner == 'hot'},
+        }
         hot = constant_visibility.expose(hot, hot_cold, membership["constants"])
         membership["hot_preopt_sha256"] = hashlib.sha256(hot_preopt.read_bytes()).hexdigest()
     membership["constant_policy"] = "available_externally hot initializers; sole cold owner"

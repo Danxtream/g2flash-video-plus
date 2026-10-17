@@ -21,6 +21,7 @@
 #include "frame.hpp"
 #include "motion.hpp"
 #include "transform.hpp" // clipU8
+#include "luma_mve.hpp"
 
 #include <cstdint>
 #include <algorithm>
@@ -100,7 +101,6 @@ inline void lumaMotionComp(const Frame& ref,
         src = scratch + 2U * scratchStride + 2U;
         stride = scratchStride;
     }
-    const int32_t step = static_cast<int32_t>(stride);
     if (dx == 0U && dy == 0U)
     {
         for (uint32_t row = 0U; row < height; ++row)
@@ -108,6 +108,10 @@ inline void lumaMotionComp(const Frame& ref,
         return;
     }
 
+#if defined(__ARM_FEATURE_MVE) && (__ARM_FEATURE_MVE & 1)
+    lumaMotionCompMve(src, stride, dx, dy, width, height, dst, dstStride);
+#else
+    const int32_t step = static_cast<int32_t>(stride);
     if (dx == 0U || dy == 0U || ((dx & 1U) && (dy & 1U)))
     {
         // Axial fractions and odd/odd diagonals need no centre half-pel.
@@ -169,6 +173,7 @@ inline void lumaMotionComp(const Frame& ref,
             dst[row * dstStride + col] = static_cast<uint8_t>(value);
         }
     }
+#endif
 }
 
 /** Perform chroma bilinear motion compensation.
