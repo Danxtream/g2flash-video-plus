@@ -5,7 +5,10 @@
 enum {
     VIDEO_SYNC_BRIDGE = 5,
     VIDEO_SYNC_BYTES = 24,
-    VIDEO_SYNC_MAIL_ROWS = 4,
+    /* Overflow ends playback. Four rows overflowed on the glasses at 20 fps
+     * when a heavy picture delayed the presenter's poll (2026-10-17). 32 rows
+     * cover about 0.8 s of peer sync traffic for ~0.8 KB of context. */
+    VIDEO_SYNC_MAIL_ROWS = 32,
     VIDEO_SYNC_READY = 1,
     VIDEO_SYNC_TRIGGER = 2,
     VIDEO_SYNC_DONE = 3,
