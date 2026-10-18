@@ -17,12 +17,17 @@ int video_queue_attach(video_nal_queue *q, uint8_t *bytes) {
     return 1;
 }
 int video_queue_extend(video_nal_queue *q, uint8_t *bytes) {
-    if (!q || !bytes || q->capacity != VIDEO_QUEUE_INITIAL) return 0;
+    return video_queue_expand(q, bytes, VIDEO_QUEUE_LEGACY_MAX);
+}
+int video_queue_expand(video_nal_queue *q, uint8_t *bytes, uint32_t capacity) {
+    if (!q || !bytes || q->capacity != VIDEO_QUEUE_INITIAL ||
+        (capacity != VIDEO_QUEUE_LEGACY_MAX && capacity != VIDEO_QUEUE_MAX)) return 0;
     for (uint32_t i = 0; i < q->capacity; ++i)
-        if (q->slots[i].bytes == bytes || q->slots[i].bytes == bytes + VIDEO_SLOT_BYTES) return 0;
-    q->slots[VIDEO_QUEUE_INITIAL] = (video_nal_slot){.bytes = bytes};
-    q->slots[VIDEO_QUEUE_INITIAL + 1] = (video_nal_slot){.bytes = bytes + VIDEO_SLOT_BYTES};
-    q->capacity = VIDEO_QUEUE_MAX;
+        for (uint32_t j = 0; j < capacity - VIDEO_QUEUE_INITIAL; ++j)
+            if (q->slots[i].bytes == bytes + j * VIDEO_SLOT_BYTES) return 0;
+    for (uint32_t i = VIDEO_QUEUE_INITIAL; i < capacity; ++i)
+        q->slots[i] = (video_nal_slot){.bytes = bytes + (i - VIDEO_QUEUE_INITIAL) * VIDEO_SLOT_BYTES};
+    q->capacity = capacity;
     return 1;
 }
 uint32_t video_queue_credits(const video_nal_queue *q) {
@@ -52,13 +57,20 @@ int video_queue_push(video_nal_queue *q, uint32_t sequence,
                        const uint8_t *bytes, uint16_t length) {
     int probe = video_queue_probe(q, sequence, bytes, length);
     if (probe != 1) return probe;
+    video_nal_slot *chosen = 0;
     for (uint32_t i = 0; i < q->capacity; ++i) {
         video_nal_slot *s = &q->slots[i];
         if (s->occupied) continue;
-        for (uint32_t j = 0; j < length; ++j) s->bytes[j] = bytes[j];
-        s->sequence = sequence; s->length = length;
-        s->active = 0;
-        s->occupied = 1; ++q->count; ++q->accepted;
+        /* Retain a full replay window even when the decoder drains each NAL
+         * before the next arrives. First-free reuse would erase it at once. */
+        if (!s->length) { chosen = s; break; }
+        if (!chosen || s->sequence < chosen->sequence) chosen = s;
+    }
+    if (chosen) {
+        for (uint32_t j = 0; j < length; ++j) chosen->bytes[j] = bytes[j];
+        chosen->sequence = sequence; chosen->length = length;
+        chosen->active = 0;
+        chosen->occupied = 1; ++q->count; ++q->accepted;
         return 1;
     }
     return 0;

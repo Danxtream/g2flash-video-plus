@@ -594,6 +594,45 @@ sequences NALs independently and intentionally rejects the active decoder
 stage: its header-only receive probes are not valid H.264 content. Live
 device validation is separate from these mocks and boot/update-start checks.
 
+### Continuous NAL delivery
+
+Status byte 71 bit 6 advertises continuous NAL delivery. A sender enables it
+with START option bit 6 only after both lenses advertise it. Without opt-in,
+the four initial slots and optional six-slot extension are unchanged, as are
+the existing credit replies and transport ACKs. The legacy maximum in status
+byte 49 remains six; opted-in owners can report actual capacity twelve.
+
+Opted-in workers may extend the NAL queue from four to twelve 4096-byte slots
+after the first full decoder-picture boundary. The extension is atomic and
+reserve-checked; failure retains four slots. No heap reserve is reduced. The
+six-record picture timeline and two decoded-picture slots are unchanged.
+
+Opcodes 26 and 27 are the opt-in equivalents of NAL 6 and timed NAL 24, with
+the same ten-byte and eighteen-byte headers. They retain exact replay and
+atomic frame-time admission. Each accepted input can send an optional
+29-byte notification through the existing video reply route, outside the
+publication lock. Its envelope is message 31, source lens, NAL sequence u32,
+page zero, one page, marker 0xd1, sixteen credit bytes, then stream u32.
+The credit bytes are expected NAL u32, legacy packed state/free byte, packed
+result/timeline-room byte, full free count u8, capacity u8, accepted picture
+ordinal u32 and owner token u32. A lost grant or a small reply budget never
+changes an accepted input to a transport refusal.
+
+An owned CREDITS request with flags 3 returns the same sixteen-byte snapshot;
+flags 0/1 retain their six-byte replies. Wide requests require START opt-in.
+The sender validates each lens independently, charges all outstanding NALs
+and picture times against each frozen grant, and does not treat a grant as
+the peer's exact transport ACK. If grants are missing, drain exact ACKs before
+refreshing credits. Pause/seek/report handoffs drain the outstanding writer.
+This protocol changes neither ordinary ACK bytes nor their history size.
+
+Released slots are reused oldest-sequence first, retaining the last capacity
+NALs even under a fast consumer. The sender also bounds the sequence distance
+from its oldest outstanding ACK by the smaller validated lens capacity (four
+until larger paired grants arrive). Counting pending records alone would let
+later completions evict a lost early record before its exact retry. This bound
+does not treat grant receipt as a substitute for either lens's transport ACK.
+
 ### Bounded diagnostics
 
 Status byte 70 bit 0 advertises diagnostics (opcode 7, eight-byte request).

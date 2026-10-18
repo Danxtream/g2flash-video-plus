@@ -22,7 +22,8 @@ static int video_refused(customCfwContext *ctx, const uint8_t *data, uint16_t si
         video_diag_write32(p, serial); video_diag_write32(p + 4, VIDEO_TICK);
         if (data && size >= 8) memcpy(p + 8, data + 4, 4);
         p[12] = data && size > 1 ? data[1] : 255;
-        if ((p[12] == VIDEO_CONTROL_NAL || p[12] == VIDEO_CONTROL_NAL_TIMED) && size >= 10)
+        if ((p[12] == VIDEO_CONTROL_NAL || p[12] == VIDEO_CONTROL_NAL_TIMED ||
+             p[12] == VIDEO_CONTROL_NAL_FLOW || p[12] == VIDEO_CONTROL_NAL_TIMED_FLOW) && size >= 10)
             memcpy(p + 8, data + 6, 4);
         p[13] = data && size >= 9 && p[12] == VIDEO_CONTROL_PAGE ? data[8] : 0;
         p[14] = reason; p[15] = route->reply_capacity;

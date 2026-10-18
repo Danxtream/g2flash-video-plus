@@ -29,7 +29,7 @@ static uint32_t cancel_new, expire_new, fail_publication, defer_reclaimed;
 static uint32_t feed, fed, stream_ok, corrupt_guard, suppress_park;
 static uint32_t consume_enabled, decoded_calls, consumed_frames, decode_paused, refuse_extension;
 static uint32_t upload_limit;
-static uint32_t queued_upload, dither_fixture, timed_upload;
+static uint32_t queued_upload, dither_fixture, timed_upload, flow_upload;
 static uint32_t cycle_reads, clock_inits, calibrations, crc_calls, anomalous_clock;
 static uint32_t forced_cycles, force_cycles;
 static uint32_t evidence_drain, evidence_next, evidence_checked, evidence_was_full;
@@ -1465,6 +1465,8 @@ int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
         assert(header + bytes <= VIDEO_RECORD_LIMIT);
     }
     memcpy(record + header, nal, bytes);
+    if (flow_upload) record[1] = header == VIDEO_NAL_TIMED_HEADER_BYTES ?
+        VIDEO_CONTROL_NAL_TIMED_FLOW : VIDEO_CONTROL_NAL_FLOW;
     uint32_t limit = tick() + 3000;
     if (queued_upload && !timed_upload && sequence >= 2) {
         /* This fixture emits exactly one terminating slice per picture;
@@ -1634,6 +1636,7 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
     uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
     control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_QUEUED_PRESENTATION;
     if (dither_fixture) p[18] |= VIDEO_DITHER_PRESENTATION;
+    if (flow_upload) p[18] |= VIDEO_DELIVERY_FLOW;
     if (partner_native) p[18] |= VIDEO_PRESENT_NATIVE;
     if (prefix) { p[18] |= VIDEO_START_PAUSED; p[19] = prefix; }
     cfw_message_route route = control_route; route.targets = mode ? CFW_MESSAGE_BOTH : CFW_MESSAGE_LEFT;
@@ -1801,6 +1804,79 @@ static void timed_input(void) {
     assert(video_control_received(record, sizeof(record), &control_route));
     pool_drain(); finish();
     puts("timed NAL records publish frame time and NAL together; credits report timeline room PASS");
+}
+static void flow_input(void) {
+    for (uint32_t flow = 0; flow < 2; ++flow) for (uint32_t here = 1; here <= 2; ++here) {
+        configure(); request_next = 0;
+        assert(video_timeline_configure(&context.video_control.timeline, 1, 2000, 0, 20, 1));
+        context.video_control.owner_origin = 1;
+        uint8_t p[VIDEO_START_BYTES], snapshot[VIDEO_STATUS_BYTES];
+        control_command(p, VIDEO_CONTROL_START, 1);
+        p[18] = VIDEO_QUEUED_PRESENTATION | (flow ? VIDEO_DELIVERY_FLOW : 0);
+        assert(!control_snapshot(p, 24, snapshot));
+        assert(snapshot[49] == 6 && snapshot[71] & VIDEO_DELIVERY_FLOW);
+        pool_drain(); await_ready();
+        video_owner *owner = context.video_owner;
+        uint32_t used = owner->storage.used, limit = owner->storage.limit;
+        worker_thread = 1;
+        assert(video_worker_picture_complete(owner->token, 1));
+        worker_thread = 0;
+        uint32_t capacity = flow ? 12 : 6;
+        assert(owner->queue.capacity == capacity);
+        assert(owner->storage.limit == limit + (capacity - 4) * VIDEO_SLOT_BYTES);
+        assert(owner->storage.used == used + (capacity - 4) * VIDEO_SLOT_BYTES + 36);
+        cfw_message_route route = control_route; route.here = here; route.reply_capacity = 200;
+        uint8_t record[VIDEO_NAL_TIMED_HEADER_BYTES + 2] = {31, VIDEO_CONTROL_NAL_FLOW};
+        video_write32(record + 2, 1); record[10] = 0x67;
+        control_reply_size = 0;
+        int result = video_control_received(record, VIDEO_NAL_HEADER_BYTES + 1, &route);
+        if (!flow) assert(result && !owner->queue.accepted);
+        else {
+            assert(!result && control_reply_size == VIDEO_FLOW_REPLY_BYTES && control_reply[1] == here &&
+                control_reply[8] == VIDEO_FLOW_REPLY_MARKER && video_read32(control_reply + 25) == 1 &&
+                control_reply[15] == 11 && control_reply[16] == 12 &&
+                video_read32(control_reply + 21) == owner->token);
+            // Exact replay produces another live grant but no second allocation/admission.
+            assert(!video_control_received(record, VIDEO_NAL_HEADER_BYTES + 1, &route));
+            assert(owner->queue.accepted == 1);
+            video_write32(record + 6, 1); record[10] = 0x68;
+            route.reply_capacity = 9; control_reply_size = 0;
+            assert(!video_control_received(record, VIDEO_NAL_HEADER_BYTES + 1, &route) && !control_reply_size);
+            route.reply_capacity = 200;
+            timed_record(record, 2, 1, 0, 0x65); record[1] = VIDEO_CONTROL_NAL_TIMED_FLOW;
+            fail_reply = 1;
+            assert(!video_control_received(record, sizeof(record), &route));
+            fail_reply = 0;
+            assert(owner->queue.accepted == 3 && context.video_control.timeline.accepted == 1);
+            assert(!video_control_received(record, sizeof(record), &route));
+            assert(owner->queue.accepted == 3 && context.video_control.timeline.accepted == 1);
+            assert(control_reply[15] == 9 && control_reply[16] == 12 &&
+                video_read32(control_reply + 17) == 1 && (control_reply[14] >> 5) == 5);
+            cfw_message_route wrong = route; wrong.origin = 2;
+            assert(video_control_received(record, sizeof(record), &wrong));
+            assert(owner->queue.accepted == 3);
+        }
+        control_command(p, VIDEO_CONTROL_CREDITS, 1);
+        video_write32(p + 12, owner->token); video_write32(p + 16, owner->token);
+        video_write32(p + 20, VIDEO_CREDITS_TIMELINE | VIDEO_CREDITS_WIDE);
+        uint8_t credits[VIDEO_CREDITS_WIDE_BYTES] = {0};
+        control_reply_size = 0;
+        int answer = video_control_received(p, sizeof(p), &route);
+        if (flow) {
+            assert(control_reply_size == VIDEO_REPLY_HEADER_BYTES + sizeof(credits));
+            memcpy(credits, control_reply + VIDEO_REPLY_HEADER_BYTES, sizeof(credits));
+            assert(!answer && credits[6] == 9 && credits[7] == 12 &&
+                video_read32(credits + 12) == owner->token);
+        } else assert(answer && control_reply[VIDEO_REPLY_HEADER_BYTES + 5] == VIDEO_CONTROL_FORMAT);
+        finish();
+    }
+    puts("START opt-in, legacy six slots, wide twelve slots, grant loss, replay and owner gates PASS");
+}
+static void flow_consumer(void) {
+    flow_upload = timed_upload = 1;
+    // Only the RIGHT coordinator applies a paired pause; LEFT follows its wire command.
+    queued_consumer_mode(0, 1); queued_consumer_mode(1, 0); queued_consumer_mode(2, 1);
+    flow_upload = timed_upload = 0;
 }
 static void dither_consumer(void) {
     dither_fixture = 1;
@@ -2785,7 +2861,7 @@ static void radio_contract(void) {
     configure(); request_next = 0;
     uint8_t p[VIDEO_START_BYTES], report[VIDEO_STATUS_BYTES];
     control_command(p, VIDEO_CONTROL_CAPABILITIES, 0);
-    assert(!control_snapshot(p, 8, report) && report[71] == 0xbf && !radio_acquires);
+    assert(!control_snapshot(p, 8, report) && report[71] == (0xbf | VIDEO_DELIVERY_FLOW) && !radio_acquires);
     control_command(p, VIDEO_CONTROL_START, 1); p[18] = VIDEO_RADIO_OFF;
     assert(!control_snapshot(p, 24, report));
     assert(!control_snapshot(p, 24, report) && !radio_acquires);
@@ -2916,6 +2992,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "phone-pacing")) phone_pacing();
     else if (!strcmp(argv[1], "timed-consumer")) timed_consumer();
     else if (!strcmp(argv[1], "timed-input")) timed_input();
+    else if (!strcmp(argv[1], "flow-input")) flow_input();
+    else if (!strcmp(argv[1], "flow-consumer")) flow_consumer();
     else if (!strcmp(argv[1], "dither-consumer")) dither_consumer();
     else if (!strcmp(argv[1], "paired-consumer")) paired_consumer();
     else if (!strcmp(argv[1], "playback-controls")) playback_controls();

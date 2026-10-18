@@ -34,6 +34,14 @@ enum {
     /* The phone's audio clock re-anchors the coordinator's picture schedule:
      * stream, both owner tokens, picture ordinal, then left and right lens ticks. */
     VIDEO_CONTROL_PACE = 25,
+    VIDEO_CONTROL_NAL_FLOW = 26,
+    VIDEO_CONTROL_NAL_TIMED_FLOW = 27,
+    /* Capability and START opt-in; old owners keep their exact six-slot path. */
+    VIDEO_DELIVERY_FLOW = 64,
+    VIDEO_FLOW_REPLY_BYTES = 29,
+    VIDEO_FLOW_REPLY_MARKER = 0xd1,
+    VIDEO_CREDITS_WIDE = 2,
+    VIDEO_CREDITS_WIDE_BYTES = 16,
     VIDEO_PACE_BYTES = 32,
     VIDEO_NAL_TIMED_HEADER_BYTES = 18,
     VIDEO_TIMED_TIMELINE_REFUSED = -4,

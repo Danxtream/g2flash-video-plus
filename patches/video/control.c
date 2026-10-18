@@ -52,7 +52,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     p[44] = VIDEO_FRAME_REFERENCES; p[45] = VIDEO_FRAME_DPB;
     p[46] = 1; /* Chroma skipped. */
     p[47] = 1; /* Legacy single-slice byte kept for older apps; playback capability byte 7 bit 3 advertises multi-slice pictures. */
-    p[48] = VIDEO_QUEUE_INITIAL; p[49] = VIDEO_QUEUE_MAX;
+    p[48] = VIDEO_QUEUE_INITIAL; p[49] = VIDEO_QUEUE_LEGACY_MAX;
     video_queue_report queue;
     video_worker_queue_report_locked(&queue);
     p[50] = queue.capacity; p[51] = queue.credits;
@@ -65,7 +65,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
         __ATOMIC_ACQUIRE) << VIDEO_POWER_STEP_SHIFT);
     p[70] = 7 | VIDEO_FEATURE_CREDITS | VIDEO_FEATURE_DECODE_TOTALS |
         (1u << VIDEO_STATUS_EXTENSION_SHIFT); /* Advertise one 64-byte STATUS extension. */
-    p[71] = VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES | VIDEO_QUEUED_PRESENTATION | VIDEO_PAIRED_PRESENTATION | VIDEO_START_PAUSED | VIDEO_DITHER_PRESENTATION;
+    p[71] = VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES | VIDEO_QUEUED_PRESENTATION | VIDEO_PAIRED_PRESENTATION | VIDEO_START_PAUSED | VIDEO_DITHER_PRESENTATION | VIDEO_DELIVERY_FLOW;
     video_write32(p + 72, queue.gap_deadline);
     video_write32(p + 76, queue.gap_sequence);
     video_write32(p + 80, ctx->video_presentation.presented);
@@ -79,22 +79,33 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
 
 /* Credits are a frozen owner-bound snapshot, not an acknowledgement that a
  * peer accepted input. Both-target senders must account each lens separately. */
-static void video_credit_snapshot(customCfwContext *ctx, video_control_replay *entry) {
+static void video_credit_encode(customCfwContext *ctx, uint8_t result, uint32_t flags, uint8_t *p) {
     video_queue_report queue;
     video_worker_queue_report_locked(&queue);
     uint32_t state = video_lifecycle_state(&ctx->video);
-    uint8_t *p = entry->snapshot;
-    entry->snapshot_bytes = VIDEO_CREDITS_BYTES;
     video_write32(p, queue.expected);
-    p[4] = (entry->result ? 0 : queue.credits) |
-        (queue.capacity == VIDEO_QUEUE_MAX ? VIDEO_CREDIT_CAPACITY_SIX : 0) |
+    p[4] = (result ? 0 : queue.credits > 6 ? 6 : queue.credits) |
+        (queue.capacity >= VIDEO_QUEUE_LEGACY_MAX ? VIDEO_CREDIT_CAPACITY_SIX : 0) |
         (state << VIDEO_CREDIT_STATE_SHIFT) | (queue.gap_deadline ? VIDEO_CREDIT_GAP : 0);
-    p[5] = entry->result ? entry->result : ctx->video_control.error;
-    if (entry->length == VIDEO_CREDITS_TIMELINE_REQUEST_BYTES) {
+    p[5] = result ? result : ctx->video_control.error;
+    if (flags & VIDEO_CREDITS_TIMELINE) {
         const video_timeline *t = &ctx->video_control.timeline;
-        uint32_t room = entry->result ? 0 : VIDEO_TIMELINE_RECORDS - t->count;
+        uint32_t room = result ? 0 : VIDEO_TIMELINE_RECORDS - t->count;
         p[5] = (p[5] & VIDEO_CREDIT_RESULT_MASK) | room << VIDEO_CREDIT_TIMELINE_SHIFT;
     }
+    if (flags & VIDEO_CREDITS_WIDE) {
+        p[6] = result ? 0 : queue.credits; p[7] = queue.capacity;
+        video_write32(p + 8, ctx->video_control.timeline.accepted);
+        video_write32(p + 12, ctx->video.token);
+    }
+}
+static void video_credit_snapshot(customCfwContext *ctx, video_control_replay *entry) {
+    uint32_t flags = entry->length == VIDEO_CREDITS_TIMELINE_REQUEST_BYTES ? video_read32(entry->command + 20) : 0;
+    if (flags != VIDEO_CREDITS_TIMELINE &&
+        (flags != (VIDEO_CREDITS_TIMELINE | VIDEO_CREDITS_WIDE) ||
+         !(ctx->video_control.options & VIDEO_DELIVERY_FLOW))) flags = 0;
+    entry->snapshot_bytes = flags & VIDEO_CREDITS_WIDE ? VIDEO_CREDITS_WIDE_BYTES : VIDEO_CREDITS_BYTES;
+    video_credit_encode(ctx, entry->result, flags, entry->snapshot);
 }
 
 /* Publish a timed record's frame time and NAL together, or neither: a frame
@@ -157,7 +168,9 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
     }
     if (op == VIDEO_CONTROL_CREDITS) {
         if (n != VIDEO_CREDITS_REQUEST_BYTES && (n != VIDEO_CREDITS_TIMELINE_REQUEST_BYTES ||
-            video_read32(p + 20) != VIDEO_CREDITS_TIMELINE)) return VIDEO_CONTROL_FORMAT;
+            (video_read32(p + 20) != VIDEO_CREDITS_TIMELINE &&
+             (video_read32(p + 20) != (VIDEO_CREDITS_TIMELINE | VIDEO_CREDITS_WIDE) ||
+              !(s->options & VIDEO_DELIVERY_FLOW))))) return VIDEO_CONTROL_FORMAT;
         uint32_t token = video_read32(p + (here == CFW_MESSAGE_LEFT ? 12 : 16));
         if (!token || token != ctx->video.token || video_read32(p + 8) != s->stream ||
             origin != s->owner_origin || !s->start_guard ||
@@ -184,7 +197,8 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
     if (op == VIDEO_CONTROL_START) {
         if ((n != VIDEO_START_BYTES && n != VIDEO_START_GEOMETRY_BYTES && n != VIDEO_START_PICTURE_BYTES) ||
             p[16] != VIDEO_FRAME_REFERENCES || p[17] != VIDEO_FRAME_DPB ||
-            p[18] & ~(VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES | VIDEO_QUEUED_PRESENTATION | VIDEO_PAIRED_PRESENTATION | VIDEO_START_PAUSED | VIDEO_DITHER_PRESENTATION) ||
+            p[18] & ~(VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES | VIDEO_QUEUED_PRESENTATION | VIDEO_PAIRED_PRESENTATION | VIDEO_START_PAUSED | VIDEO_DITHER_PRESENTATION | VIDEO_DELIVERY_FLOW) ||
+            ((p[18] & VIDEO_DELIVERY_FLOW) && !(p[18] & VIDEO_QUEUED_PRESENTATION)) ||
             ((p[19] || (p[18] & (VIDEO_START_PAUSED | VIDEO_DITHER_PRESENTATION))) && !(p[18] & VIDEO_QUEUED_PRESENTATION)))
             return VIDEO_CONTROL_FORMAT;
         video_geometry geometry = {p[12] | (uint16_t)p[13] << 8, p[14] | (uint16_t)p[15] << 8,
@@ -264,19 +278,37 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
 static int video_control_command(const uint8_t *data, uint16_t size,
                                   const cfw_message_route *route, uint8_t *reply) {
     if (data && size >= 2 && data[0] == VIDEO_MESSAGE_ID &&
-        (data[1] == VIDEO_CONTROL_NAL || data[1] == VIDEO_CONTROL_NAL_TIMED)) {
-        uint32_t header = data[1] == VIDEO_CONTROL_NAL ? VIDEO_NAL_HEADER_BYTES : VIDEO_NAL_TIMED_HEADER_BYTES;
+        (data[1] == VIDEO_CONTROL_NAL || data[1] == VIDEO_CONTROL_NAL_TIMED ||
+         data[1] == VIDEO_CONTROL_NAL_FLOW || data[1] == VIDEO_CONTROL_NAL_TIMED_FLOW)) {
+        int flow = data[1] == VIDEO_CONTROL_NAL_FLOW || data[1] == VIDEO_CONTROL_NAL_TIMED_FLOW;
+        int timed = data[1] == VIDEO_CONTROL_NAL_TIMED || data[1] == VIDEO_CONTROL_NAL_TIMED_FLOW;
+        uint32_t header = timed ? VIDEO_NAL_TIMED_HEADER_BYTES : VIDEO_NAL_HEADER_BYTES;
         if (size <= header || size > VIDEO_RECORD_LIMIT ||
             !video_route_valid(route)) return video_refused(peekCustomCfwContext(), data, size, route, VIDEO_REFUSAL_FORMAT, 0, 0, 0);
         customCfwContext *ctx = peekCustomCfwContext();
         if (!ctx || !ctx->image_mutex || !video_control_wait(ctx, VIDEO_STOP_LIMIT_MS))
             return video_refused(ctx, data, size, route, VIDEO_REFUSAL_LOCK, 0, 0, 0);
         video_fold_signals(ctx);
-        int copied = data[1] == VIDEO_CONTROL_NAL_TIMED ? video_control_timed_nal(ctx, data, size, route) :
+        if (flow && !(ctx->video_control.options & VIDEO_DELIVERY_FLOW)) {
+            video_control_give(ctx); return video_refused(ctx, data, size, route, VIDEO_REFUSAL_FORMAT, 0, 0, 0);
+        }
+        int copied = timed ? video_control_timed_nal(ctx, data, size, route) :
             video_worker_receive_nal_locked(video_read32(data + 2),
             video_read32(data + 6), data + VIDEO_NAL_HEADER_BYTES,
             size - VIDEO_NAL_HEADER_BYTES, route->origin);
+        uint8_t grant[VIDEO_FLOW_REPLY_BYTES];
+        int report = copied > 0 && flow && route->reply_capacity >= VIDEO_FLOW_REPLY_BYTES;
+        if (report) {
+            grant[0] = VIDEO_MESSAGE_ID; grant[1] = route->here;
+            video_write32(grant + 2, video_read32(data + 6));
+            grant[6] = 0; grant[7] = 1; grant[8] = VIDEO_FLOW_REPLY_MARKER;
+            video_credit_encode(ctx, 0, VIDEO_CREDITS_TIMELINE | VIDEO_CREDITS_WIDE, grant + 9);
+            video_write32(grant + 25, video_read32(data + 2));
+        }
         video_control_give(ctx);
+        /* A lost optional grant must never turn an accepted NAL into a NACK.
+         * The sender drains outstanding ACKs then refreshes credits normally. */
+        if (report) (void)cfw_message_video_reply(route, grant, sizeof(grant));
         return copied > 0 ? 0 : video_refused(ctx, data, size, route, VIDEO_REFUSAL_COMMAND, 0, 0, (uint32_t)copied);
     }
     if (!data || size < VIDEO_CONTROL_HEADER_BYTES || data[0] != VIDEO_MESSAGE_ID ||
@@ -517,7 +549,8 @@ static int video_control_command(const uint8_t *data, uint16_t size,
 int video_control_received(const uint8_t *data, uint16_t size,
                             const cfw_message_route *route) {
     if (data && size >= 2 && data[0] == VIDEO_MESSAGE_ID &&
-        (data[1] == VIDEO_CONTROL_NAL || data[1] == VIDEO_CONTROL_NAL_TIMED))
+        (data[1] == VIDEO_CONTROL_NAL || data[1] == VIDEO_CONTROL_NAL_TIMED ||
+         data[1] == VIDEO_CONTROL_NAL_FLOW || data[1] == VIDEO_CONTROL_NAL_TIMED_FLOW))
         return video_control_command(data, size, route, 0);
     if (!data || size < VIDEO_CONTROL_HEADER_BYTES || !video_route_valid(route)) return -1;
     customCfwContext *ctx = peekCustomCfwContext();

@@ -16,6 +16,25 @@ static int checked_push(video_nal_queue *q, uint32_t sequence, const uint8_t *by
     return pushed;
 }
 
+static void replay_retention(void) {
+    for (uint32_t capacity = 4; capacity <= 12; capacity += 2) {
+        if (capacity == 8 || capacity == 10) continue;
+        video_nal_queue q; video_queue_init(&q, 17);
+        uint8_t slots[VIDEO_QUEUE_MAX][VIDEO_SLOT_BYTES];
+        for (uint32_t i = 0; i < capacity; ++i) assert(video_queue_attach(&q, slots[i]));
+        const uint8_t bytes[] = {0x61, 7};
+        for (uint32_t sequence = 0; sequence < 3 * capacity; ++sequence) {
+            assert(checked_push(&q, sequence, bytes, sizeof(bytes)) == 1);
+            video_nal_view view;
+            assert(video_queue_claim(&q, 17, &view) && view.sequence == sequence);
+            assert(video_queue_release(&q, &view));
+            uint32_t oldest = sequence >= capacity ? sequence - capacity + 1 : 0;
+            for (uint32_t retry = oldest; retry <= sequence; ++retry)
+                assert(checked_push(&q, retry, bytes, sizeof(bytes)) == 2);
+            if (oldest) assert(checked_push(&q, oldest - 1, bytes, sizeof(bytes)) == VIDEO_QUEUE_STALE);
+        }
+    }
+}
 static void ordering(void) {
     const uint8_t permutations[6][3] = {{1,2,3},{1,3,2},{2,1,3},{2,3,1},{3,1,2},{3,2,1}};
     uint8_t slots[VIDEO_QUEUE_INITIAL][VIDEO_SLOT_BYTES], extension[2 * VIDEO_SLOT_BYTES];
@@ -41,7 +60,7 @@ static void ordering(void) {
             assert(checked_push(&q, i, nal, 2) == 2 && q.accepted == 4);
             assert(checked_push(&q, i, conflict, 2) == VIDEO_QUEUE_CONFLICT);
         }
-        uint32_t overwritten = q.slots[0].sequence;
+        uint32_t overwritten = 0; /* Evict the oldest sequence, not a physical slot. */
         assert(checked_push(&q, 4, nal, 2) == 1);
         assert(checked_push(&q, overwritten, nal, 2) == VIDEO_QUEUE_STALE);
         assert(video_queue_extend(&q, extension) && q.capacity == 6);
@@ -108,6 +127,7 @@ static void recovery(void) {
 }
 
 int main(void) {
+    replay_retention();
     ordering();
     recovery();
     video_nal_queue q, other;

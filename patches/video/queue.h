@@ -11,7 +11,8 @@ enum {
     VIDEO_HEADERS_PPS = 2,
     VIDEO_HEADERS_IDR = 4,
     VIDEO_QUEUE_INITIAL = 4,
-    VIDEO_QUEUE_MAX = 6,
+    VIDEO_QUEUE_LEGACY_MAX = 6,
+    VIDEO_QUEUE_MAX = 12,
     VIDEO_SLOT_BYTES = 4096,
     VIDEO_NAL_HEADER_BYTES = 10,
     VIDEO_RAW_NAL_BYTES = VIDEO_SLOT_BYTES - VIDEO_NAL_HEADER_BYTES
@@ -45,6 +46,8 @@ void video_queue_init(video_nal_queue *, uint32_t token);
 int video_queue_attach(video_nal_queue *, uint8_t *bytes);
 /* Publish two prepared extension slots together, never a capacity of five. */
 int video_queue_extend(video_nal_queue *, uint8_t *bytes);
+/* A negotiated owner may publish a larger contiguous extension atomically. */
+int video_queue_expand(video_nal_queue *, uint8_t *bytes, uint32_t capacity);
 /* Free credits include the reserved expected slot; future distance is bounded. */
 uint32_t video_queue_credits(const video_nal_queue *);
 /* Copy expected/bounded future NALs; retain a slot for the missing expected

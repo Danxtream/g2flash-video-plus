@@ -11,6 +11,12 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class WorkerTests(unittest.TestCase):
+    def test_flow_opt_in_wide_credits_replay_small_routes_and_lost_grants(self):
+        self.check_case("flow-input")
+
+    def test_flow_synthetic_playback_both_bridge_roles_pause_and_reclaim(self):
+        self.check_case("flow-consumer")
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()

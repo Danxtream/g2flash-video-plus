@@ -696,18 +696,20 @@ int video_worker_picture_complete(uint32_t token, int dpb_full) {
     int attempt = dpb_full && owner->queue.capacity == VIDEO_QUEUE_INITIAL &&
                   !owner->extension_attempted;
     if (attempt) owner->extension_attempted = 1;
+    uint32_t capacity = ctx->video_control.options & VIDEO_DELIVERY_FLOW ?
+        VIDEO_QUEUE_MAX : VIDEO_QUEUE_LEGACY_MAX;
     video_control_give(ctx);
     if (!attempt) return 1;
+    uint32_t extension = (capacity - VIDEO_QUEUE_INITIAL) * VIDEO_SLOT_BYTES;
     uint32_t original_limit = owner->storage.limit;
-    owner->storage.limit += (VIDEO_QUEUE_MAX - VIDEO_QUEUE_INITIAL) * VIDEO_SLOT_BYTES;
+    owner->storage.limit += extension;
     /* The caller is the worker at a decoder boundary. It cannot acknowledge
      * park or be reclaimed while its own ledger allocation is in progress. */
-    uint8_t *bytes = video_storage_alloc(&owner->storage,
-        (VIDEO_QUEUE_MAX - VIDEO_QUEUE_INITIAL) * VIDEO_SLOT_BYTES);
+    uint8_t *bytes = video_storage_alloc(&owner->storage, extension);
     int published = 0;
     if (bytes && video_control_take(ctx)) {
         if (!video_lifecycle_cancelled(&ctx->video, token) && video_lease_valid(ctx))
-            published = video_queue_extend(&owner->queue, bytes);
+            published = video_queue_expand(&owner->queue, bytes, capacity);
         video_control_give(ctx);
     }
     if (!published) {
