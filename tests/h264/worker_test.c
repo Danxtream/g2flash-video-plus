@@ -1913,7 +1913,54 @@ static void consumer(void) {
     assert(context.video_owner && ((video_owner *)context.video_owner)->queue.consumed == 0);
     pool_drain(); finish();
     assert(context.video_control.error == VIDEO_CONTROL_INPUT);
+    assert(context.video_failure.valid && !context.video_owner);
+    assert(video_read32(context.video_failure.detail + 20) == 0 &&
+           video_read32(context.video_failure.detail + 24) == 2 &&
+           video_read32(context.video_failure.detail + 28) == 7 &&
+           video_read32(context.video_failure.detail + 40) == 3);
+    control_command(p, VIDEO_CONTROL_DIAGNOSTICS, 0);
+    p[8] = VIDEO_FAILURE_DIAGNOSTICS; p[9] = p[10] = p[11] = 0;
+    assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED && snapshot[7] == 1);
+    assert(!memcmp(snapshot + 8, context.video_failure.detail + 8, 120));
+    control_command(p, VIDEO_CONTROL_START, 2);
+    assert(control_snapshot(p, VIDEO_START_BYTES, snapshot) == VIDEO_CONTROL_ACCEPTED && !context.video_failure.valid);
+    pool_drain(); await_ready();
+    control_command(p, VIDEO_CONTROL_STOP, 2);
+    assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); finish();
     puts("64 queued Y planes match; NAL/picture counts differ; semantic error retires without credit PASS");
+}
+
+static void failure_history(void) {
+    configure();
+    assert(sizeof(video_failure_nal) == 12 && sizeof(g2_h264_diagnostic) == 48);
+    const uint8_t vector[] = {'h', 'e', 'l', 'l', 'o'};
+    assert(video_failure_checksum(vector, 5) == 0x4f9f2cabu);
+    video_owner owner = {0}; owner.context = &context; owner.token = 42;
+    context.video_control.stream = 70;
+    uint8_t bytes[] = {0x61, 1, 2};
+    owner.current_input = bytes;
+    owner.current_nal = (video_failure_nal){20, video_failure_checksum(bytes, 3), 3, 1, 0};
+    owner.recent_count = VIDEO_FAILURE_HISTORY; owner.recent_next = 3;
+    for (uint32_t i = 0; i < VIDEO_FAILURE_HISTORY; ++i)
+        owner.recent[(3 + i) % VIDEO_FAILURE_HISTORY] = (video_failure_nal){12 + i, i * 17, 10 + i, 1, 0};
+    bytes[1] = 9; owner.allocation_tag = 5; owner.allocation_size = 4096;
+    video_failure_capture(&owner, G2_H264_FAIL_ALLOC);
+    assert(context.video_failure.valid && video_read32(context.video_failure.detail + 20) == 20 &&
+           video_read32(context.video_failure.detail + 32) != video_read32(context.video_failure.detail + 36) &&
+           video_read32(context.video_failure.detail + 96) == 5 &&
+           video_read32(context.video_failure.detail + 100) == 4096);
+    for (uint32_t i = 0; i < 8; ++i)
+        assert(video_read32(context.video_failure.history + 32 + i * 12) == 12 + i);
+    bytes[0] = 7; video_failure_capture(&owner, VIDEO_FAULT_FORMAT);
+    assert(video_read32(context.video_failure.detail + 16) == G2_H264_FAIL_ALLOC);
+    memset(&owner, 0, sizeof(owner));
+    assert(context.video_failure.valid && video_read32(context.video_failure.detail + 12) == 42);
+    context.video_failure.valid = 0; owner.context = &context;
+    video_failure_capture(&owner, VIDEO_FAULT_OWNERSHIP);
+    assert(context.video_failure.valid && video_read32(context.video_failure.detail + 20) == UINT32_MAX &&
+           !video_read32(context.video_failure.detail + 120) && !video_read32(context.video_failure.detail + 124));
+    puts("retained failure, wrapped history, changed input, allocation and checksum evidence PASS");
 }
 static void await_reclaimed(void) {
     uint32_t limit = tick() + 3000;
@@ -2851,6 +2898,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "queue-extension")) queue_extension();
     else if (!strcmp(argv[1], "recovery")) recovery();
     else if (!strcmp(argv[1], "consumer")) consumer();
+    else if (!strcmp(argv[1], "failure-history")) failure_history();
     else if (!strcmp(argv[1], "queued-consumer")) queued_consumer();
     else if (!strcmp(argv[1], "phone-pacing")) phone_pacing();
     else if (!strcmp(argv[1], "timed-consumer")) timed_consumer();

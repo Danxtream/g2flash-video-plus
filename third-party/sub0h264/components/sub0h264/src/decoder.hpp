@@ -192,6 +192,10 @@ public:
     uint32_t diagMbEntered() const noexcept { return diagMbEntered_; }
     uint32_t diagMbCompleted() const noexcept { return diagMbCompleted_; }
     uint32_t diagBitOffset() const noexcept { return diagBitOffset_; }
+    /** Open-picture state before a caller submits another slice. */
+    bool diagPictureOpen() const noexcept { return pictureOpen_; }
+    uint32_t diagNextSliceMb() const noexcept { return nextSliceMb_; }
+    uint32_t diagOpenFrameNum() const noexcept { return openFrameNum_; }
 
     /** DPB memory diagnostics for constrained integrations. */
     uint32_t dpbFrameCapacity() const noexcept { return dpb_.frameCapacity(); }

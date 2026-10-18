@@ -74,6 +74,7 @@ struct State {
     bool frameReady = false;
     bool inputStarted = false;
     uint32_t width = 0, height = 0, references = 0, frameCapacity = 0;
+    g2_h264_diagnostic diagnostic{};
     State() : decoder(sub0h264::H264Decoder::Settings{true}) {
         /* EBSP removal never grows beyond a NAL. Reserve the entire record
          * once, so accepted 4086-byte NALs cannot reallocate scratch storage. */
@@ -165,8 +166,13 @@ static bool validInput(State &state) {
     if (!pps || !sps || !validPps(*pps) || !validSps(state, *sps)) return false;
     br = BitReader(nal.rbspData.data(), nal.rbspData.size());
     SliceHeader header;
-    return parseSliceHeader(br, *sps, *pps, nal.type == NalType::SliceIdr,
-        nal.refIdc, header) == Result::Ok && br.hasBits(1) && !header.fieldPicFlag_ &&
+    const auto parsed = parseSliceHeader(br, *sps, *pps, nal.type == NalType::SliceIdr,
+        nal.refIdc, header);
+    if (parsed == Result::Ok) {
+        state.diagnostic.first_mb = header.firstMbInSlice_;
+        state.diagnostic.frame_num = header.frameNum_;
+    }
+    return parsed == Result::Ok && br.hasBits(1) && !header.fieldPicFlag_ &&
         (header.sliceType_ != SliceType::P || header.numRefIdxActiveL0_ == state.references) &&
         header.disableDeblockingFilter_ <= 2 && header.cabacInitIdc_ <= 2;
 }
@@ -175,17 +181,44 @@ extern "C" g2_h264_result g2_h264_decode(void *handle, const uint8_t *data, uint
     if (!handle) return G2_H264_ERROR;
     auto *state = static_cast<State *>(handle);
     state->frameReady = false;
+    state->diagnostic = {};
+    state->diagnostic.first_mb = state->diagnostic.frame_num = UINT32_MAX;
+    state->diagnostic.picture_open = state->decoder.diagPictureOpen();
+    state->diagnostic.next_mb = state->decoder.diagNextSliceMb();
+    state->diagnostic.open_frame_num = state->decoder.diagOpenFrameNum();
+    state->diagnostic.reject = 1;
     if (!data || !size || size > G2_H264_MAX_NAL_BYTES) return G2_H264_ERROR;
     state->inputStarted = true;
+    state->diagnostic.reject = 2;
     if (!sub0h264::parseNalUnit(data, size, state->nal)) return G2_H264_ERROR;
+    state->diagnostic.reject = 3;
     if (state->width && !validInput(*state)) return G2_H264_ERROR;
+    state->diagnostic.reject = 4;
     switch (state->decoder.processNal(state->nal)) {
         case sub0h264::DecodeStatus::FrameDecoded:
+            state->diagnostic.reject = 0;
             state->frameReady = true;
             return G2_H264_FRAME_READY;
-        case sub0h264::DecodeStatus::NeedMoreData: return G2_H264_CONSUMED;
+        case sub0h264::DecodeStatus::NeedMoreData:
+            state->diagnostic.reject = 0;
+            return G2_H264_CONSUMED;
         default: return G2_H264_ERROR;
     }
+}
+extern "C" int g2_h264_diagnostics(const void *handle, g2_h264_diagnostic *info) {
+    if (!handle || !info) return 0;
+    const auto *state = static_cast<const State *>(handle);
+    *info = state->diagnostic;
+    const auto &decoder = state->decoder;
+    if (info->reject == 4 || !info->reject) {
+        info->stage = decoder.diagStage();
+        info->entered = decoder.diagMbEntered();
+        info->completed = decoder.diagMbCompleted();
+        info->bit_offset = decoder.diagBitOffset();
+        info->allocation_tag = decoder.allocationFailedTag();
+        info->allocation_size = decoder.allocationFailedSize();
+    }
+    return 1;
 }
 extern "C" g2_h264_result g2_h264_frame(const void *handle, g2_h264_frame_info *info) {
     if (!info) return G2_H264_ERROR;

@@ -13,6 +13,7 @@
 #include "video/profile.h"
 #include "video/telemetry.h"
 #include "video/rate.h"
+#include "video/failure.h"
 
 /* Persistent CFW-owned state, independent of EvenHub image containers. The
  * full-panel shadow is an owned heap allocation. This context is anchored in
@@ -152,6 +153,7 @@ typedef struct {
     video_radio_state video_radio;
     video_telemetry_state video_telemetry;
     video_rate_state video_rate;
+    video_failure_record video_failure;
 } customCfwContext;
 
 #define CFW_CTX_SLOT  0x2029f4a8U    /* first word of the CFW-reserved TLSF tail */

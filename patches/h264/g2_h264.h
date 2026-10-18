@@ -29,6 +29,18 @@ typedef struct {
     uint32_t capacity, allocated_frames, allocated_bytes;
 } g2_h264_dpb_info;
 
+/* Reject stage: 1 wrapper, 2 NAL parse, 3 input contract, 4 decoder, 0 success.
+ * Worker diagnostics use 5 for a rejected completed-frame descriptor.
+ * Slice fields are UINT32_MAX until parsed. Open state is from before this NAL,
+ * because a rejected continuation deliberately closes the core's picture. */
+typedef struct {
+    uint32_t reject, stage, entered, completed, bit_offset, first_mb, frame_num;
+    uint32_t picture_open, next_mb, open_frame_num, allocation_tag, allocation_size;
+} g2_h264_diagnostic;
+
+/* Worker-only, allocation-free observation; never changes decoder state. */
+int g2_h264_diagnostics(const void *handle, g2_h264_diagnostic *info);
+
 /* Object storage only; runtime allocations are additional caller-owned RAM. */
 uint32_t g2_h264_size(void);
 uint32_t g2_h264_alignment(void);

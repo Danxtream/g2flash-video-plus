@@ -234,6 +234,7 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         __atomic_store_n(&s->active_deadline, deadline ? deadline : 1, __ATOMIC_RELEASE);
         s->error = 0;
         ctx->video_decode_last = (video_decode_totals){0};
+        __atomic_store_n(&ctx->video_failure.valid, 0, __ATOMIC_RELEASE);
         if (!video_controller_request_locked(VIDEO_CONTROLLER_START)) {
             __atomic_store_n(&s->start_guard, 0, __ATOMIC_RELEASE); s->error = VIDEO_CONTROL_DISPATCH;
             __atomic_fetch_and(&s->controller_reasons, ~VIDEO_CONTROLLER_START, __ATOMIC_ACQ_REL);
@@ -435,6 +436,18 @@ static int video_control_command(const uint8_t *data, uint16_t size,
         int radio = size == VIDEO_CONTROL_HEADER_BYTES + 4 &&
             (data[8] == VIDEO_RADIO_DIAGNOSTICS || data[8] == VIDEO_RADIO_REFUSAL_DIAGNOSTICS) &&
             !data[9] && !data[10] && !data[11];
+        if (data[1] == VIDEO_CONTROL_DIAGNOSTICS && size == 12 &&
+            data[8] == VIDEO_FAILURE_DIAGNOSTICS && data[9] < 2 && !data[10] && !data[11]) {
+            uint8_t *out = entry->snapshot;
+            bzero(out, VIDEO_FAILURE_BYTES);
+            entry->snapshot_bytes = VIDEO_FAILURE_BYTES;
+            entry->result = s->control_generation ? VIDEO_CONTROL_ACCEPTED : VIDEO_CONTROL_STALE;
+            uint32_t valid = __atomic_load_n(&ctx->video_failure.valid, __ATOMIC_ACQUIRE);
+            if (valid) memcpy(out, data[9] ? ctx->video_failure.history : ctx->video_failure.detail, VIDEO_FAILURE_BYTES);
+            out[0] = 1; out[1] = VIDEO_CONTROL_DIAGNOSTICS; out[2] = entry->result;
+            out[3] = VIDEO_FAILURE_DIAGNOSTICS; out[4] = data[9]; out[5] = 1;
+            out[6] = route->here; out[7] = valid;
+        }
         if (data[1] == VIDEO_CONTROL_DIAGNOSTICS && size == 24 &&
             data[8] == VIDEO_RATE_DIAGNOSTICS && data[9] < 3 && !data[10] && !data[11]) {
             entry->snapshot_bytes = data[9] ? VIDEO_DIAGNOSTICS_BYTES : 144;

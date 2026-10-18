@@ -985,6 +985,53 @@ table. Width alignment guarantees an even centered x, while both centered
 row phases are retained. Native scale keeps the scalar path. No new frame
 RAM, extra Y8 copy, decoder change or phase approximation is required.
 
+## Retained Worker Failure Evidence
+
+Diagnostic kind 7 uses opcode 7 with a twelve-byte request: kind at byte 8,
+selector 0 or 1 at byte 9, and zero bytes 10..11. Each frozen reply is 128
+bytes. Bytes 0..7 are protocol, opcode, result, kind, selector, schema 1,
+lens and valid. Before any START the query is stale. The record survives STOP
+and owner reclamation. A new START that passes validation and creates a
+control generation clears it, even if startup subsequently fails. No periodic
+reporting, decoder recovery or power-policy change is implied.
+
+Selector 0 contains little-endian words at these offsets:
+
+| Offset | Field |
+|---|---|
+| 8, 12, 16 | Stream, owner token, exact worker fault |
+| 20, 24, 28 | Input sequence, length, NAL type |
+| 32, 36 | FNV-1a at decoder entry and at failure |
+| 40 | Reject stage: wrapper 1, NAL parse 2, input contract 3, core 4, completed-frame contract 5; 0 means no decoder rejection |
+| 44, 48, 52, 56 | Core stage, MB entered/completed, bit offset |
+| 60, 64 | Parsed first_mb_in_slice and frame_num; UINT32_MAX if unavailable |
+| 68, 72, 76 | Picture-open flag, next MB and open frame_num before this NAL |
+| 80, 84 | Core allocation failure tag and size |
+| 88, 92 | Failure tick and history count |
+| 96, 100 | Runtime allocation failure tag and size |
+| 104, 108, 112, 116 | Power acquire step, peer generation, stream and closed flag |
+| 120, 124 | Input still pinned, decoder constructed |
+
+Selector 1 repeats stream and current sequence at offsets 8 and 12, then the
+history count at 16. At offset 32 are up to eight twelve-byte records, oldest
+first: sequence u32, checksum u32, length u16, NAL type u8, reserved zero u8.
+The current NAL is separate from the previous successfully consumed inputs.
+For a fault outside decode, selector 0 describes the last attempted input,
+or sequence UINT32_MAX/length zero if there was none; the pinned flag is zero
+and no second checksum is taken. A released slot is never sampled.
+
+Checksums are FNV-1a over raw NAL bytes including the header, without Annex B
+prefix: initial 2166136261, then (hash XOR byte) * 16777619 modulo 2^32. This
+cheap diagnostic checksum does not replace transport CRC or prove equality
+against every possible collision. The phone compares against its bounded
+attempted-payload ring; a matching attempt does not prove receipt or ACK.
+
+STATUS error 8 is a broad worker-fault category, including initialization,
+ownership and runtime faults. A returned decoder error maps to INPUT(11).
+The exact fault and reject stage distinguish these cases. START POWER(16)
+retains its acquisition barrier in STATUS byte 69 >> 3; neither error alone
+establishes a physical readiness or decoder root cause.
+
 ## Receive And Clock Evidence
 
 Playback capability byte 7 bit 5 advertises diagnostic kinds 4 and 5. Both use

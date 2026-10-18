@@ -163,7 +163,12 @@ static void lifecycle() {
         CHECK(g2_h264_frame(h.value, &info) == G2_H264_ERROR);
         uint8_t forbidden[] = {0x80};
         CHECK(g2_h264_decode(h.value, forbidden, 1) == G2_H264_ERROR);
+        g2_h264_diagnostic diagnostic;
+        CHECK(g2_h264_diagnostics(h.value, &diagnostic) && diagnostic.reject == 2);
         CHECK(g2_h264_decode(h.value, nullptr, 1) == G2_H264_ERROR);
+        CHECK(g2_h264_diagnostics(h.value, &diagnostic) && diagnostic.reject == 1);
+        CHECK(!g2_h264_diagnostics(nullptr, &diagnostic));
+        CHECK(!g2_h264_diagnostics(h.value, nullptr));
         CHECK(g2_h264_decode(h.value, forbidden, 0) == G2_H264_ERROR);
         CHECK(g2_h264_decode(nullptr, forbidden, 1) == G2_H264_ERROR);
         uint8_t maximum[G2_H264_MAX_NAL_BYTES + 1] = {0x09};
@@ -215,8 +220,15 @@ static void split_picture() {
     CHECK(feed(h.value, idr(0)) == G2_H264_CONSUMED);
     CHECK(g2_h264_frame(h.value, &info) == G2_H264_ERROR && !info.y);
     CHECK(feed(h.value, idr(1)) == G2_H264_FRAME_READY);
+    g2_h264_diagnostic diagnostic;
+    CHECK(g2_h264_diagnostics(h.value, &diagnostic));
+    CHECK(!diagnostic.reject && diagnostic.first_mb == 1 && !diagnostic.frame_num &&
+          diagnostic.picture_open && diagnostic.next_mb == 1 && !diagnostic.open_frame_num);
     CHECK(g2_h264_frame(h.value, &info) == G2_H264_FRAME_READY && info.width == 32 && info.height == 16);
     CHECK(feed(h.value, idr(1)) == G2_H264_ERROR);
+    CHECK(g2_h264_diagnostics(h.value, &diagnostic));
+    CHECK(diagnostic.reject == 4 && diagnostic.stage == 2 &&
+          diagnostic.first_mb == 1 && !diagnostic.picture_open);
 }
 
 static void format_limits() {

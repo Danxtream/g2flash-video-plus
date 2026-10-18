@@ -31,7 +31,58 @@ typedef struct video_owner {
     video_decode_accumulator timing;
     video_presenter *presenter;
     g2_h264_runtime runtime;
+    video_failure_nal recent[VIDEO_FAILURE_HISTORY], current_nal;
+    const uint8_t *current_input;
+    uint32_t recent_count, recent_next, allocation_size, allocation_tag;
 } video_owner;
+
+static void video_failure_word(uint8_t *p, uint32_t value) {
+    for (uint32_t i = 0; i < 4; ++i) p[i] = value >> (8 * i);
+}
+
+/* The pinned decoder worker is the sole writer. Publish last, before park;
+ * context storage survives owner reclamation and is immutable until START. */
+static void video_failure_capture(video_owner *owner, uint32_t fault) {
+    customCfwContext *ctx = owner->context;
+    video_failure_record *saved = &ctx->video_failure;
+    if (__atomic_load_n(&saved->valid, __ATOMIC_ACQUIRE)) return;
+    uint8_t *p = saved->detail;
+    bzero(p, VIDEO_FAILURE_BYTES);
+    video_failure_nal *nal = &owner->current_nal;
+    g2_h264_diagnostic diagnostic = {0};
+    if (owner->decoder) g2_h264_diagnostics(owner->decoder, &diagnostic);
+    if (fault == VIDEO_FAULT_FORMAT && !diagnostic.reject) diagnostic.reject = 5;
+    video_failure_word(p + 8, ctx->video_control.stream);
+    video_failure_word(p + 12, owner->token);
+    video_failure_word(p + 16, fault);
+    video_failure_word(p + 20, nal->length ? nal->sequence : UINT32_MAX);
+    video_failure_word(p + 24, nal->length);
+    video_failure_word(p + 28, nal->type);
+    video_failure_word(p + 32, nal->checksum);
+    if (owner->current_input)
+        video_failure_word(p + 36, video_failure_checksum(owner->current_input, nal->length));
+    memcpy(p + 40, &diagnostic, sizeof(diagnostic));
+    video_failure_word(p + 88, VIDEO_TICK);
+    video_failure_word(p + 92, owner->recent_count);
+    video_failure_word(p + 96, owner->allocation_tag);
+    video_failure_word(p + 100, owner->allocation_size);
+    video_failure_word(p + 104, ctx->video_power.acquire_step);
+    video_failure_word(p + 108, ctx->video_power.peer.generation);
+    video_failure_word(p + 112, ctx->video_power.peer.stream);
+    video_failure_word(p + 116, ctx->video_power.peer.closed);
+    video_failure_word(p + 120, owner->current_input != 0);
+    video_failure_word(p + 124, owner->decoder != 0);
+    bzero(saved->history, VIDEO_FAILURE_BYTES);
+    video_failure_word(saved->history + 8, ctx->video_control.stream);
+    video_failure_word(saved->history + 12, nal->length ? nal->sequence : UINT32_MAX);
+    video_failure_word(saved->history + 16, owner->recent_count);
+    for (uint32_t i = 0; i < owner->recent_count; ++i) {
+        uint32_t slot = (owner->recent_next + VIDEO_FAILURE_HISTORY - owner->recent_count + i) % VIDEO_FAILURE_HISTORY;
+        memcpy(saved->history + 32 + i * sizeof(video_failure_nal),
+               &owner->recent[slot], sizeof(video_failure_nal));
+    }
+    __atomic_store_n(&saved->valid, 1, __ATOMIC_RELEASE);
+}
 
 static int video_presenter_prepare(video_owner *);
 static int video_presenter_produce(video_owner *, const video_frame_descriptor *, uint32_t);
@@ -111,6 +162,7 @@ static void video_fault_locked(customCfwContext *ctx, uint32_t fault) {
 
 static void video_park_owner(video_owner *owner, uint32_t fault) __attribute__((noreturn));
 static void video_park_owner(video_owner *owner, uint32_t fault) {
+    if (fault) video_failure_capture(owner, fault);
     if (owner->decode_pin) {
         /* A fatal C++ callback may abandon its current call. Retire only this
          * worker's pin before park, never an external display user's pin. A
@@ -139,7 +191,15 @@ static void video_runtime_fail(uint32_t fault) {
 }
 static void *video_runtime_alloc(uint32_t size) {
     video_owner *owner = video_current_owner();
-    return owner ? video_storage_alloc(&owner->storage, size) : 0;
+    void *memory = owner ? video_storage_alloc(&owner->storage, size) : 0;
+    if (owner && !memory) {
+        owner->allocation_size = size;
+        owner->allocation_tag = 0;
+        for (uint32_t i = 0; i < VIDEO_ALLOCATION_LIMIT; ++i)
+            if (owner->storage.entries[i].pending && owner->storage.entries[i].requested == size)
+                owner->allocation_tag = owner->storage.entries[i].tag;
+    }
+    return memory;
 }
 static void video_runtime_release(void *memory) {
     video_owner *owner = video_current_owner();
@@ -149,7 +209,11 @@ static void video_runtime_release(void *memory) {
 static int video_runtime_preflight(const g2_h264_request *requests, uint32_t count,
                                     g2_h264_failure *failure) {
     video_owner *owner = video_current_owner();
-    return owner && video_storage_preflight(&owner->storage, requests, count, failure);
+    int ok = owner && video_storage_preflight(&owner->storage, requests, count, failure);
+    if (owner && !ok && failure) {
+        owner->allocation_tag = failure->tag; owner->allocation_size = failure->size;
+    }
+    return ok;
 }
 
 /* Borrow exactly one expected owned slot under publication protection. C++
@@ -173,6 +237,10 @@ static int video_worker_consume(video_owner *owner) {
     }
     video_control_give(ctx);
     if (!claimed) return 0;
+    owner->current_input = view.bytes;
+    owner->current_nal = (video_failure_nal){view.sequence,
+        video_failure_checksum(view.bytes, view.length), view.length, view.bytes[0] & 31, 0};
+    owner->allocation_size = owner->allocation_tag = 0;
     /* With an independent presenter, first-copy shadow allocation could race
      * decoder heap admission and briefly count the future shadow twice.
      * Admit it before the first decode, while no queued picture can trigger. */
@@ -203,9 +271,15 @@ static int video_worker_consume(video_owner *owner) {
     uint32_t fault = decoded == G2_H264_ERROR ? VIDEO_FAULT_FORMAT :
         !released || !unpinned ? VIDEO_FAULT_OWNERSHIP :
         !video_queue_watch(&owner->queue, VIDEO_TICK) ? VIDEO_FAULT_GAP : 0;
+    if (decoded == G2_H264_ERROR) video_failure_capture(owner, fault);
+    if (released) owner->current_input = 0;
     if (fault) video_fault_locked(ctx, fault);
     video_control_give(ctx);
     if (fault) video_runtime_fail(fault);
+    owner->recent[owner->recent_next] = owner->current_nal;
+    owner->recent_next = (owner->recent_next + 1) % VIDEO_FAILURE_HISTORY;
+    if (owner->recent_count < VIDEO_FAILURE_HISTORY) ++owner->recent_count;
+    owner->current_input = 0;
     if (decoded == G2_H264_FRAME_READY) {
         if (!video_worker_picture_complete(owner->token, dpb.allocated_frames == dpb.capacity)) {
             if (!video_lifecycle_cancelled(&ctx->video, owner->token))

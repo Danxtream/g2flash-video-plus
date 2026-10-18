@@ -114,6 +114,9 @@ class WorkerTests(unittest.TestCase):
     def test_ordered_real_decoder_consumes_owned_nals_and_counts_actual_pictures(self):
         self.check_case("consumer")
 
+    def test_failure_checksums_history_and_allocation_survive_owner_reclaim(self):
+        self.check_case("failure-history")
+
     def test_owned_pictures_use_independent_fixed_clock_presenter_and_drain(self):
         self.check_case("queued-consumer")
 
