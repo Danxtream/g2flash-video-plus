@@ -326,6 +326,7 @@ static uint32_t mock_clock_reg(uint32_t address) { return address == 0xe0001000U
 #define VIDEO_CLOCK_CACHED() 2
 #define VIDEO_CLOCK_CYCLES (tick() * 250000u)
 #include "../../patches/video/telemetry.c"
+#include "../../patches/video/hop.c"
 #include "../../patches/video/rate.c"
 #include "../../patches/video/timeline.c"
 #include "../../patches/video/decoded_queue.c"
@@ -2963,9 +2964,36 @@ static void picture_style_contract(void) {
     }
 }
 
+static void hop_diagnostics_contract(void) {
+    for (uint32_t lens = 1; lens <= 2; ++lens) {
+        for (uint32_t capacity = 13; capacity <= 200; capacity += 187) {
+            configure(); request_next = 0;
+            uint8_t p[VIDEO_START_BYTES], out[VIDEO_STATUS_BYTES], frozen[VIDEO_HOP_BYTES];
+            control_command(p, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_HOP_DIAGNOSTICS);
+            assert(!control_variable_pages(p, 12, out, 128, lens, capacity, capacity));
+            assert(out[3] == 8 && out[5] == 1 && out[8] == 172 && !context.video_telemetry.hop.generation);
+            context.video_control.owner_origin = lens;
+            video_hop_state *s = &context.video_telemetry.hop;
+            s->stream = 7; s->token = 101; s->began = s->last = tick();
+            video_hop_sample(s, 6, 20);
+            control_command(p, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_HOP_DIAGNOSTICS); video_write32(p + 12, 7);
+            assert(!control_variable_pages(p, 16, out, 172, lens, capacity, capacity));
+            assert(out[3] == 8 && out[6] == lens && video_read32(out + 8) == 7);
+            assert(video_read32(out + 152) == 1 && video_read32(out + 156) == 20);
+            memcpy(frozen, out, sizeof(frozen)); video_hop_sample(s, 6, 30);
+            assert(!control_variable_pages(p, 16, out, 172, lens, capacity, capacity));
+            assert(!memcmp(out, frozen, sizeof(frozen)));
+            video_write32(p + 4, ++request_next);
+            assert(!control_variable_pages(p, 16, out, 172, lens, capacity, capacity));
+            assert(video_read32(out + 152) == 2 && video_read32(out + 156) == 50);
+        }
+    }
+    puts("hop size discovery, both lenses, small routes and frozen replay PASS");
+}
 int main(int argc, char **argv) {
     assert(argc == 2);
-    if (!strcmp(argv[1], "picture-styles")) picture_style_contract();
+    if (!strcmp(argv[1], "hop-diagnostics")) hop_diagnostics_contract();
+    else if (!strcmp(argv[1], "picture-styles")) picture_style_contract();
     else if (!strcmp(argv[1], "geometry")) geometry_contract();
     else if (!strcmp(argv[1], "normal")) normal();
     else if (!strcmp(argv[1], "allocations")) allocation_failures();

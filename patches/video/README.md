@@ -1113,3 +1113,40 @@ are fixed to the guarded image. Clock transitions, stopped counters, long spans
 or tick skew prevent a trustworthy cycle ratio; raw evidence is retained.
 The rolling steady bracket is at least 250 ms without sleeping or busy-waiting.
 These snapshots do not establish a physical core frequency by themselves.
+
+## Confirmation Timing
+
+Diagnostic kind 8 is observational and changes no ACK or admission rule. A
+twelve-byte opcode-7 request, kind 8 at byte 8 and zeros at 9..11, discovers
+the schema in the normal 128-byte reply: kind at 3, schema 1 at 5 and snapshot
+size 172 at 8. Discover both lenses before requesting the larger body. Older
+firmware keeps its existing reply and does not advertise this schema.
+
+A sixteen-byte request adds the video stream at 12 and returns a frozen
+172-byte body through existing PAGE framing. Header bytes 3..7 are kind,
+reserved zero, schema, responding lens and ingress lens. Stream/token are
+LE32 at 8/12, pending/peak bytes at 16/17, elapsed ticks at 20, outstanding
+forward age sum at 24 and qualification flags at 28. Seven 20-byte rows start
+at 32. Each has LE32 count/sum/maximum and four LE16 histogram bins for
+0..1, 2..8, 9..32 and over 32 ticks. Large bins are not an exact percentile.
+
+Rows are receive-to-first-forward, summed fragment enqueue calls, complete
+record assembly including CRC, local dispatch-to-ACK enqueue, first-forward
+to-peer-ACK arrival, peer-ACK-to-BLE enqueue, and receive-to-confirmation
+enqueue. On ingress it ends at the later of local ACK or peer ACK relay. The
+final row on the bridge peer ends at its own ACK enqueue, not
+at the phone. Donor enqueue return is not physical transmission completion.
+All durations use one lens's clock; cross-lens one-way subtraction is invalid.
+
+Capture starts only in a START-owned generation. Stock-app fast paths are
+unchanged; pre-START private traffic reaches only the inactive guard. No
+allocation, log, wait, task, timer or clock-register write is added per NAL.
+Sixteen bounded identities retain early peer replies, checked against the
+record CRC before classification. Contention, exhaustion, saturation, late
+classification, history recovery and replaced early evidence are explicit
+flags. Peak depth is a lower bound when classification was late. Check final
+sample counts against phone completions before drawing a bottleneck conclusion.
+Mean forwarding depth is completed forward ticks plus outstanding ages,
+divided by elapsed stream ticks, including report and pause time. STOP retains
+the rows; a new START generation replaces them on its first active packet.
+No shared clock, forwarding wait, direct-delivery or throughput fix is added.

@@ -11,6 +11,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class WorkerTests(unittest.TestCase):
+    def test_hop_size_discovery_all_rows_small_routes_and_frozen_replay(self):
+        self.check_case("hop-diagnostics")
+
     def test_flow_opt_in_wide_credits_replay_small_routes_and_lost_grants(self):
         self.check_case("flow-input")
 

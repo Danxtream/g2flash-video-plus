@@ -31,6 +31,7 @@ typedef struct {
     uint8_t ack_count, ack_capacity, packet_capacity;
     uint8_t ack_history[CFW_ACK_HISTORY][CFW_ACK_ENTRY_SIZE];
     uint8_t video_capacity; /* Connection proof, never compression-context state. */
+    uint32_t hop_rx, hop_forward, hop_enqueue_ticks;
 } cfw_message_stream;
 /* Record metadata is copied by value; no transport storage escapes dispatch. */
 typedef struct {
