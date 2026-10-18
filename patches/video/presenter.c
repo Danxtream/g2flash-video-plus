@@ -50,7 +50,9 @@ static void video_presenter_park(video_presenter *p) {
     for (;;) VIDEO_OS_EVENT_WAIT(wake, VIDEO_WAKE_ALL, 0, VIDEO_WAIT_FOREVER);
 }
 
-static void video_presenter_fault(video_owner *owner, uint32_t fault) {
+/* Out of line, so the return address identifies which check failed. */
+__attribute__((noinline)) static void video_presenter_fault(video_owner *owner, uint32_t fault) {
+    video_failure_capture(owner, fault, (uint32_t)__builtin_return_address(0));
     __atomic_store_n(&owner->context->video.fault, fault, __ATOMIC_RELEASE);
     __atomic_store_n(&owner->context->video.cancel, 1, __ATOMIC_RELEASE);
     VIDEO_OS_EVENT_SET(owner->wake, VIDEO_WAKE_CANCEL);

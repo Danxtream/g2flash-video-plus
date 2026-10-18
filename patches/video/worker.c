@@ -42,13 +42,18 @@ static void video_failure_word(uint8_t *p, uint32_t value) {
 
 /* The pinned decoder worker is the sole writer. Publish last, before park;
  * context storage survives owner reclamation and is immutable until START. */
-static void video_failure_capture(video_owner *owner, uint32_t fault) {
+/* `site` is zero from the worker. A presenter fault passes its caller's return
+ * address and never reads the worker's input, which may be released under it. */
+static void video_failure_capture(video_owner *owner, uint32_t fault, uint32_t site) {
     customCfwContext *ctx = owner->context;
     video_failure_record *saved = &ctx->video_failure;
     if (__atomic_load_n(&saved->valid, __ATOMIC_ACQUIRE)) return;
     uint8_t *p = saved->detail;
     bzero(p, VIDEO_FAILURE_BYTES);
-    video_failure_nal *nal = &owner->current_nal;
+    /* Snapshot once: the worker may still advance while a presenter records. */
+    video_failure_nal current = owner->current_nal, *nal = &current;
+    uint32_t recent_count = owner->recent_count, recent_next = owner->recent_next;
+    const uint8_t *input = site ? 0 : owner->current_input;
     g2_h264_diagnostic diagnostic = {0};
     if (owner->decoder) g2_h264_diagnostics(owner->decoder, &diagnostic);
     if (fault == VIDEO_FAULT_FORMAT && !diagnostic.reject) diagnostic.reject = 5;
@@ -59,25 +64,37 @@ static void video_failure_capture(video_owner *owner, uint32_t fault) {
     video_failure_word(p + 24, nal->length);
     video_failure_word(p + 28, nal->type);
     video_failure_word(p + 32, nal->checksum);
-    if (owner->current_input)
-        video_failure_word(p + 36, video_failure_checksum(owner->current_input, nal->length));
+    if (input)
+        video_failure_word(p + 36, video_failure_checksum(input, nal->length));
     memcpy(p + 40, &diagnostic, sizeof(diagnostic));
     video_failure_word(p + 88, VIDEO_TICK);
-    video_failure_word(p + 92, owner->recent_count);
+    video_failure_word(p + 92, recent_count);
     video_failure_word(p + 96, owner->allocation_tag);
     video_failure_word(p + 100, owner->allocation_size);
     video_failure_word(p + 104, ctx->video_power.acquire_step);
     video_failure_word(p + 108, ctx->video_power.peer.generation);
     video_failure_word(p + 112, ctx->video_power.peer.stream);
     video_failure_word(p + 116, ctx->video_power.peer.closed);
-    video_failure_word(p + 120, owner->current_input != 0);
+    video_failure_word(p + 120, input != 0);
     video_failure_word(p + 124, owner->decoder != 0);
     bzero(saved->history, VIDEO_FAILURE_BYTES);
     video_failure_word(saved->history + 8, ctx->video_control.stream);
     video_failure_word(saved->history + 12, nal->length ? nal->sequence : UINT32_MAX);
-    video_failure_word(saved->history + 16, owner->recent_count);
-    for (uint32_t i = 0; i < owner->recent_count; ++i) {
-        uint32_t slot = (owner->recent_next + VIDEO_FAILURE_HISTORY - owner->recent_count + i) % VIDEO_FAILURE_HISTORY;
+    video_failure_word(saved->history + 16, recent_count);
+    /* History bytes 20-31: who raised the fault. 20 return address of the
+     * video_presenter_fault call (0 = worker), 24 presenter stack bytes used at
+     * its last check, 28 guards intact, 29 task (1 presenter), 30-31 queue count. */
+    video_failure_word(saved->history + 20, site);
+    if (site && owner->presenter) {
+        video_presenter *presenter = owner->presenter;
+        video_failure_word(saved->history + 24, presenter->stack_used);
+        saved->history[28] = presenter->guards_ok;
+        saved->history[29] = 1;
+        saved->history[30] = presenter->queue.count;
+        saved->history[31] = presenter->queue.count >> 8;
+    }
+    for (uint32_t i = 0; i < recent_count; ++i) {
+        uint32_t slot = (recent_next + VIDEO_FAILURE_HISTORY - recent_count + i) % VIDEO_FAILURE_HISTORY;
         memcpy(saved->history + 32 + i * sizeof(video_failure_nal),
                &owner->recent[slot], sizeof(video_failure_nal));
     }
@@ -162,7 +179,7 @@ static void video_fault_locked(customCfwContext *ctx, uint32_t fault) {
 
 static void video_park_owner(video_owner *owner, uint32_t fault) __attribute__((noreturn));
 static void video_park_owner(video_owner *owner, uint32_t fault) {
-    if (fault) video_failure_capture(owner, fault);
+    if (fault) video_failure_capture(owner, fault, 0);
     if (owner->decode_pin) {
         /* A fatal C++ callback may abandon its current call. Retire only this
          * worker's pin before park, never an external display user's pin. A
@@ -271,7 +288,7 @@ static int video_worker_consume(video_owner *owner) {
     uint32_t fault = decoded == G2_H264_ERROR ? VIDEO_FAULT_FORMAT :
         !released || !unpinned ? VIDEO_FAULT_OWNERSHIP :
         !video_queue_watch(&owner->queue, VIDEO_TICK) ? VIDEO_FAULT_GAP : 0;
-    if (decoded == G2_H264_ERROR) video_failure_capture(owner, fault);
+    if (decoded == G2_H264_ERROR) video_failure_capture(owner, fault, 0);
     if (released) owner->current_input = 0;
     if (fault) video_fault_locked(ctx, fault);
     video_control_give(ctx);
