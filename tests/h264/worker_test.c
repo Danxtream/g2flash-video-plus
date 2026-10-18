@@ -1945,21 +1945,34 @@ static void failure_history(void) {
     for (uint32_t i = 0; i < VIDEO_FAILURE_HISTORY; ++i)
         owner.recent[(3 + i) % VIDEO_FAILURE_HISTORY] = (video_failure_nal){12 + i, i * 17, 10 + i, 1, 0};
     bytes[1] = 9; owner.allocation_tag = 5; owner.allocation_size = 4096;
-    video_failure_capture(&owner, G2_H264_FAIL_ALLOC);
+    owner.storage.refusal = VIDEO_STORAGE_SLOTS; owner.storage.refused_live = 64;
+    owner.storage.refused_heap = (video_heap_view){0x12345, 0x10000};
+    video_failure_capture(&owner, G2_H264_FAIL_ALLOC, 0);
     assert(context.video_failure.valid && video_read32(context.video_failure.detail + 20) == 20 &&
            video_read32(context.video_failure.detail + 32) != video_read32(context.video_failure.detail + 36) &&
            video_read32(context.video_failure.detail + 96) == 5 &&
            video_read32(context.video_failure.detail + 100) == 4096);
     for (uint32_t i = 0; i < 8; ++i)
         assert(video_read32(context.video_failure.history + 32 + i * 12) == 12 + i);
-    bytes[0] = 7; video_failure_capture(&owner, VIDEO_FAULT_FORMAT);
+    const uint8_t storage[] = {VIDEO_STORAGE_SLOTS, 64, 0x45, 0x23, 1, 0, 0, 1};
+    assert(!memcmp(context.video_failure.history + 24, storage, sizeof(storage)));
+    bytes[0] = 7; video_failure_capture(&owner, VIDEO_FAULT_FORMAT, 0);
     assert(video_read32(context.video_failure.detail + 16) == G2_H264_FAIL_ALLOC);
     memset(&owner, 0, sizeof(owner));
     assert(context.video_failure.valid && video_read32(context.video_failure.detail + 12) == 42);
     context.video_failure.valid = 0; owner.context = &context;
-    video_failure_capture(&owner, VIDEO_FAULT_OWNERSHIP);
+    video_failure_capture(&owner, VIDEO_FAULT_OWNERSHIP, 0);
     assert(context.video_failure.valid && video_read32(context.video_failure.detail + 20) == UINT32_MAX &&
            !video_read32(context.video_failure.detail + 120) && !video_read32(context.video_failure.detail + 124));
+    context.video_failure.valid = 0;
+    video_presenter presenter = {0};
+    presenter.stack_used = 640; presenter.guards_ok = 1; presenter.queue.count = 2;
+    owner.presenter = &presenter;
+    video_failure_capture(&owner, VIDEO_FAULT_OWNERSHIP, 0x7f0225);
+    assert(video_read32(context.video_failure.history + 20) == 0x7f0225 &&
+           video_read32(context.video_failure.history + 24) == 640 &&
+           context.video_failure.history[28] == 1 && context.video_failure.history[29] == 1 &&
+           context.video_failure.history[30] == 2);
     puts("retained failure, wrapped history, changed input, allocation and checksum evidence PASS");
 }
 static void await_reclaimed(void) {

@@ -92,6 +92,15 @@ static void video_failure_capture(video_owner *owner, uint32_t fault, uint32_t s
         saved->history[29] = 1;
         saved->history[30] = presenter->queue.count;
         saved->history[31] = presenter->queue.count >> 8;
+    } else if (!site) {
+        /* Exact cached byte counts fit 24 bits; all ones means unavailable.
+         * Retain the allocation-time view, never walk heaps after the fault. */
+        saved->history[24] = owner->storage.refusal;
+        saved->history[25] = owner->storage.refused_live;
+        for (uint32_t i = 0; i < 3; ++i) {
+            saved->history[26 + i] = owner->storage.refused_heap.free_bytes >> (8 * i);
+            saved->history[29 + i] = owner->storage.refused_heap.max_alloc >> (8 * i);
+        }
     }
     for (uint32_t i = 0; i < recent_count; ++i) {
         uint32_t slot = (recent_next + VIDEO_FAILURE_HISTORY - recent_count + i) % VIDEO_FAILURE_HISTORY;

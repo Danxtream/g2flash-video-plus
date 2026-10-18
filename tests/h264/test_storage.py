@@ -40,3 +40,6 @@ class StorageTests(unittest.TestCase):
 
     def test_old_and_new_capacity_count_together(self):
         self.check_case("growth")
+
+    def test_refusals_retain_rule_cached_view_and_live_slot_count(self):
+        self.check_case("refusals")

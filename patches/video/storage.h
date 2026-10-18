@@ -18,6 +18,13 @@ enum {
     VIDEO_ALLOCATION_LIMIT = 64
 };
 
+enum {
+    VIDEO_STORAGE_OK, VIDEO_STORAGE_SIZE, VIDEO_STORAGE_LIMIT_REACHED,
+    VIDEO_STORAGE_HEAP_VIEW, VIDEO_STORAGE_CACHED, VIDEO_STORAGE_DISPLAY,
+    VIDEO_STORAGE_OTHER, VIDEO_STORAGE_SLOTS, VIDEO_STORAGE_ALLOCATE,
+    VIDEO_STORAGE_RACE, VIDEO_STORAGE_POINTER
+};
+
 typedef struct { uint32_t free_bytes, max_alloc; } video_heap_view;
 typedef struct {
     void *argument;
@@ -37,6 +44,8 @@ typedef struct {
     video_allocation entries[VIDEO_ALLOCATION_LIMIT];
     uint32_t limit, used, peak, initial_charge;
     uint32_t cached_allowance, display_allowance;
+    video_heap_view refused_heap;
+    uint8_t refusal, refused_live;
 } video_storage;
 
 /* Initialize a private owner. initial_charge includes its own raw allocation. */

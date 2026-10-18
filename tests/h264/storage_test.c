@@ -106,6 +106,39 @@ static void bounds(void) {
     for (uint32_t i = 0; i < VIDEO_ALLOCATION_LIMIT; ++i) CHECK(video_storage_alloc(&s, 1));
     CHECK(!video_storage_alloc(&s, 1)); clean(&h, &s);
 }
+static void refusals(void) {
+    test_heap h; video_storage s;
+    init(&h, &s);
+    CHECK(!video_storage_alloc(&s, UINT32_MAX));
+    CHECK(s.refusal == VIDEO_STORAGE_SIZE);
+    CHECK(!video_storage_alloc(&s, VIDEO_STORAGE_LIMIT));
+    CHECK(s.refusal == VIDEO_STORAGE_LIMIT_REACHED);
+    h.heaps[0].max_alloc = 3;
+    CHECK(!video_storage_alloc(&s, 4));
+    CHECK(s.refusal == VIDEO_STORAGE_CACHED && s.refused_heap.free_bytes == 382756 &&
+          s.refused_heap.max_alloc == 3);
+    h.heaps[0].max_alloc = 376832;
+    h.fail_at = h.calls + 1;
+    CHECK(!video_storage_alloc(&s, 4)); CHECK(s.refusal == VIDEO_STORAGE_ALLOCATE);
+    h.fail_at = 0;
+    for (uint32_t i = 0; i < VIDEO_ALLOCATION_LIMIT; ++i) CHECK(video_storage_alloc(&s, 4));
+    CHECK(!video_storage_alloc(&s, 4));
+    CHECK(s.refusal == VIDEO_STORAGE_SLOTS && s.refused_live == VIDEO_ALLOCATION_LIMIT);
+    clean(&h, &s);
+    init(&h, &s); h.invalid = 1;
+    CHECK(!video_storage_alloc(&s, 4)); CHECK(s.refusal == VIDEO_STORAGE_HEAP_VIEW);
+    clean(&h, &s);
+    init(&h, &s); h.heaps[1].free_bytes = 0;
+    CHECK(!video_storage_alloc(&s, 4)); CHECK(s.refusal == VIDEO_STORAGE_DISPLAY);
+    clean(&h, &s);
+    init(&h, &s); h.heaps[2].free_bytes = 0;
+    CHECK(!video_storage_alloc(&s, 4)); CHECK(s.refusal == VIDEO_STORAGE_OTHER);
+    clean(&h, &s);
+    init(&h, &s); h.racing_bytes = 340000;
+    CHECK(!video_storage_alloc(&s, 4)); CHECK(s.refusal == VIDEO_STORAGE_RACE);
+    CHECK(s.refused_live == 0 && s.refused_heap.free_bytes < VIDEO_CACHED_RESERVE + VIDEO_INPUT_ALLOWANCE);
+    clean(&h, &s);
+}
 static void growth(void) {
     test_heap h; video_storage s; init(&h, &s);
     void *old = video_storage_alloc(&s, 40000); CHECK(old);
@@ -126,6 +159,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "reserves")) reserves();
     else if (!strcmp(argv[1], "bounds")) bounds();
     else if (!strcmp(argv[1], "growth")) growth();
+    else if (!strcmp(argv[1], "refusals")) refusals();
     else CHECK(0);
     puts("bounded storage PASS"); return 0;
 }

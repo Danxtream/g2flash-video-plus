@@ -12,23 +12,26 @@ static int video_storage_sizes(uint32_t size, uint32_t *raw, uint32_t *charge) {
     return 1;
 }
 
-static int video_storage_room(const video_storage *s, uint32_t charge, uint32_t raw) {
+static uint8_t video_storage_room(const video_storage *s, uint32_t charge, uint32_t raw,
+                                   video_heap_view *cached) {
     const uint32_t heaps[] = {VIDEO_HEAP_CACHED, VIDEO_HEAP_DISPLAY, VIDEO_HEAP_OTHER};
     const uint32_t reserve[] = {VIDEO_CACHED_RESERVE, VIDEO_DISPLAY_RESERVE,
                                 VIDEO_OTHER_RESERVE};
     const uint32_t extra[] = {s->cached_allowance, s->display_allowance, 0};
-    if (s->used > s->limit || charge > s->limit - s->used) return 0;
+    if (cached) *cached = (video_heap_view){UINT32_MAX, UINT32_MAX};
+    if (s->used > s->limit || charge > s->limit - s->used) return VIDEO_STORAGE_LIMIT_REACHED;
     for (uint32_t i = 0; i < 3; ++i) {
         video_heap_view v;
         if (!s->heap.view(s->heap.argument, heaps[i], &v) ||
             v.free_bytes == UINT32_MAX || v.max_alloc == UINT32_MAX ||
-            v.max_alloc > v.free_bytes || extra[i] > UINT32_MAX - reserve[i]) return 0;
+            v.max_alloc > v.free_bytes || extra[i] > UINT32_MAX - reserve[i]) return VIDEO_STORAGE_HEAP_VIEW;
+        if (!i && cached) *cached = v;
         uint32_t keep = reserve[i] + extra[i];
         uint32_t needed = i == 0 ? charge : 0;
         if (v.free_bytes < keep || needed > v.free_bytes - keep ||
-            (i == 0 && raw > v.max_alloc)) return 0;
+            (i == 0 && raw > v.max_alloc)) return VIDEO_STORAGE_CACHED + i;
     }
-    return 1;
+    return VIDEO_STORAGE_OK;
 }
 
 int video_storage_init(video_storage *s, const video_heap_ops *heap,
@@ -40,34 +43,44 @@ int video_storage_init(video_storage *s, const video_heap_ops *heap,
     s->used = s->peak = s->initial_charge = initial_charge;
     s->cached_allowance = VIDEO_INPUT_ALLOWANCE;
     s->display_allowance = display_allowance;
+    s->refused_heap = (video_heap_view){UINT32_MAX, UINT32_MAX};
+    s->refusal = s->refused_live = 0;
     for (uint32_t i = 0; i < VIDEO_ALLOCATION_LIMIT; ++i)
         s->entries[i] = (video_allocation){0};
     return video_storage_admit(s);
 }
 
 int video_storage_admit(const video_storage *s) {
-    return s && s->heap.view && video_storage_room(s, 0, 0);
+    return s && s->heap.view && video_storage_room(s, 0, 0, 0) == VIDEO_STORAGE_OK;
 }
 
 static video_allocation *video_storage_new(video_storage *s, uint32_t size,
                                            uint32_t tag, int pending) {
     uint32_t raw_size, charge;
-    if (!video_storage_sizes(size, &raw_size, &charge) ||
-        !video_storage_room(s, charge, raw_size)) return 0;
+    s->refused_live = 0;
+    for (uint32_t i = 0; i < VIDEO_ALLOCATION_LIMIT; ++i)
+        s->refused_live += s->entries[i].live != 0;
+    s->refusal = VIDEO_STORAGE_SIZE;
+    s->refused_heap = (video_heap_view){UINT32_MAX, UINT32_MAX};
+    if (!video_storage_sizes(size, &raw_size, &charge)) return 0;
+    s->refusal = video_storage_room(s, charge, raw_size, &s->refused_heap);
+    if (s->refusal) return 0;
     video_allocation *entry = 0;
     for (uint32_t i = 0; i < VIDEO_ALLOCATION_LIMIT; ++i) {
         if (!s->entries[i].live) { entry = &s->entries[i]; break; }
     }
-    if (!entry) return 0;
+    if (!entry) { s->refusal = VIDEO_STORAGE_SLOTS; return 0; }
     void *raw = s->heap.allocate(s->heap.argument, raw_size);
-    if (!raw) return 0;
+    if (!raw) { s->refusal = VIDEO_STORAGE_ALLOCATE; return 0; }
     /* A racing stock allocation can consume the reserve after our snapshot. */
-    if (!video_storage_room(s, 0, 0)) {
+    if (video_storage_room(s, 0, 0, &s->refused_heap) != VIDEO_STORAGE_OK) {
+        s->refusal = VIDEO_STORAGE_RACE;
         s->heap.release(s->heap.argument, raw);
         return 0;
     }
     uintptr_t base = (uintptr_t)raw;
     if (base > UINTPTR_MAX - VIDEO_ALLOC_ALIGNMENT + 1u) {
+        s->refusal = VIDEO_STORAGE_POINTER;
         s->heap.release(s->heap.argument, raw);
         return 0;
     }
@@ -87,7 +100,13 @@ void *video_storage_alloc(video_storage *s, uint32_t size) {
         /* Exact size prevents a small temporary allocation stealing a large
          * reserved frame. Larger vector growth still uses the bounded path. */
         if (e->live && e->pending && e->requested == size) {
-            if (!video_storage_admit(s)) return 0;
+            s->refusal = video_storage_room(s, 0, 0, &s->refused_heap);
+            if (s->refusal) {
+                s->refused_live = 0;
+                for (uint32_t j = 0; j < VIDEO_ALLOCATION_LIMIT; ++j)
+                    s->refused_live += s->entries[j].live != 0;
+                return 0;
+            }
             e->pending = 0;
             return e->aligned;
         }

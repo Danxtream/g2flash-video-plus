@@ -1016,6 +1016,15 @@ Selector 1 repeats stream and current sequence at offsets 8 and 12, then the
 history count at 16. At offset 32 are up to eight twelve-byte records, oldest
 first: sequence u32, checksum u32, length u16, NAL type u8, reserved zero u8.
 The current NAL is separate from the previous successfully consumed inputs.
+Offset 20 is the presenter call site, or zero for a worker fault. A nonzero
+site uses offsets 24-27 for presenter stack use, 28 for intact guards, 29 for
+the presenter task marker and 30-31 for decoded queue count. Worker faults
+instead use byte 24 for the storage refusal rule, 25 for live allocation
+count, 26-28 for cached free bytes and 29-31 for its largest block (u24 LE).
+All-one heap fields mean no valid allocation-time view. Rules 1-10 are size,
+ledger limit, invalid heap view, cached reserve/largest block, display reserve,
+other reserve, full allocation ledger, heap allocation, post-allocation race
+and pointer overflow. No reserve or allocation rule is relaxed.
 For a fault outside decode, selector 0 describes the last attempted input,
 or sequence UINT32_MAX/length zero if there was none; the pinned flag is zero
 and no second checksum is taken. A released slot is never sampled.
