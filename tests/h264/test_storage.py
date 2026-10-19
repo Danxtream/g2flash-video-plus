@@ -29,6 +29,9 @@ class StorageTests(unittest.TestCase):
     def test_batch_sizes_tags_alignment_and_unused_reservations(self):
         self.check_case("batch")
 
+    def test_passive_charge_counter_and_retained_cached_rule(self):
+        self.check_case("accounting")
+
     def test_every_partial_batch_allocation_rolls_back(self):
         self.check_case("rollback")
 

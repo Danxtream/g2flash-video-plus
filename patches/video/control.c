@@ -231,6 +231,8 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         }
         __atomic_store_n(&s->control_generation, generation, __ATOMIC_RELEASE);
         __atomic_store_n(&s->start_guard, generation, __ATOMIC_RELEASE);
+        __atomic_store_n(&ctx->video_heap.decoder, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&ctx->video_heap.presenter, 0, __ATOMIC_RELAXED);
         uint32_t deadline = VIDEO_TICK + VIDEO_INACTIVITY_LIMIT_MS;
         __atomic_store_n(&s->active_deadline, deadline ? deadline : 1, __ATOMIC_RELEASE);
         s->error = 0;
@@ -448,6 +450,13 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             }
             entry->snapshot[0] = VIDEO_PROTOCOL_VERSION; entry->snapshot[1] = VIDEO_CONTROL_DIAGNOSTICS;
             entry->snapshot[2] = entry->result;
+        }
+        if (data[1] == VIDEO_CONTROL_DIAGNOSTICS && size == 16 && data[8] == VIDEO_HEAP_DIAGNOSTICS && !data[9] && !data[10] && !data[11]) {
+            entry->snapshot_bytes = VIDEO_DIAGNOSTICS_BYTES;
+            bzero(entry->snapshot, VIDEO_DIAGNOSTICS_BYTES);
+            entry->result = route->origin == s->owner_origin && video_heap_meter_snapshot(&ctx->video_heap,
+                video_read32(data + 12), route->here, entry->snapshot) ? VIDEO_CONTROL_ACCEPTED : VIDEO_CONTROL_STALE;
+            entry->snapshot[0] = 1; entry->snapshot[1] = VIDEO_CONTROL_DIAGNOSTICS; entry->snapshot[2] = entry->result;
         }
         int radio = size == VIDEO_CONTROL_HEADER_BYTES + 4 &&
             (data[8] == VIDEO_RADIO_DIAGNOSTICS || data[8] == VIDEO_RADIO_REFUSAL_DIAGNOSTICS) &&

@@ -119,6 +119,18 @@ static void growth(void) {
     video_storage_finish_call(&s); CHECK(s.used == s.initial_charge);
     clean(&h, &s);
 }
+static void accounting(void) {
+    test_heap h; video_storage s; init(&h, &s);
+    uint32_t charged = 0; video_storage_bind_counter(&s, &charged);
+    CHECK(charged == s.used);
+    void *p = video_storage_alloc(&s, 100); CHECK(p && charged == s.used);
+    h.heaps[0].free_bytes = VIDEO_CACHED_RESERVE - 1;
+    CHECK(!video_storage_alloc(&s, 4));
+    CHECK(s.refusal == VIDEO_STORAGE_CACHED && s.refused_live == 1);
+    CHECK(s.refused_heap.free_bytes == VIDEO_CACHED_RESERVE - 1 && charged == s.used);
+    CHECK(video_storage_release(&s, p) && charged == s.initial_charge);
+    clean(&h, &s);
+}
 int main(int argc, char **argv) {
     CHECK(argc == 2);
     if (!strcmp(argv[1], "batch")) batch();
@@ -126,6 +138,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "reserves")) reserves();
     else if (!strcmp(argv[1], "bounds")) bounds();
     else if (!strcmp(argv[1], "growth")) growth();
+    else if (!strcmp(argv[1], "accounting")) accounting();
     else CHECK(0);
     puts("bounded storage PASS"); return 0;
 }

@@ -1084,3 +1084,30 @@ Clients require both exact primary confirmations of their last fenced batch,
 account each lens independently and discard old/missing evidence. Actual
 zero room still requires a later query; an ACK does not promise future work.
 No input window, picture timeline, decoded queue or memory reserve is enlarged.
+
+## Passive Heap Evidence
+
+Diagnostics kind 9 retains a 128-byte, schema-1 snapshot for the selected
+stream after STOP or failure. Bytes 3..7 are kind, schema, valid-heap mask,
+lens and contention flag. Stream, owner token and generation are LE32 at
+8/12/16. Three 32-byte rows at 32/64/96 describe cached, display and other
+heaps. Each row contains LE32 START baseline free, minimum free, independent
+minimum largest block, decoder and presenter ledger bytes at minimum free,
+maximum outside-ledger use, largest block at minimum free and sample count.
+
+Sampling reuses existing storage/bootstrap heap reads only. There is no
+new heap walk, allocation, task, timer or periodic report. The baseline is
+the first valid existing read after START, not a globally atomic heap trace.
+Invalid views are ignored and contention drops a sample rather than waiting.
+Both player ledgers include their raw owner charges. Cached outside-ledger
+use is max(0, baseline - current free - decoder - presenter); other heaps
+have no charged player ledger. An unavailable baseline estimate is UINT32_MAX.
+The largest-block minimum need not occur at the free-byte minimum. Retained
+rows are sampled observations, not proof of the allocator's true low water.
+
+Worker failure history bytes 24..31 contain storage rule, live-slot count,
+cached free U24 and cached largest U24; 0xffffff means unavailable. Presenter
+fault records keep their existing interpretation, identified by nonzero site.
+Rules are size 1, ledger limit 2, invalid view 3, cached reserve 4, display
+reserve 5, other reserve 6, slot exhaustion 7, raw allocation 8, post-check
+race 9 and pointer range 10. No allocation or reserve policy is changed.

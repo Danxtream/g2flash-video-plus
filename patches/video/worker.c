@@ -36,6 +36,21 @@ typedef struct video_owner {
     uint32_t recent_count, recent_next, allocation_size, allocation_tag;
 } video_owner;
 
+/* Existing validated heap reads only. Persistent counters avoid borrowing an
+ * owner/presenter pointer while receive tasks race STOP and reclamation. */
+static void video_heap_observe(uint32_t heap, const video_heap_view *view) {
+    customCfwContext *ctx = peekCustomCfwContext();
+    uint32_t generation = ctx ? __atomic_load_n(&ctx->video_control.start_guard, __ATOMIC_ACQUIRE) : 0;
+    if (!generation) return;
+    uint32_t index = heap == VIDEO_HEAP_CACHED ? 0 : heap == VIDEO_HEAP_DISPLAY ? 1 : 2;
+    video_heap_meter_sample(&ctx->video_heap, generation, ctx->video_control.stream, ctx->video.token, index, view);
+}
+static int video_meter_heap_view(void *argument, uint32_t heap, video_heap_view *view) {
+    int valid = video_platform_heap_view(argument, heap, view);
+    if (valid) video_heap_observe(heap, view);
+    return valid;
+}
+
 static void video_failure_word(uint8_t *p, uint32_t value) {
     for (uint32_t i = 0; i < 4; ++i) p[i] = value >> (8 * i);
 }
@@ -92,6 +107,13 @@ static void video_failure_capture(video_owner *owner, uint32_t fault, uint32_t s
         saved->history[29] = 1;
         saved->history[30] = presenter->queue.count;
         saved->history[31] = presenter->queue.count >> 8;
+    } else if (!site) {
+        saved->history[24] = owner->storage.refusal;
+        saved->history[25] = owner->storage.refused_live;
+        for (uint32_t i = 0; i < 3; ++i) {
+            saved->history[26 + i] = owner->storage.refused_heap.free_bytes >> (8 * i);
+            saved->history[29 + i] = owner->storage.refused_heap.max_alloc >> (8 * i);
+        }
     }
     for (uint32_t i = 0; i < recent_count; ++i) {
         uint32_t slot = (recent_next + VIDEO_FAILURE_HISTORY - recent_count + i) % VIDEO_FAILURE_HISTORY;
@@ -399,7 +421,7 @@ static int video_bootstrap_room(uint32_t raw, uint32_t display_allowance) {
                             VIDEO_DISPLAY_RESERVE, VIDEO_OTHER_RESERVE};
     for (uint32_t i = 0; i < 3; ++i) {
         video_heap_view view;
-        if (!video_platform_heap_view(0, heaps[i], &view) ||
+        if (!video_meter_heap_view(0, heaps[i], &view) ||
             view.max_alloc > view.free_bytes || view.free_bytes == UINT32_MAX) return 0;
         uint32_t extra = i == 0 ? video_owner_charge(raw) : i == 1 ? display_allowance : 0;
         if (extra > UINT32_MAX - keep[i] || view.free_bytes < keep[i] + extra ||
@@ -544,11 +566,13 @@ int video_worker_start_guarded(uint32_t ingress_allowance, uint32_t generation) 
     owner->control_generation = generation;
     owner->ingress_allowance = ingress_allowance; owner->shadow_missing = missing;
     video_heap_ops heap = {0, video_platform_allocate, video_platform_release,
-                          video_platform_heap_view};
+                          video_meter_heap_view};
+    __atomic_store_n(&ctx->video_heap.decoder, video_owner_charge(raw_bytes), __ATOMIC_RELAXED);
     if (!video_storage_init(&owner->storage, &heap, video_owner_charge(raw_bytes),
                              shadow + ingress_allowance)) {
         VIDEO_OWNER_FREE(raw); return 0;
     }
+    video_storage_bind_counter(&owner->storage, &ctx->video_heap.decoder);
     video_event_attr event = {"video-wake", 0, owner->wake_control,
                               sizeof(owner->wake_control)};
     owner->wake = VIDEO_OS_EVENT_NEW(&event);

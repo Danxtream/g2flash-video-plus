@@ -57,6 +57,7 @@
 #include "video/controller.c"
 #include "video/diagnostics.c"
 #include "video/control.c"
+#include "video/heap_meter.c"
 #include "video/telemetry.c"
 #include "video/rate.c"
 #include "video/timeline.c"

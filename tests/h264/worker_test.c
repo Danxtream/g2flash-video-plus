@@ -326,6 +326,7 @@ static uint32_t mock_clock_reg(uint32_t address) { return address == 0xe0001000U
 #define VIDEO_CLOCK_CACHED() 2
 #define VIDEO_CLOCK_CYCLES (tick() * 250000u)
 #include "../../patches/video/telemetry.c"
+#include "../../patches/video/heap_meter.c"
 #include "../../patches/video/rate.c"
 #include "../../patches/video/timeline.c"
 #include "../../patches/video/decoded_queue.c"
@@ -2880,9 +2881,33 @@ static void picture_style_contract(void) {
     }
 }
 
+static void heap_meter_contract(void) {
+    configure(); request_next = 0;
+    video_heap_view view = {1, 1}; video_heap_observe(VIDEO_HEAP_CACHED, &view);
+    assert(!context.video_heap.generation);
+    uint8_t p[VIDEO_START_BYTES], out[VIDEO_STATUS_BYTES], saved[128];
+    control_command(p, VIDEO_CONTROL_START, 1);
+    assert(control_snapshot(p, 24, out) == VIDEO_CONTROL_ACCEPTED);
+    pool_drain(); await_ready();
+    assert(context.video_heap.generation == context.video_control.start_guard);
+    assert(context.video_heap.rows[0].samples && context.video_heap.rows[0].decoder_at_min);
+    control_command(p, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_HEAP_DIAGNOSTICS);
+    video_write32(p + 12, 1);
+    assert(!control_variable_pages(p, 16, out, 128, 1, 200, 200));
+    assert(out[3] == 9 && out[4] == 1 && (out[5] & 7) == 7 && out[6] == 1);
+    memcpy(saved, out, 128);
+    finish(); video_heap_observe(VIDEO_HEAP_CACHED, &view);
+    assert(!control_variable_pages(p, 16, out, 128, 1, 200, 200));
+    assert(!memcmp(saved, out, 128));
+    video_write32(p + 4, ++request_next);
+    assert(!control_variable_pages(p, 16, out, 128, 1, 200, 200));
+    assert(!memcmp(saved, out, 128)); /* No teardown heap reads replace minima. */
+    puts("real heap-read hooks, inert idle, frozen snapshot and STOP retention PASS");
+}
 int main(int argc, char **argv) {
     assert(argc == 2);
-    if (!strcmp(argv[1], "picture-styles")) picture_style_contract();
+    if (!strcmp(argv[1], "heap-meter")) heap_meter_contract();
+    else if (!strcmp(argv[1], "picture-styles")) picture_style_contract();
     else if (!strcmp(argv[1], "geometry")) geometry_contract();
     else if (!strcmp(argv[1], "normal")) normal();
     else if (!strcmp(argv[1], "allocations")) allocation_failures();

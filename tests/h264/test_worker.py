@@ -60,6 +60,9 @@ class WorkerTests(unittest.TestCase):
     def test_inert_idle_real_decoder_resets_and_y_planes(self):
         self.check_case("normal")
 
+    def test_heap_meter_uses_existing_reads_and_retains_frozen_stop_evidence(self):
+        self.check_case("heap-meter")
+
     def test_three_coded_geometries_exact_replay_invalid_rects_and_actual_decoder_budget(self):
         self.check_case("geometry")
 

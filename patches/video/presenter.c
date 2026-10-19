@@ -395,9 +395,11 @@ static int video_presenter_prepare(video_owner *owner) {
     }
     owner->presenter = p;
     p->sync.next = p->preroll + 1;
-    video_heap_ops heap = {0, video_platform_allocate, video_platform_release, video_platform_heap_view};
+    video_heap_ops heap = {0, video_platform_allocate, video_platform_release, video_meter_heap_view};
+    __atomic_store_n(&owner->context->video_heap.presenter, video_owner_charge(raw_bytes), __ATOMIC_RELAXED);
     if (!video_storage_init(&p->storage, &heap, video_owner_charge(raw_bytes),
                             owner->storage.display_allowance)) return 0;
+    video_storage_bind_counter(&p->storage, &owner->context->video_heap.presenter);
     int dither = (owner->context->video_control.options & VIDEO_DITHER_PRESENTATION) != 0;
     uint32_t format = dither ? VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER : VIDEO_SOURCE_A4;
     format |= owner->context->video_control.picture_style << VIDEO_SOURCE_STYLE_SHIFT;
