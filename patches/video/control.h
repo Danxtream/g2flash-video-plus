@@ -34,6 +34,9 @@ enum {
     /* The phone's audio clock re-anchors the coordinator's picture schedule:
      * stream, both owner tokens, picture ordinal, then left and right lens ticks. */
     VIDEO_CONTROL_PACE = 25,
+    VIDEO_CONTROL_NAL_ROOM = 28,
+    VIDEO_CONTROL_NAL_TIMED_ROOM = 29,
+    VIDEO_FEATURE_CONFIRMATION_ROOM = 128, /* Base CAPS byte 71, not a START flag. */
     VIDEO_PACE_BYTES = 32,
     VIDEO_NAL_TIMED_HEADER_BYTES = 18,
     VIDEO_TIMED_TIMELINE_REFUSED = -4,

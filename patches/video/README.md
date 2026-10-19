@@ -1065,3 +1065,22 @@ are fixed to the guarded image. Clock transitions, stopped counters, long spans
 or tick skew prevent a trustworthy cycle ratio; raw evidence is retained.
 The rolling steady bracket is at least 250 ms without sleeping or busy-waiting.
 These snapshots do not establish a physical core frequency by themselves.
+
+## Room In NAL Confirmations
+
+Base CAPS byte 71 bit 128 advertises optional room confirmations, only when
+the proven reply budget permits them. Both lenses must advertise it. Old
+clients keep using NAL operations 6/24 and byte-compatible ordinary ACKs.
+Opt-in operations 28/29 have the same plain/timed NAL bodies and admission
+rules. Their existing confirmation uses kind 5, the original nine-byte ACK
+identity/size/CRC, six credit bytes, then ordinary seven-byte history entries.
+No extra bridge or radio message is sent; history carries no room grant.
+
+The six bytes use the flagged credit layout: expected LE32, free/capacity/
+state/gap, then result plus timeline room. Capture shares the admission lock.
+A successful future/replayed NAL without a complete ordered prefix carries
+BUSY instead of promising room. Refusal remains a NACK, never a room grant.
+Clients require both exact primary confirmations of their last fenced batch,
+account each lens independently and discard old/missing evidence. Actual
+zero room still requires a later query; an ACK does not promise future work.
+No input window, picture timeline, decoded queue or memory reserve is enlarged.

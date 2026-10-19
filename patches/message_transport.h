@@ -9,6 +9,8 @@
 #define CFW_MESSAGE_BOTH (CFW_MESSAGE_LEFT | CFW_MESSAGE_RIGHT)
 #define CFW_MESSAGE_ACK 1u
 #define CFW_MESSAGE_NACK 3u
+#define CFW_MESSAGE_ROOM_ACK 5u
+#define CFW_ROOM_BYTES 6u
 #define CFW_MESSAGE_COMPRESSED 4u
 #define CFW_MESSAGE_RESET_CONTEXT 8u
 #define CFW_MESSAGE_MAX 65535u
@@ -36,6 +38,7 @@ typedef struct {
 typedef struct {
     uint8_t here, origin, targets, reply_capacity;
     uint16_t ordinal;
+    uint8_t *confirmation; /* Optional room snapshot, filled under NAL admission lock. */
 } cfw_message_route;
 int cfw_message_received(const uint8_t *data, uint16_t size, uint16_t checksum);
 int cfw_message_received_routed(const uint8_t *, uint16_t, uint16_t,

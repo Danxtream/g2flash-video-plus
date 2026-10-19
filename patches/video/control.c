@@ -66,6 +66,7 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     p[70] = 7 | VIDEO_FEATURE_CREDITS | VIDEO_FEATURE_DECODE_TOTALS |
         (1u << VIDEO_STATUS_EXTENSION_SHIFT); /* Advertise one 64-byte STATUS extension. */
     p[71] = VIDEO_PRESENT_NATIVE | VIDEO_RADIO_OFF | VIDEO_VERIFY_FRAMES | VIDEO_QUEUED_PRESENTATION | VIDEO_PAIRED_PRESENTATION | VIDEO_START_PAUSED | VIDEO_DITHER_PRESENTATION;
+    if (entry->capacity >= 15) p[71] |= VIDEO_FEATURE_CONFIRMATION_ROOM;
     video_write32(p + 72, queue.gap_deadline);
     video_write32(p + 76, queue.gap_sequence);
     video_write32(p + 80, ctx->video_presentation.presented);
@@ -264,18 +265,33 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
 static int video_control_command(const uint8_t *data, uint16_t size,
                                   const cfw_message_route *route, uint8_t *reply) {
     if (data && size >= 2 && data[0] == VIDEO_MESSAGE_ID &&
-        (data[1] == VIDEO_CONTROL_NAL || data[1] == VIDEO_CONTROL_NAL_TIMED)) {
-        uint32_t header = data[1] == VIDEO_CONTROL_NAL ? VIDEO_NAL_HEADER_BYTES : VIDEO_NAL_TIMED_HEADER_BYTES;
+        (data[1] == VIDEO_CONTROL_NAL || data[1] == VIDEO_CONTROL_NAL_TIMED ||
+         data[1] == VIDEO_CONTROL_NAL_ROOM || data[1] == VIDEO_CONTROL_NAL_TIMED_ROOM)) {
+        int timed = data[1] == VIDEO_CONTROL_NAL_TIMED || data[1] == VIDEO_CONTROL_NAL_TIMED_ROOM;
+        uint32_t header = timed ? VIDEO_NAL_TIMED_HEADER_BYTES : VIDEO_NAL_HEADER_BYTES;
         if (size <= header || size > VIDEO_RECORD_LIMIT ||
             !video_route_valid(route)) return video_refused(peekCustomCfwContext(), data, size, route, VIDEO_REFUSAL_FORMAT, 0, 0, 0);
         customCfwContext *ctx = peekCustomCfwContext();
         if (!ctx || !ctx->image_mutex || !video_control_wait(ctx, VIDEO_STOP_LIMIT_MS))
             return video_refused(ctx, data, size, route, VIDEO_REFUSAL_LOCK, 0, 0, 0);
         video_fold_signals(ctx);
-        int copied = data[1] == VIDEO_CONTROL_NAL_TIMED ? video_control_timed_nal(ctx, data, size, route) :
+        int copied = timed ? video_control_timed_nal(ctx, data, size, route) :
             video_worker_receive_nal_locked(video_read32(data + 2),
             video_read32(data + 6), data + VIDEO_NAL_HEADER_BYTES,
             size - VIDEO_NAL_HEADER_BYTES, route->origin);
+        if (copied > 0 && route->confirmation) {
+            video_owner *owner = ctx->video_owner;
+            video_nal_queue *q = owner ? &owner->queue : 0;
+            uint8_t *p = route->confirmation;
+            uint32_t sequence = video_read32(data + 6);
+            /* A successful future/replayed record is still ACKed, but only an
+             * ordered complete prefix can promise room to the next batch. */
+            int usable = q && q->accepted == sequence + 1 && q->header_sequence == sequence + 1 &&
+                video_lifecycle_state(&ctx->video) == VIDEO_READY && !ctx->video_control.error && !q->gap_deadline;
+            video_write32(p, q ? q->expected : 0);
+            p[4] = usable ? video_queue_credits(q) | (q->capacity == VIDEO_QUEUE_MAX ? 8 : 0) | 32 : 0;
+            p[5] = usable ? (VIDEO_TIMELINE_RECORDS - ctx->video_control.timeline.count) << 5 : VIDEO_CONTROL_BUSY;
+        }
         video_control_give(ctx);
         return copied > 0 ? 0 : video_refused(ctx, data, size, route, VIDEO_REFUSAL_COMMAND, 0, 0, (uint32_t)copied);
     }
@@ -517,7 +533,8 @@ static int video_control_command(const uint8_t *data, uint16_t size,
 int video_control_received(const uint8_t *data, uint16_t size,
                             const cfw_message_route *route) {
     if (data && size >= 2 && data[0] == VIDEO_MESSAGE_ID &&
-        (data[1] == VIDEO_CONTROL_NAL || data[1] == VIDEO_CONTROL_NAL_TIMED))
+        (data[1] == VIDEO_CONTROL_NAL || data[1] == VIDEO_CONTROL_NAL_TIMED ||
+         data[1] == VIDEO_CONTROL_NAL_ROOM || data[1] == VIDEO_CONTROL_NAL_TIMED_ROOM))
         return video_control_command(data, size, route, 0);
     if (!data || size < VIDEO_CONTROL_HEADER_BYTES || !video_route_valid(route)) return -1;
     customCfwContext *ctx = peekCustomCfwContext();

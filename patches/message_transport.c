@@ -20,6 +20,8 @@
 #define CFW_BRIDGE_VIDEO_RETURN 3u
 #define CFW_ACK_SIZE 9u
 #define CFW_ACK_MAX_SIZE (CFW_ACK_SIZE + CFW_ACK_HISTORY * CFW_ACK_ENTRY_SIZE)
+#define CFW_ROOM_ACK_SIZE (CFW_ACK_SIZE + CFW_ROOM_BYTES)
+#define CFW_ROOM_ACK_MAX_SIZE (CFW_ACK_MAX_SIZE + CFW_ROOM_BYTES)
 
 #ifndef CFW_STREAM_STATE
 static cfw_message_stream *cfw_message_state(uint8_t origin) {
@@ -116,20 +118,23 @@ static void cfw_message_discard(cfw_message_stream *stream) {
 }
 
 static int cfw_message_reply(cfw_message_stream *stream, uint8_t here,
-                             uint8_t origin, uint8_t kind, uint16_t size) {
-    uint8_t reply[CFW_ACK_MAX_SIZE] = {kind, stream->stream_id,
+                             uint8_t origin, uint8_t kind, uint16_t size, const uint8_t *room) {
+    uint8_t reply[CFW_ROOM_ACK_MAX_SIZE] = {kind, stream->stream_id,
         (uint8_t)stream->message_id, (uint8_t)(stream->message_id >> 8), here,
         (uint8_t)size, (uint8_t)(size >> 8),
         (uint8_t)stream->checksum, (uint8_t)(stream->checksum >> 8)};
-    uint16_t length = CFW_ACK_SIZE;
+    uint16_t header = room ? CFW_ROOM_ACK_SIZE : CFW_ACK_SIZE, length = header;
+    if (room) { reply[0] = CFW_MESSAGE_ROOM_ACK; memcpy(reply + CFW_ACK_SIZE, room, CFW_ROOM_BYTES); }
     if (kind == CFW_MESSAGE_ACK) {
         /* Explicit successes, newest first; never imply success across a gap.
          * Remember processing even if enqueueing this reply fails, so a later
          * reply can repair that loss without executing the command again. */
-        unsigned count = (stream->ack_capacity - CFW_ACK_SIZE) / CFW_ACK_ENTRY_SIZE;
+        uint32_t capacity = room ? stream->video_capacity : stream->ack_capacity;
+        unsigned count = capacity > header ? (capacity - header) / CFW_ACK_ENTRY_SIZE : 0;
+        if (count > CFW_ACK_HISTORY) count = CFW_ACK_HISTORY;
         if (count > stream->ack_count) count = stream->ack_count;
         length += count * CFW_ACK_ENTRY_SIZE;
-        memcpy(reply + CFW_ACK_SIZE, stream->ack_history,
+        memcpy(reply + header, stream->ack_history,
                count * CFW_ACK_ENTRY_SIZE);
         for (unsigned i = CFW_ACK_HISTORY - 1; i > 0; --i)
             memcpy(stream->ack_history[i], stream->ack_history[i - 1], CFW_ACK_ENTRY_SIZE);
@@ -148,7 +153,7 @@ static int cfw_message_reply(cfw_message_stream *stream, uint8_t here,
  * for an ACK while later messages fill its window. Only report once per abort. */
 static void cfw_message_abort(cfw_message_stream *stream, uint8_t here, uint8_t origin) {
     if (!stream || !stream->active) return;
-    cfw_message_reply(stream, here, origin, CFW_MESSAGE_NACK, 0);
+    cfw_message_reply(stream, here, origin, CFW_MESSAGE_NACK, 0, 0);
     cfw_inflate_reset(stream);
     stream->context_valid = 0;
     cfw_message_discard(stream);
@@ -185,15 +190,19 @@ static uint32_t cfw_message_complete(cfw_message_stream *stream, uint8_t here,
     }
     uint16_t crc = valid ? cfw_message_crc(data, (uint16_t)size) : 0;
     valid = valid && crc == stream->checksum;
+    uint8_t room[CFW_ROOM_BYTES] = {0};
+    int wants_room = valid && size >= 10 && data[0] == 31 && (data[1] == 28 || data[1] == 29);
     cfw_message_route route = {here, origin, stream->options,
-                               stream->epoch ? stream->video_capacity : stream->packet_capacity, stream->message_id};
+                               stream->epoch ? stream->video_capacity : stream->packet_capacity, stream->message_id,
+                               wants_room ? room : 0};
+    valid = valid && (!wants_room || route.reply_capacity >= CFW_ROOM_ACK_SIZE);
     if (valid && cfw_message_received_routed(data, (uint16_t)size, crc, &route) != 0) valid = 0;
     if (!valid) {
         cfw_inflate_reset(stream);
         stream->context_valid = 0; /* only an explicit record reset can recover */
     }
     int result = cfw_message_reply(stream, here, origin,
-        valid ? CFW_MESSAGE_ACK : CFW_MESSAGE_NACK, (uint16_t)size);
+        valid ? CFW_MESSAGE_ACK : CFW_MESSAGE_NACK, (uint16_t)size, valid && wants_room ? room : 0);
     if (decoded) CFW_MESSAGE_FREE(decoded);
     if (stream->buffer) CFW_MESSAGE_FREE(stream->buffer);
     stream->buffer = 0;
@@ -334,9 +343,12 @@ uint32_t cfw_message_bridge_received(uint32_t app_id, const uint8_t *data,
     }
     if (data[0] == CFW_BRIDGE_RETURN) {
         if (here != origin) return 0;
-        if (length < CFW_ACK_SIZE + 2 || length > CFW_ACK_MAX_SIZE + 2 ||
-            (length - CFW_ACK_SIZE - 2) % CFW_ACK_ENTRY_SIZE != 0) return 0xbu;
-        if ((data[2] != CFW_MESSAGE_ACK && data[2] != CFW_MESSAGE_NACK) || data[6] != (origin ^ CFW_MESSAGE_BOTH)) return 0xau;
+        if (length < 3) return 0xbu;
+        uint32_t header = data[2] == CFW_MESSAGE_ROOM_ACK ? CFW_ROOM_ACK_SIZE : CFW_ACK_SIZE;
+        if (length < header + 2 || length > header + CFW_ACK_HISTORY * CFW_ACK_ENTRY_SIZE + 2 ||
+            (length - header - 2) % CFW_ACK_ENTRY_SIZE != 0) return 0xbu;
+        if ((data[2] != CFW_MESSAGE_ACK && data[2] != CFW_MESSAGE_NACK && data[2] != CFW_MESSAGE_ROOM_ACK) ||
+            data[6] != (origin ^ CFW_MESSAGE_BOTH)) return 0xau;
         if (data[2] == CFW_MESSAGE_NACK && length != CFW_ACK_SIZE + 2) return 0xbu;
         return CFW_BLE_SEND(1, CFW_MESSAGE_SID, data + 2, length - 2) == 0 ? 0 : 6;
     }

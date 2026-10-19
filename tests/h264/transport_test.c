@@ -35,7 +35,7 @@ static uint32_t test_stock_bridge(uint32_t app, const uint8_t *p, uint32_t n, ui
 static uint32_t test_side(void) { return side; }
 static int test_ble(uint8_t pipe, uint8_t sid, const uint8_t *p, uint16_t n) {
     assert(pipe == 1 && sid == CFW_MESSAGE_SID && n <= CFW_VIDEO_REPLY_MAX_SIZE && ble_count < 2048);
-    if (p[0] != 31) assert(n <= 30);
+    if (p[0] != 31) assert(n <= (p[0] == CFW_MESSAGE_ROOM_ACK ? 36 : 30));
     ble[ble_count].size = n; memcpy(ble[ble_count++].bytes, p, n); return 0;
 }
 static int test_bridge(uint16_t app, const uint8_t *p, uint16_t n, void *argument) {
@@ -70,6 +70,10 @@ int cfw_message_received_routed(const uint8_t *p, uint16_t n, uint16_t crc,
     assert(n <= sizeof(last_payload) && cfw_message_crc(p, n) == crc);
     ++received; last_route = *route; last_size = n; memcpy(last_payload, p, n);
     if (refused) return -1;
+    if (route->confirmation) {
+        const uint8_t room[6] = {7, 0, 0, 0, 46, 192};
+        memcpy(route->confirmation, room, sizeof(room)); return 0;
+    }
     if (n && p[0] == 31) {
         uint8_t reply[14] = {31, route->here, 1, 0, 0, 0, 0, 1, 1};
         uint16_t bytes = n == 20 && p[1] == 10 ? 14 : 9;
@@ -125,6 +129,26 @@ static void cleanup(void) {
     connection_epoch = 1;
 }
 int main(void) {
+    for (uint8_t ingress = 1; ingress <= 2; ++ingress) {
+        side = ingress == 1 ? 2 : 1;
+        uint8_t nal[100] = {31, 29};
+        for (uint32_t turn = 0; turn < 4; ++turn) {
+            uint32_t sent = bridge_count, prior = ble_count;
+            send_record_chunks(nal, sizeof(nal), 3, turn ? 0 : CFW_MESSAGE_RESET_CONTEXT, 5 + turn, 0, 233);
+            assert(ble_count == prior + 1 && ble[prior].bytes[0] == CFW_MESSAGE_ROOM_ACK);
+            assert(ble[prior].size == 15 + turn * 7 && ble[prior].bytes[13] == 46);
+            uint32_t requests = bridge_count;
+            side = side == 1 ? 2 : 1;
+            for (uint32_t i = sent; i < requests; ++i)
+                assert(!cfw_message_bridge_received(CFW_MESSAGE_SID, bridge[i].bytes, bridge[i].size, 0));
+            side = side == 1 ? 2 : 1;
+            for (uint32_t i = requests; i < bridge_count; ++i)
+                assert(!cfw_message_bridge_received(CFW_MESSAGE_SID, bridge[i].bytes, bridge[i].size, 0));
+            assert(ble_count == prior + 2 && ble[prior + 1].bytes[0] == CFW_MESSAGE_ROOM_ACK);
+            assert(ble[prior + 1].size == ble[prior].size);
+        }
+        cleanup();
+    }
     /* Distinct lens contexts: peer proof follows the ingress BLE epoch, not
      * the unrelated lease-only host connection on the peer. */
     for (uint8_t ingress = 1; ingress <= 2; ++ingress) {
@@ -163,7 +187,7 @@ int main(void) {
             cleanup();
         }
         side = lens == 1 ? 1 : 2;
-        cfw_message_route route = {3 - lens, lens, 3, 200, 0};
+        cfw_message_route route = {3 - lens, lens, 3, 200, 0, 0};
         uint8_t reply[200] = {31, 3 - lens, 1, 0, 0, 0, 0, 1, 1};
         assert(!cfw_message_video_reply(&route, reply, sizeof(reply)) && bridge[0].size == 202);
         side = lens == 1 ? 2 : 1;

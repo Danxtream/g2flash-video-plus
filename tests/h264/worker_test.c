@@ -806,7 +806,7 @@ static uint32_t pool_pending(void) {
     uint32_t count = pool_count;
     assert(!pthread_mutex_unlock(&pool_mutex)); return count;
 }
-static const cfw_message_route control_route = {1, 1, 3, 9, 0};
+static const cfw_message_route control_route = {1, 1, 3, 9, 0, 0};
 static uint32_t request_next;
 static void control_command(uint8_t *p, uint32_t op, uint32_t stream) {
     memset(p, 0, VIDEO_START_BYTES);
@@ -843,7 +843,7 @@ static uint8_t control_variable_pages(const uint8_t *p, uint32_t n, uint8_t *sna
     if (length == VIDEO_STATUS_BYTES && p[1] != VIDEO_CONTROL_STATUS) {
         memset(snapshot, 0, length); length = VIDEO_BASE_STATUS_BYTES;
     }
-    cfw_message_route route = {lens, lens, lens, capacity, 0};
+    cfw_message_route route = {lens, lens, lens, capacity, 0, 0};
     control_reply_size = 0;
     int result = video_control_received(p, n, &route);
     assert(control_reply_size > VIDEO_REPLY_HEADER_BYTES && control_reply[6] == 0);
@@ -894,7 +894,7 @@ static void credits(void) {
         configure(); request_next = 0;
         uint8_t p[VIDEO_START_BYTES], frozen[6], current[6], saved[VIDEO_START_BYTES];
         control_command(p, VIDEO_CONTROL_START, 1);
-        cfw_message_route route = {here, origin, CFW_MESSAGE_BOTH, budget, 0};
+        cfw_message_route route = {here, origin, CFW_MESSAGE_BOTH, budget, 0, 0};
         assert(!video_control_received(p, 24, &route));
         pool_drain(); await_ready();
         uint32_t token = context.video.token;
@@ -986,7 +986,7 @@ static void control_paging(void) {
     }
     configure(); request_next = 0;
     control_command(p, VIDEO_CONTROL_STATUS, 0);
-    cfw_message_route route = {1, 1, 1, 200, 0};
+    cfw_message_route route = {1, 1, 1, 200, 0, 0};
     fail_reply = 1;
     assert(video_control_received(p, 8, &route) && context.video_control.request_high[0]);
     assert(context.video_telemetry.refusals[0].rows[0][14] == VIDEO_REFUSAL_SEND);
@@ -1006,7 +1006,7 @@ static void control_paging(void) {
 static void receive_evidence(void) {
     configure(); request_next = 0;
     uint8_t command[VIDEO_START_BYTES], out[128], page[9] = {31, 5, 1};
-    cfw_message_route route = {1, 1, 1, 200, 0};
+    cfw_message_route route = {1, 1, 1, 200, 0, 0};
     control_command(command, VIDEO_CONTROL_STATUS, 0);
     assert(!video_control_received(command, 8, &route));
     memcpy(page + 4, command + 4, 4);
@@ -1750,7 +1750,13 @@ static void timed_input(void) {
         assert(!video_control_received(plain, sizeof(plain), &control_route));
     }
     assert(!timeline->count && owner->queue.accepted == 2);
-    assert(!video_control_received(record, sizeof(record), &control_route));
+    uint8_t room[6] = {0};
+    cfw_message_route confirmation = control_route;
+    confirmation.reply_capacity = 200; confirmation.confirmation = room;
+    record[1] = VIDEO_CONTROL_NAL_TIMED_ROOM;
+    assert(!video_control_received(record, sizeof(record), &confirmation));
+    assert(room[4] == 33 && room[5] == 160); /* One NAL slot, five picture slots. */
+    record[1] = VIDEO_CONTROL_NAL_TIMED;
     assert(timeline->count == 1 && timeline->accepted == 1 && owner->queue.accepted == 3);
     /* An exact replay is accepted without offering its frame time twice. */
     assert(!video_control_received(record, sizeof(record), &control_route));
@@ -1945,19 +1951,19 @@ static void failure_history(void) {
     for (uint32_t i = 0; i < VIDEO_FAILURE_HISTORY; ++i)
         owner.recent[(3 + i) % VIDEO_FAILURE_HISTORY] = (video_failure_nal){12 + i, i * 17, 10 + i, 1, 0};
     bytes[1] = 9; owner.allocation_tag = 5; owner.allocation_size = 4096;
-    video_failure_capture(&owner, G2_H264_FAIL_ALLOC);
+    video_failure_capture(&owner, G2_H264_FAIL_ALLOC, 0);
     assert(context.video_failure.valid && video_read32(context.video_failure.detail + 20) == 20 &&
            video_read32(context.video_failure.detail + 32) != video_read32(context.video_failure.detail + 36) &&
            video_read32(context.video_failure.detail + 96) == 5 &&
            video_read32(context.video_failure.detail + 100) == 4096);
     for (uint32_t i = 0; i < 8; ++i)
         assert(video_read32(context.video_failure.history + 32 + i * 12) == 12 + i);
-    bytes[0] = 7; video_failure_capture(&owner, VIDEO_FAULT_FORMAT);
+    bytes[0] = 7; video_failure_capture(&owner, VIDEO_FAULT_FORMAT, 0);
     assert(video_read32(context.video_failure.detail + 16) == G2_H264_FAIL_ALLOC);
     memset(&owner, 0, sizeof(owner));
     assert(context.video_failure.valid && video_read32(context.video_failure.detail + 12) == 42);
     context.video_failure.valid = 0; owner.context = &context;
-    video_failure_capture(&owner, VIDEO_FAULT_OWNERSHIP);
+    video_failure_capture(&owner, VIDEO_FAULT_OWNERSHIP, 0);
     assert(context.video_failure.valid && video_read32(context.video_failure.detail + 20) == UINT32_MAX &&
            !video_read32(context.video_failure.detail + 120) && !video_read32(context.video_failure.detail + 124));
     puts("retained failure, wrapped history, changed input, allocation and checksum evidence PASS");
