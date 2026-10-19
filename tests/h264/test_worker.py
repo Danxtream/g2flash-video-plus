@@ -60,6 +60,9 @@ class WorkerTests(unittest.TestCase):
     def test_inert_idle_real_decoder_resets_and_y_planes(self):
         self.check_case("normal")
 
+    def test_passive_hop_discovery_buckets_and_frozen_small_route_replay(self):
+        self.check_case("hop-diagnostics")
+
     def test_three_coded_geometries_exact_replay_invalid_rects_and_actual_decoder_budget(self):
         self.check_case("geometry")
 

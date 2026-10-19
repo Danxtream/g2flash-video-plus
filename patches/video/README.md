@@ -1065,3 +1065,39 @@ are fixed to the guarded image. Clock transitions, stopped counters, long spans
 or tick skew prevent a trustworthy cycle ratio; raw evidence is retained.
 The rolling steady bracket is at least 250 ms without sleeping or busy-waiting.
 These snapshots do not establish a physical core frequency by themselves.
+
+## Passive Delivery Counters
+
+Diagnostic kind 8 is optional timing evidence, not a sender or credit mode.
+Capture is inert without a START generation. There is no notification per
+NAL, stock bridge change, extra queue slot or periodic diagnostic request.
+Clients should read it only after a stream ends or fails.
+
+A twelve-byte request with kind 8 and selector 0 discovers schema 2 and the
+172/128-byte snapshot lengths at bytes 8/9. A sixteen-byte request adds the
+stream at offset 12; selector 0 freezes timing, selector 1 size buckets.
+Both use existing replay storage and PAGE transport without allocating.
+Common bytes 3..7 are kind, selector, schema, lens and ingress. Stream/token
+are LE32 at 8/12, pending/peak at 16/17, elapsed/live-forward ticks at 20/24
+and qualification flags at 28. Ticks use each lens's own clock.
+
+Selector 0 has seven 20-byte rows at 32: count, total, maximum, then four
+LE16 bins for <=1, <=8, <=32 and >32 ticks. Stages are receive-to-first-
+forward, summed enqueue-call duration, record assembly through CRC/inflate,
+local dispatch-to-ACK enqueue, first forward-to-peer ACK, peer ACK-to-BLE
+enqueue and receive-to-the-later confirmation enqueue. None ends at physical
+radio transmission. Forward duration includes later BLE fragment arrivals.
+
+Selector 1 has four 16-byte rows at 32: count, total, maximum and total
+wire-record bytes, for <=512, <=1024, <=2048 and larger bodies. Sizes include
+the video record header and reflect compressed bytes when applicable.
+LE32 overlapped/incoming NAL counts at 96/100 describe first BLE fragments
+arriving while a DIFFERENT NAL's classified forward is pending. A NAL's own
+continuations never count. Delayed classification makes overlap and peak
+lower bounds; elapsed ends at the last matching event after STOP.
+
+Flags: 1 saturation, 2 exhausted matching slots, 4 refusal/enqueue failure,
+8 contention, 16 ACK-history upper bound, 32 late classification, 64 early
+cache replacement, 128 CRC mismatch. Compare counts and flags before using
+the aggregates. Sixteen fixed identities retain early peer replies, with
+CRC checks; callbacks never spin, wait, allocate or change admission.

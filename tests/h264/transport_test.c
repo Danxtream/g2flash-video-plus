@@ -6,7 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
+#define bzero(p, n) memset(p, 0, n)
 #include "../../patches/message_transport.h"
+#include "../../patches/cfw_context.h"
 
 static cfw_message_stream streams[2][2];
 static uint32_t side = 2, received, refused, stock_calls, live;
@@ -15,6 +17,13 @@ static uint8_t last_payload[4096];
 static uint16_t last_size;
 static uint32_t connection_epoch = 1;
 #define CFW_CONNECTION_EPOCH() connection_epoch
+static customCfwContext contexts[2];
+static customCfwContext *peekCustomCfwContext(void) { return &contexts[side == 1 ? 1 : 0]; }
+static customCfwContext *getCustomCfwContext(void) { return peekCustomCfwContext(); }
+static uint32_t hop_ticks = 100, early_bridge;
+#define VIDEO_TICK (++hop_ticks)
+static uint32_t video_read32(const uint8_t *p) { return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+static void video_write32(uint8_t *p, uint32_t n) { for (uint32_t i = 0; i < 4; ++i) p[i] = n >> (8 * i); }
 typedef struct { uint16_t size; uint8_t bytes[269]; } test_packet;
 static test_packet ble[2048], bridge[2048];
 static uint32_t ble_count, bridge_count;
@@ -40,7 +49,12 @@ static int test_ble(uint8_t pipe, uint8_t sid, const uint8_t *p, uint16_t n) {
 }
 static int test_bridge(uint16_t app, const uint8_t *p, uint16_t n, void *argument) {
     assert(app == CFW_MESSAGE_SID && !argument && n <= 269 && bridge_count < 2048);
-    bridge[bridge_count].size = n; memcpy(bridge[bridge_count++].bytes, p, n); return 0;
+    bridge[bridge_count].size = n; memcpy(bridge[bridge_count++].bytes, p, n);
+    if (early_bridge) {
+        uint32_t saved = side; side = side == 1 ? 2 : 1;
+        assert(!cfw_message_bridge_received(app, p, n, 0)); side = saved;
+    }
+    return 0;
 }
 #define CFW_STOCK_RECEIVE test_stock
 #define CFW_STOCK_BRIDGE_RECEIVE test_stock_bridge
@@ -61,6 +75,7 @@ uint32_t video_sync_received(const uint8_t *data, uint32_t size) {
     (void)data; (void)size; return 6;
 }
 #include "../../patches/message_transport.c"
+#include "../../patches/video/hop.c"
 
 int cfw_message_received(const uint8_t *p, uint16_t n, uint16_t crc) {
     (void)p; (void)n; (void)crc; assert(0); return -1;
@@ -306,6 +321,32 @@ int main(void) {
     send_record(nal_record, sizeof(nal_record), 1, CFW_MESSAGE_RESET_CONTEXT, 91, &z);
     assert(received == 1 && last_size == 4096 && !memcmp(last_payload, nal_record, 4096));
     deflateEnd(&z); cleanup();
+    /* Both ingress choices, with all hooks live, including an immediate peer
+     * completion inside the donor enqueue call before local parsing starts. */
+    for (uint32_t ingress = 1; ingress <= 2; ++ingress) {
+        for (uint32_t early = 0; early <= 1; ++early) {
+            cleanup(); memset(contexts, 0, sizeof(contexts));
+            for (uint32_t i = 0; i < 2; ++i) {
+                contexts[i].video_control.start_guard = 7;
+                contexts[i].video_control.stream = 7; contexts[i].video_control.owner_origin = ingress;
+                contexts[i].video.token = 100 + i;
+            }
+            side = ingress == 1 ? 2 : 1; early_bridge = early;
+            uint8_t timing_nal[12] = {31, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0x67, 0x80};
+            send_record_chunks(timing_nal, sizeof(timing_nal), 3, CFW_MESSAGE_RESET_CONTEXT, 200, 0, 233);
+            if (!early) {
+                uint32_t sent = bridge_count; side = side == 1 ? 2 : 1;
+                for (uint32_t i = 0; i < sent; ++i) assert(!cfw_message_bridge_received(CFW_MESSAGE_SID, bridge[i].bytes, bridge[i].size, 0));
+                side = side == 1 ? 2 : 1;
+                for (uint32_t i = sent; i < bridge_count; ++i) assert(!cfw_message_bridge_received(CFW_MESSAGE_SID, bridge[i].bytes, bridge[i].size, 0));
+            }
+            video_hop_state *timing = &peekCustomCfwContext()->video_telemetry.hop;
+            assert(!timing->pending && timing->maximum == 1 && timing->rows[4].count == 1 && timing->rows[6].count == 1);
+            side = side == 1 ? 2 : 1; timing = &peekCustomCfwContext()->video_telemetry.hop;
+            assert(!timing->maximum && timing->rows[3].count == 1 && timing->rows[6].count == 1);
+        }
+    }
+    early_bridge = 0; cleanup(); assert(getCustomCfwContext() == peekCustomCfwContext());
     assert(cfw_receive_packet(1, body, 24) == 17);
     assert(cfw_message_bridge_received(9, body, 24, 0) == 19 && stock_calls == 2);
     puts("CRC, persistent inflater/refusal/reset, MTU23 routed replies and stock fallthrough PASS");

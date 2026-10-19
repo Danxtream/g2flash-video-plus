@@ -1,6 +1,7 @@
 /* Bounded receive evidence and read-only clocks. SPDX-License-Identifier: GPL-3.0-only */
 #pragma once
 #include <stdint.h>
+#include "hop.h"
 
 enum {
     VIDEO_REFUSAL_DIAGNOSTICS = 4, VIDEO_CLOCK_DIAGNOSTICS = 5,
@@ -29,4 +30,5 @@ typedef struct {
     uint8_t reply[2][200];
     video_refusal_ring refusals[2];
     video_clock_state clock;
+    video_hop_state hop;
 } video_telemetry_state;

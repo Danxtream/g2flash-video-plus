@@ -4,6 +4,31 @@
 #include "video/sync.h"
 #include "video/profile.h"
 #include "video/radio.h"
+#include "video/hop.h"
+
+#ifndef CFW_HOP_TICK
+#define CFW_HOP_TICK video_hop_tick
+#define CFW_HOP_OPEN video_hop_open
+#define CFW_HOP_EVENT video_hop_event
+#define CFW_HOP_OVERLAP video_hop_overlap
+#endif
+typedef struct { uint32_t rx, forward, cost, overlap; } cfw_hop_packet;
+
+static uint32_t cfw_hop_key(cfw_message_stream *s, uint8_t origin) {
+    return s->stream_id | (uint32_t)s->message_id << 8 | (uint32_t)origin << 24;
+}
+static int cfw_hop_nal(const uint8_t *p, uint32_t n) {
+    return n >= 6 && p[0] == 31 && (p[1] == 6 || p[1] == 24);
+}
+__attribute__((noinline)) static void cfw_hop_returns(const uint8_t *data, uint32_t length, uint8_t event, uint32_t detail) {
+    if (!CFW_HOP_TICK()) return;
+    for (uint32_t i = 3; i + 3 <= length; i = i == 3 ? 11 : i + CFW_ACK_ENTRY_SIZE) {
+        uint32_t key = data[i] | (uint32_t)data[i + 1] << 8 | (uint32_t)data[i + 2] << 16 | (uint32_t)data[1] << 24;
+        uint32_t crc = i == 3 ? 9 : i + 5;
+        CFW_HOP_EVENT(key, event, detail | (event == VIDEO_HOP_PEER && i != 3 ? 2 : 0) |
+            (uint32_t)data[crc] << 16 | (uint32_t)data[crc + 1] << 24);
+    }
+}
 
 #ifndef CFW_STOCK_RECEIVE
 #define CFW_STOCK_RECEIVE ((uint32_t (*)(uint8_t, const uint8_t *, uint16_t))0x004cf3e9u)
@@ -187,6 +212,11 @@ static uint32_t cfw_message_complete(cfw_message_stream *stream, uint8_t here,
     valid = valid && crc == stream->checksum;
     cfw_message_route route = {here, origin, stream->options,
                                stream->epoch ? stream->video_capacity : stream->packet_capacity, stream->message_id};
+    int nal = valid && CFW_HOP_TICK() && cfw_hop_nal(data, size);
+    if (nal) {
+        if (stream->flags & CFW_MESSAGE_COMPRESSED) CFW_HOP_OPEN(stream, origin, here, data);
+        CFW_HOP_EVENT(cfw_hop_key(stream, origin), VIDEO_HOP_WIRE, stream->hop_enqueue_ticks);
+    }
     if (valid && cfw_message_received_routed(data, (uint16_t)size, crc, &route) != 0) valid = 0;
     if (!valid) {
         cfw_inflate_reset(stream);
@@ -194,6 +224,7 @@ static uint32_t cfw_message_complete(cfw_message_stream *stream, uint8_t here,
     }
     int result = cfw_message_reply(stream, here, origin,
         valid ? CFW_MESSAGE_ACK : CFW_MESSAGE_NACK, (uint16_t)size);
+    if (nal) CFW_HOP_EVENT(cfw_hop_key(stream, origin), VIDEO_HOP_LOCAL, !valid || result != 0);
     if (decoded) CFW_MESSAGE_FREE(decoded);
     if (stream->buffer) CFW_MESSAGE_FREE(stream->buffer);
     stream->buffer = 0;
@@ -205,7 +236,7 @@ static uint32_t cfw_message_complete(cfw_message_stream *stream, uint8_t here,
 /* The clear five-byte header may span packets. Allocate only after it arrives.
  * No packet boundary has any meaning to the record parser. */
 static uint32_t cfw_message_process(const uint8_t *packet, uint16_t length,
-                                    uint8_t here, uint8_t origin, uint32_t epoch) {
+                                    uint8_t here, uint8_t origin, uint32_t epoch, cfw_hop_packet hop) {
     cfw_message_stream *stream = CFW_STREAM_STATE(origin);
     if (!stream) return 6;
     if (stream->epoch != epoch) {
@@ -242,6 +273,10 @@ static uint32_t cfw_message_process(const uint8_t *packet, uint16_t length,
     uint16_t end = length - 2, cursor = 9;
     while (cursor < end) {
         if (stream->length_bytes < 5) {
+            if (!stream->length_bytes && hop.rx) {
+                stream->hop_rx = hop.rx; stream->hop_forward = hop.forward; stream->hop_enqueue_ticks = 0;
+                stream->hop_overlap = hop.overlap;
+            }
             uint8_t byte = packet[cursor++];
             switch (stream->length_bytes++) {
             case 0: stream->flags = byte; break;
@@ -262,7 +297,11 @@ static uint32_t cfw_message_process(const uint8_t *packet, uint16_t length,
         uint16_t count = stream->size - stream->used;
         if (count > end - cursor) count = end - cursor;
         if (count) memcpy(stream->buffer + stream->used, packet + cursor, count);
+        uint16_t previous = stream->used;
         stream->used += count;
+        if (hop.rx) stream->hop_enqueue_ticks += hop.cost;
+        if (hop.rx && !(stream->flags & CFW_MESSAGE_COMPRESSED) && previous < 6 &&
+            cfw_hop_nal(stream->buffer, stream->used)) CFW_HOP_OPEN(stream, origin, here, stream->buffer);
         cursor += count;
         if (stream->used == stream->size) {
             uint32_t result = cfw_message_complete(stream, here, origin);
@@ -293,11 +332,21 @@ uint32_t cfw_receive_packet(uint8_t pipe, const uint8_t *packet, uint16_t length
     if (!here) return 6;
     uint32_t epoch = CFW_CONNECTION_EPOCH();
     video_profile_capture captured = CFW_PROFILE_BEGIN();
+    cfw_hop_packet hop = {CFW_HOP_TICK(), 0, 0, 0};
+    if (hop.rx) {
+        uint32_t key = packet[8] & CFW_MESSAGE_RESET ? packet[2] | (uint32_t)here << 24 :
+            cfw_hop_key(CFW_STREAM_STATE(here), here);
+        hop.overlap = CFW_HOP_OVERLAP(key);
+    }
     if (packet[8] & (here ^ CFW_MESSAGE_BOTH))
+    {
+        hop.forward = CFW_HOP_TICK();
         if (cfw_message_bridge_send(CFW_BRIDGE_REQUEST, here, packet, length, epoch) != 0) status = 6;
+        if (hop.rx) hop.cost = CFW_HOP_TICK() - hop.forward;
+    }
     /* A failed peer enqueue does not prevent the selected local lens processing. */
     if (packet[8] & here) {
-        uint32_t local_status = cfw_message_process(packet, length, here, here, epoch);
+        uint32_t local_status = cfw_message_process(packet, length, here, here, epoch, hop);
         if (local_status) status = local_status;
     }
     CFW_PROFILE_END(captured, VIDEO_PROFILE_INGRESS, length);
@@ -328,7 +377,8 @@ uint32_t cfw_message_bridge_received(uint32_t app_id, const uint8_t *data,
             return status;
         }
         video_profile_capture captured = CFW_PROFILE_BEGIN();
-        status = (data[14] & here) ? cfw_message_process(data + 6, length - 6, here, origin, epoch) : 0;
+        cfw_hop_packet hop = {CFW_HOP_TICK(), 0, 0, 0};
+        status = (data[14] & here) ? cfw_message_process(data + 6, length - 6, here, origin, epoch, hop) : 0;
         CFW_PROFILE_END(captured, VIDEO_PROFILE_INGRESS, length - 2);
         return status;
     }
@@ -338,7 +388,12 @@ uint32_t cfw_message_bridge_received(uint32_t app_id, const uint8_t *data,
             (length - CFW_ACK_SIZE - 2) % CFW_ACK_ENTRY_SIZE != 0) return 0xbu;
         if ((data[2] != CFW_MESSAGE_ACK && data[2] != CFW_MESSAGE_NACK) || data[6] != (origin ^ CFW_MESSAGE_BOTH)) return 0xau;
         if (data[2] == CFW_MESSAGE_NACK && length != CFW_ACK_SIZE + 2) return 0xbu;
-        return CFW_BLE_SEND(1, CFW_MESSAGE_SID, data + 2, length - 2) == 0 ? 0 : 6;
+        /* ACK history repairs lost replies too; mark their later arrival as an
+         * upper bound, rather than pretending it was the original arrival. */
+        cfw_hop_returns(data, length, VIDEO_HOP_PEER, data[2] == CFW_MESSAGE_NACK);
+        int sent = CFW_BLE_SEND(1, CFW_MESSAGE_SID, data + 2, length - 2);
+        cfw_hop_returns(data, length, VIDEO_HOP_RELAY, sent != 0);
+        return sent == 0 ? 0 : 6;
     }
     if (data[0] == CFW_BRIDGE_VIDEO_RETURN) {
         if (here != origin) return 0;

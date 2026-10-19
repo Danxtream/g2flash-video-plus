@@ -433,6 +433,19 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             entry->snapshot[0] = VIDEO_PROTOCOL_VERSION; entry->snapshot[1] = VIDEO_CONTROL_DIAGNOSTICS;
             entry->snapshot[2] = entry->result;
         }
+        if (data[1] == VIDEO_CONTROL_DIAGNOSTICS && (size == 12 || size == 16) && data[8] == VIDEO_HOP_DIAGNOSTICS && !data[10] && !data[11]) {
+            entry->snapshot_bytes = size == 12 || data[9] ? VIDEO_DIAGNOSTICS_BYTES : VIDEO_HOP_BYTES;
+            bzero(entry->snapshot, entry->snapshot_bytes);
+            entry->result = data[9] > 1 || (size == 12 && data[9]) ? VIDEO_CONTROL_FORMAT : size == 12 ? VIDEO_CONTROL_ACCEPTED :
+                video_hop_snapshot(route->origin, route->here, video_read32(data + 12), entry->snapshot, data[9]);
+            entry->snapshot[0] = VIDEO_PROTOCOL_VERSION; entry->snapshot[1] = VIDEO_CONTROL_DIAGNOSTICS;
+            entry->snapshot[2] = entry->result;
+            if (size == 12) {
+                entry->snapshot[3] = VIDEO_HOP_DIAGNOSTICS; entry->snapshot[5] = 2;
+                entry->snapshot[8] = VIDEO_HOP_BYTES;
+                entry->snapshot[9] = VIDEO_HOP_SIZE_BYTES;
+            }
+        }
         int radio = size == VIDEO_CONTROL_HEADER_BYTES + 4 &&
             (data[8] == VIDEO_RADIO_DIAGNOSTICS || data[8] == VIDEO_RADIO_REFUSAL_DIAGNOSTICS) &&
             !data[9] && !data[10] && !data[11];
