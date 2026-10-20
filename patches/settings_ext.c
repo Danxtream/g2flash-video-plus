@@ -475,13 +475,17 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 //
 //  16 -> route real ANCS write completions and drain CCC writes on restore.
 //
+// Text after the number and a space is a short build label (kept short: the
+// fields appended after it share the 256-byte response), so a phone log
+// shows which image is actually running. Parsers read only the integer.
+//
 // The string is a normal rodata literal now that build.py emits/relocates .rodata
 // (earlier this had to be spelled out byte-by-byte to avoid a rodata section).
 #define SETTINGS_RESPONSE_CAPACITY 256u
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "Faceclaw/16";
+        static const char caps[] = "Faceclaw/16 1020a";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);
