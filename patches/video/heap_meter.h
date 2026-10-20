@@ -27,6 +27,6 @@ void video_heap_meter_sample(video_heap_meter *, uint32_t generation, uint32_t s
     uint32_t token, uint32_t heap_index, const video_heap_view *);
 /* Freeze retained per-stream evidence into existing 128-byte replay storage. */
 int video_heap_meter_snapshot(video_heap_meter *, uint32_t stream, uint8_t lens, uint8_t *);
-/* First refusal only; try the allocator's own mutex without waiting. */
+/* First refusal only; wait briefly for the allocator's own mutex, then give up. */
 void video_heap_meter_refused(video_heap_meter *);
 int video_heap_shape_snapshot(video_heap_meter *, uint32_t stream, uint8_t lens, uint8_t *);

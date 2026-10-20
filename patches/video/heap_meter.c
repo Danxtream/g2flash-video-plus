@@ -5,7 +5,10 @@
 #ifndef VIDEO_METER_READ
 #define VIDEO_METER_READ(a) (*(volatile uint32_t *)(uintptr_t)(a))
 #define VIDEO_METER_COUNT(q) (((uint32_t (*)(uint32_t))0x004433a1U)(q))
-#define VIDEO_METER_TAKE(m) (((int (*)(uint32_t, uint32_t))0x00442f91U)(m, 0))
+/* At the first refusal a stock task often holds the allocator; one short
+ * bounded wait (kernel ticks, 1 ms each) beats giving up on the shape. */
+#define VIDEO_METER_LOCK_WAIT_TICKS 10U
+#define VIDEO_METER_TAKE(m) (((int (*)(uint32_t, uint32_t))0x00442f91U)(m, VIDEO_METER_LOCK_WAIT_TICKS))
 #define VIDEO_METER_GIVE(m) (((int (*)(uint32_t))0x00442ff7U)(m))
 #endif
 
@@ -124,7 +127,7 @@ void video_heap_meter_refused(video_heap_meter *m) {
     if (!__atomic_compare_exchange_n(&m->refused, &empty, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) return;
     if (!video_heap_meter_take(m)) return;
     if (!m->shape.status) {
-        m->shape.status = 2; /* Unavailable: try-lock busy, no wait or retry. */
+        m->shape.status = 2; /* Unavailable: the allocator stayed busy through the wait. */
         uint32_t mutex = VIDEO_METER_READ(0x20076c38U);
         if (mutex && VIDEO_METER_TAKE(mutex) == 0) {
             if (VIDEO_METER_READ(0x20076e08U) == 0x202020a8U)
