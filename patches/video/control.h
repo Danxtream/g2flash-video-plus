@@ -58,7 +58,9 @@ enum {
     VIDEO_FEATURE_DECODE_TOTALS = 16,
     VIDEO_STATUS_EXTENSION_UNIT = 64,
     VIDEO_STATUS_EXTENSION_SHIFT = 5,
-    VIDEO_CREDIT_CAPACITY_SIX = 8,
+    /* The queue grew past its initial four slots. Older apps read this as a
+     * capacity of six; VIDEO_QUEUE_DIAGNOSTICS reports the real one. */
+    VIDEO_CREDIT_EXTENDED = 8,
     VIDEO_CREDIT_STATE_SHIFT = 4,
     VIDEO_CREDIT_GAP = 128,
     VIDEO_CONTROL_HEADER_BYTES = 8,

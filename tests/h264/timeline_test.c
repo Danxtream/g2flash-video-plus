@@ -4,7 +4,7 @@
 #include "../../patches/video/timeline.c"
 
 int main(void) {
-    _Static_assert(VIDEO_TIMELINE_RECORDS == 6, "Six independent picture records");
+    _Static_assert(VIDEO_TIMELINE_RECORDS == 12, "Twelve independent picture records");
     video_timeline s = {0};
     video_frame_time out = {0};
     for (uint32_t fps = 10; fps <= 20; fps += 5) {

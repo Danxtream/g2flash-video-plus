@@ -11,7 +11,16 @@ enum {
     VIDEO_HEADERS_PPS = 2,
     VIDEO_HEADERS_IDR = 4,
     VIDEO_QUEUE_INITIAL = 4,
-    VIDEO_QUEUE_MAX = 6,
+    /* About 600 ms at 20 fps: room to ride out a stalled phone link. */
+    VIDEO_QUEUE_MAX = 12,
+    /* Credit, room and capacity fields never report more than this: older
+     * apps check for exactly a 4 -> 6 queue, and a lower report is always
+     * safe because it can only delay input. */
+    VIDEO_QUEUE_REPORTED = 6,
+    /* DIAGNOSTICS subtype reporting the real queue and timeline sizes. Byte 3
+     * echoes it: an older lens answers with its generic snapshot, whose byte 3
+     * is a lifecycle state, so the app can tell it is not supported. */
+    VIDEO_QUEUE_DIAGNOSTICS = 11,
     VIDEO_SLOT_BYTES = 4096,
     VIDEO_NAL_HEADER_BYTES = 10,
     VIDEO_RAW_NAL_BYTES = VIDEO_SLOT_BYTES - VIDEO_NAL_HEADER_BYTES
@@ -43,7 +52,8 @@ typedef struct {
 void video_queue_init(video_nal_queue *, uint32_t token);
 /* Publish a prepared slot before accepting input. Capacity increases last. */
 int video_queue_attach(video_nal_queue *, uint8_t *bytes);
-/* Publish two prepared extension slots together, never a capacity of five. */
+/* Publish all prepared extension slots together, from one contiguous block of
+ * (VIDEO_QUEUE_MAX - VIDEO_QUEUE_INITIAL) slots. */
 int video_queue_extend(video_nal_queue *, uint8_t *bytes);
 /* Free credits include the reserved expected slot; future distance is bounded. */
 uint32_t video_queue_credits(const video_nal_queue *);

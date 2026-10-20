@@ -18,7 +18,7 @@ static int checked_push(video_nal_queue *q, uint32_t sequence, const uint8_t *by
 
 static void ordering(void) {
     const uint8_t permutations[6][3] = {{1,2,3},{1,3,2},{2,1,3},{2,3,1},{3,1,2},{3,2,1}};
-    uint8_t slots[VIDEO_QUEUE_INITIAL][VIDEO_SLOT_BYTES], extension[2 * VIDEO_SLOT_BYTES];
+    uint8_t slots[VIDEO_QUEUE_INITIAL][VIDEO_SLOT_BYTES], extension[(VIDEO_QUEUE_MAX - VIDEO_QUEUE_INITIAL) * VIDEO_SLOT_BYTES];
     const uint8_t nal[] = {0x41, 0x55};
     video_nal_queue q;
     video_nal_view view;
@@ -44,10 +44,13 @@ static void ordering(void) {
         uint32_t overwritten = q.slots[0].sequence;
         assert(checked_push(&q, 4, nal, 2) == 1);
         assert(checked_push(&q, overwritten, nal, 2) == VIDEO_QUEUE_STALE);
-        assert(video_queue_extend(&q, extension) && q.capacity == 6);
+        assert(video_queue_extend(&q, extension) && q.capacity == VIDEO_QUEUE_MAX);
+        for (uint32_t i = VIDEO_QUEUE_INITIAL; i < VIDEO_QUEUE_MAX; ++i)
+            assert(q.slots[i].bytes == extension + (i - VIDEO_QUEUE_INITIAL) * VIDEO_SLOT_BYTES);
         assert(!video_queue_extend(&q, extension));
-        assert(checked_push(&q, 9, nal, 2) == 1);
-        assert(!checked_push(&q, 10, nal, 2));
+        /* The future window is the whole extended queue past the expected slot. */
+        assert(checked_push(&q, 4 + VIDEO_QUEUE_MAX - 1, nal, 2) == 1);
+        assert(!checked_push(&q, 4 + VIDEO_QUEUE_MAX, nal, 2));
     }
     video_queue_init(&q, 19);
     for (uint32_t i = 0; i < 4; ++i) assert(video_queue_attach(&q, slots[i]));

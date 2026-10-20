@@ -4,7 +4,9 @@
 
 #pragma clang section text=".text.video"
 
-void video_queue_init(video_nal_queue *q, uint32_t token) {
+/* Out of line: inlined, the zeroed queue literal (twelve slots) would sit on the
+ * controller's start frame, its worst stack chain. */
+__attribute__((noinline)) void video_queue_init(video_nal_queue *q, uint32_t token) {
     *q = (video_nal_queue){0};
     q->token = token;
 }
@@ -18,10 +20,11 @@ int video_queue_attach(video_nal_queue *q, uint8_t *bytes) {
 }
 int video_queue_extend(video_nal_queue *q, uint8_t *bytes) {
     if (!q || !bytes || q->capacity != VIDEO_QUEUE_INITIAL) return 0;
+    const uint8_t *end = bytes + (VIDEO_QUEUE_MAX - VIDEO_QUEUE_INITIAL) * VIDEO_SLOT_BYTES;
     for (uint32_t i = 0; i < q->capacity; ++i)
-        if (q->slots[i].bytes == bytes || q->slots[i].bytes == bytes + VIDEO_SLOT_BYTES) return 0;
-    q->slots[VIDEO_QUEUE_INITIAL] = (video_nal_slot){.bytes = bytes};
-    q->slots[VIDEO_QUEUE_INITIAL + 1] = (video_nal_slot){.bytes = bytes + VIDEO_SLOT_BYTES};
+        if (q->slots[i].bytes >= bytes && q->slots[i].bytes < end) return 0;
+    for (uint32_t i = VIDEO_QUEUE_INITIAL; i < VIDEO_QUEUE_MAX; ++i)
+        q->slots[i] = (video_nal_slot){.bytes = bytes + (i - VIDEO_QUEUE_INITIAL) * VIDEO_SLOT_BYTES};
     q->capacity = VIDEO_QUEUE_MAX;
     return 1;
 }

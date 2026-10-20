@@ -952,7 +952,7 @@ static void credits(void) {
         assert(!credit_response(p, route, current) && video_read32(current) == 1 &&
                (current[4] & 7) == 4);
         assert(!take(1, 1000));
-        uint8_t extension[2 * VIDEO_SLOT_BYTES];
+        static uint8_t extension[(VIDEO_QUEUE_MAX - VIDEO_QUEUE_INITIAL) * VIDEO_SLOT_BYTES];
         assert(video_queue_extend(&owner->queue, extension));
         assert(video_queue_push(&owner->queue, 2, header, sizeof(header)) == 1);
         assert(video_queue_watch(&owner->queue, tick()));
@@ -961,7 +961,8 @@ static void credits(void) {
         video_write32(p + (here == 1 ? 12 : 16), token);
         uint32_t allocations = allocation_calls;
         assert(!credit_response(p, route, current) && video_read32(current) == 1 &&
-               (current[4] & 7) == 5 && (current[4] & VIDEO_CREDIT_CAPACITY_SIX) &&
+               /* Eleven free slots are reported as the legacy six. */
+               (current[4] & 7) == VIDEO_QUEUE_REPORTED && (current[4] & VIDEO_CREDIT_EXTENDED) &&
                (current[4] & VIDEO_CREDIT_GAP) && allocation_calls == allocations);
         memcpy(saved, p, sizeof(saved));
         saved[12] ^= 1; saved[16] ^= 1;
@@ -1405,8 +1406,9 @@ static void queue_extension(void) {
         assert(video_worker_picture_complete(owner->token, 1));
         worker_thread = 0;
         if (!mode) {
-            assert(owner->queue.capacity == 6 && owner->storage.limit == 231480 &&
-                   owner->storage.used == used + 8228);
+            enum { extension = (VIDEO_QUEUE_MAX - VIDEO_QUEUE_INITIAL) * VIDEO_SLOT_BYTES };
+            assert(owner->queue.capacity == VIDEO_QUEUE_MAX && owner->storage.limit == 223288 + extension &&
+                   owner->storage.used == used + extension + 36);
         } else assert(owner->queue.capacity == 4 && owner->storage.limit == 223288 &&
                       owner->storage.used == used);
         assert(owner->queue.pictures == 2 && owner->extension_attempted);
@@ -1477,7 +1479,8 @@ static void drain_frame_results(void) {
 int worker_upload_nal(const uint8_t *nal, uint32_t bytes, uint32_t sequence) {
     assert(bytes <= VIDEO_RAW_NAL_BYTES && !worker_thread);
     if (upload_limit && sequence >= upload_limit) return 0;
-    if (playback_pause_fixture && sequence == 12) exercise_pause();
+    /* Pause once the uploader has run a full queue ahead of the screen. */
+    if (playback_pause_fixture && sequence == 12 + VIDEO_QUEUE_MAX - 6) exercise_pause();
     uint8_t record[VIDEO_SLOT_BYTES + 8] = {VIDEO_MESSAGE_ID, VIDEO_CONTROL_NAL};
     video_write32(record + 2, 1); video_write32(record + 6, sequence);
     uint32_t header = VIDEO_NAL_HEADER_BYTES;
@@ -1785,7 +1788,8 @@ static void timed_input(void) {
     confirmation.reply_capacity = 200; confirmation.confirmation = room;
     record[1] = VIDEO_CONTROL_NAL_TIMED_ROOM;
     assert(!video_control_received(record, sizeof(record), &confirmation));
-    assert(room[4] == 33 && room[5] == 160); /* One NAL slot, five picture slots. */
+    /* One NAL slot; eleven free picture records are reported as the legacy six. */
+    assert(room[4] == 33 && room[5] == VIDEO_QUEUE_REPORTED << VIDEO_CREDIT_TIMELINE_SHIFT);
     record[1] = VIDEO_CONTROL_NAL_TIMED;
     assert(timeline->count == 1 && timeline->accepted == 1 && owner->queue.accepted == 3);
     /* An exact replay is accepted without offering its frame time twice. */
@@ -1816,7 +1820,8 @@ static void timed_input(void) {
                                             VIDEO_CREDITS_REQUEST_BYTES, &wide);
         assert(control_reply_size == VIDEO_REPLY_HEADER_BYTES + VIDEO_CREDITS_BYTES);
         uint8_t code = control_reply[VIDEO_REPLY_HEADER_BYTES + 5];
-        if (flagged == 1) assert(!result && code == (VIDEO_TIMELINE_RECORDS - 2) << VIDEO_CREDIT_TIMELINE_SHIFT);
+        /* Ten free records are reported as the legacy six. */
+        if (flagged == 1) assert(!result && code == VIDEO_QUEUE_REPORTED << VIDEO_CREDIT_TIMELINE_SHIFT);
         else if (flagged == 2) assert(result && code == VIDEO_CONTROL_FORMAT);
         else assert(!result && !code);
     }
@@ -1966,6 +1971,13 @@ static void consumer(void) {
     p[8] = VIDEO_FAILURE_DIAGNOSTICS; p[9] = p[10] = p[11] = 0;
     assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED && snapshot[7] == 1);
     assert(!memcmp(snapshot + 8, context.video_failure.detail + 8, 120));
+    /* The real queue and timeline sizes, which every other report caps at six. */
+    control_command(p, VIDEO_CONTROL_DIAGNOSTICS, 0);
+    p[8] = VIDEO_QUEUE_DIAGNOSTICS; p[9] = p[10] = p[11] = 0;
+    assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED &&
+           snapshot[1] == VIDEO_CONTROL_DIAGNOSTICS && snapshot[3] == VIDEO_QUEUE_DIAGNOSTICS &&
+           snapshot[4] == VIDEO_QUEUE_INITIAL && snapshot[5] == VIDEO_QUEUE_MAX &&
+           snapshot[6] == VIDEO_TIMELINE_RECORDS && (snapshot[7] == 1 || snapshot[7] == 2));
     control_command(p, VIDEO_CONTROL_START, 2);
     assert(control_snapshot(p, VIDEO_START_BYTES, snapshot) == VIDEO_CONTROL_ACCEPTED && !context.video_failure.valid);
     pool_drain(); await_ready();

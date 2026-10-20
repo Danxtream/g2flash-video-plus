@@ -26,6 +26,23 @@ static int video_route_valid(const cfw_message_route *r) {
         r->reply_capacity > VIDEO_REPLY_HEADER_BYTES && r->reply_capacity <= VIDEO_PAGE_REPLY_CAPACITY;
 }
 
+/* Credits, room and capacity as older apps understand them: at most the legacy
+ * six. Capacity beyond it is reported only through VIDEO_QUEUE_DIAGNOSTICS. */
+static uint32_t video_reported(uint32_t value) {
+    return value < VIDEO_QUEUE_REPORTED ? value : VIDEO_QUEUE_REPORTED;
+}
+
+/* Out of line: the controller's own frame is its worst stack chain. */
+__attribute__((noinline)) static void video_queue_snapshot(video_control_replay *entry, uint8_t here) {
+    uint8_t *out = entry->snapshot;
+    bzero(out, VIDEO_DIAGNOSTICS_BYTES);
+    entry->snapshot_bytes = VIDEO_DIAGNOSTICS_BYTES;
+    entry->result = VIDEO_CONTROL_ACCEPTED;
+    out[0] = 1; out[1] = VIDEO_CONTROL_DIAGNOSTICS; out[2] = entry->result;
+    out[3] = VIDEO_QUEUE_DIAGNOSTICS; out[4] = VIDEO_QUEUE_INITIAL;
+    out[5] = VIDEO_QUEUE_MAX; out[6] = VIDEO_TIMELINE_RECORDS; out[7] = here;
+}
+
 static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     video_control_state *s = &ctx->video_control;
     uint8_t *p = entry->snapshot;
@@ -52,10 +69,10 @@ static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
     p[44] = VIDEO_FRAME_REFERENCES; p[45] = VIDEO_FRAME_DPB;
     p[46] = 1; /* Chroma skipped. */
     p[47] = 1; /* Legacy single-slice byte kept for older apps; playback capability byte 7 bit 3 advertises multi-slice pictures. */
-    p[48] = VIDEO_QUEUE_INITIAL; p[49] = VIDEO_QUEUE_MAX;
+    p[48] = VIDEO_QUEUE_INITIAL; p[49] = VIDEO_QUEUE_REPORTED;
     video_queue_report queue;
     video_worker_queue_report_locked(&queue);
-    p[50] = queue.capacity; p[51] = queue.credits;
+    p[50] = video_reported(queue.capacity); p[51] = video_reported(queue.credits);
     video_write32(p + 52, queue.expected);
     video_write32(p + 56, queue.accepted);
     video_write32(p + 60, queue.consumed);
@@ -87,13 +104,13 @@ static void video_credit_snapshot(customCfwContext *ctx, video_control_replay *e
     uint8_t *p = entry->snapshot;
     entry->snapshot_bytes = VIDEO_CREDITS_BYTES;
     video_write32(p, queue.expected);
-    p[4] = (entry->result ? 0 : queue.credits) |
-        (queue.capacity == VIDEO_QUEUE_MAX ? VIDEO_CREDIT_CAPACITY_SIX : 0) |
+    p[4] = (entry->result ? 0 : video_reported(queue.credits)) |
+        (queue.capacity > VIDEO_QUEUE_INITIAL ? VIDEO_CREDIT_EXTENDED : 0) |
         (state << VIDEO_CREDIT_STATE_SHIFT) | (queue.gap_deadline ? VIDEO_CREDIT_GAP : 0);
     p[5] = entry->result ? entry->result : ctx->video_control.error;
     if (entry->length == VIDEO_CREDITS_TIMELINE_REQUEST_BYTES) {
         const video_timeline *t = &ctx->video_control.timeline;
-        uint32_t room = entry->result ? 0 : VIDEO_TIMELINE_RECORDS - t->count;
+        uint32_t room = entry->result ? 0 : video_reported(VIDEO_TIMELINE_RECORDS - t->count);
         p[5] = (p[5] & VIDEO_CREDIT_RESULT_MASK) | room << VIDEO_CREDIT_TIMELINE_SHIFT;
     }
 }
@@ -291,8 +308,10 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             int usable = q && q->accepted == sequence + 1 && q->header_sequence == sequence + 1 &&
                 video_lifecycle_state(&ctx->video) == VIDEO_READY && !ctx->video_control.error && !q->gap_deadline;
             video_write32(p, q ? q->expected : 0);
-            p[4] = usable ? video_queue_credits(q) | (q->capacity == VIDEO_QUEUE_MAX ? 8 : 0) | 32 : 0;
-            p[5] = usable ? (VIDEO_TIMELINE_RECORDS - ctx->video_control.timeline.count) << 5 : VIDEO_CONTROL_BUSY;
+            p[4] = usable ? video_reported(video_queue_credits(q)) |
+                (q->capacity > VIDEO_QUEUE_INITIAL ? VIDEO_CREDIT_EXTENDED : 0) | 32 : 0;
+            p[5] = usable ? video_reported(VIDEO_TIMELINE_RECORDS - ctx->video_control.timeline.count) << 5 :
+                VIDEO_CONTROL_BUSY;
         }
         video_control_give(ctx);
         return copied > 0 ? 0 : video_refused(ctx, data, size, route, VIDEO_REFUSAL_COMMAND, 0, 0, (uint32_t)copied);
@@ -399,7 +418,7 @@ static int video_control_command(const uint8_t *data, uint16_t size,
         if (data[1] == VIDEO_CONTROL_FRAME_TIME_FAST) {
             entry->snapshot_bytes = VIDEO_CREDITS_BYTES;
             video_write32(entry->snapshot, s->timeline.accepted);
-            entry->snapshot[4] = VIDEO_TIMELINE_RECORDS - s->timeline.count;
+            entry->snapshot[4] = video_reported(VIDEO_TIMELINE_RECORDS - s->timeline.count);
             entry->snapshot[5] = entry->result;
         }
         if (data[1] == VIDEO_PLAYBACK_CAPABILITIES && size == VIDEO_CONTROL_HEADER_BYTES) {
@@ -476,6 +495,9 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             out[3] = VIDEO_FAILURE_DIAGNOSTICS; out[4] = data[9]; out[5] = 1;
             out[6] = route->here; out[7] = valid;
         }
+        if (data[1] == VIDEO_CONTROL_DIAGNOSTICS && size == 12 &&
+            data[8] == VIDEO_QUEUE_DIAGNOSTICS && !data[9] && !data[10] && !data[11])
+            video_queue_snapshot(entry, route->here);
         if (data[1] == VIDEO_CONTROL_DIAGNOSTICS && size == 24 &&
             data[8] == VIDEO_RATE_DIAGNOSTICS && data[9] < 3 && !data[10] && !data[11]) {
             entry->snapshot_bytes = data[9] ? VIDEO_DIAGNOSTICS_BYTES : 144;
