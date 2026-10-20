@@ -116,6 +116,131 @@ inline CoeffToken matchCoeffTokenTable(BitReader& br, uint32_t tableIdx) noexcep
     return best;
 }
 
+// ── coeff_token direct lookup — Tables 9-5(a)-(c) ───────────────────────
+//
+// matchCoeffTokenTable() compares the bitstream against every code of a
+// table, up to 68 compares per 4x4 block. Each code is a run of leading
+// zeros, a 1, then at most three more bits, so a code is found directly:
+// count the leading zeros, then index the bits after the 1. The lookup is
+// generated at compile time from the same code tables, and the codes are
+// prefix-free (checked below), so it returns exactly what the search does.
+
+/** Leading zeros in a 16-bit window; 16 when the window is all zeros. */
+constexpr uint32_t coeffTokenLeadingZeros(uint32_t window) noexcept
+{
+    uint32_t lz = 0U;
+    while (lz < 16U && ((window >> (15U - lz)) & 1U) == 0U)
+        ++lz;
+    return lz;
+}
+
+/** Per table and leading-zero count: bits indexed after the first 1, and the
+ *  first lookup entry of that group. */
+struct CoeffTokenGroups
+{
+    static constexpr uint32_t cCount = 17U;  ///< leading zeros 0-16
+    static constexpr uint8_t cNone = 0xFFU;  ///< no code has this many zeros
+    uint8_t restBits[3][cCount];
+    uint8_t offset[3][cCount];
+    uint32_t entries;
+};
+
+constexpr CoeffTokenGroups makeCoeffTokenGroups() noexcept
+{
+    CoeffTokenGroups g{};
+    for (uint32_t t = 0U; t < 3U; ++t)
+        for (uint32_t z = 0U; z < CoeffTokenGroups::cCount; ++z)
+            g.restBits[t][z] = CoeffTokenGroups::cNone;
+    for (uint32_t t = 0U; t < 3U; ++t)
+        for (uint32_t to = 0U; to < 4U; ++to)
+            for (uint32_t tc = to; tc <= 16U; ++tc)
+            {
+                const uint32_t size = cCoeffTokenSize[t][to][tc];
+                if (size == 0U)
+                    continue;
+                const uint32_t lz = coeffTokenLeadingZeros(
+                    static_cast<uint32_t>(cCoeffTokenCode[t][to][tc]) << (16U - size));
+                const uint32_t rest = size - lz - 1U;
+                if (g.restBits[t][lz] == CoeffTokenGroups::cNone || rest > g.restBits[t][lz])
+                    g.restBits[t][lz] = static_cast<uint8_t>(rest);
+            }
+    uint32_t next = 0U;
+    for (uint32_t t = 0U; t < 3U; ++t)
+        for (uint32_t z = 0U; z < CoeffTokenGroups::cCount; ++z)
+            if (g.restBits[t][z] != CoeffTokenGroups::cNone)
+            {
+                g.offset[t][z] = static_cast<uint8_t>(next);
+                next += 1U << g.restBits[t][z];
+            }
+    g.entries = next;
+    return g;
+}
+
+inline constexpr CoeffTokenGroups cCoeffTokenGroups = makeCoeffTokenGroups();
+static_assert(cCoeffTokenGroups.entries <= 255U, "group offsets are bytes");
+
+/** Lookup entries: size << 8 | trailingOnes << 5 | totalCoeff; 0 = no code.
+ *  Element [entries] is a flag cleared if two codes claimed one slot. */
+using CoeffTokenEntries = std::array<uint16_t, cCoeffTokenGroups.entries + 1U>;
+
+constexpr CoeffTokenEntries makeCoeffTokenEntries() noexcept
+{
+    CoeffTokenEntries e{};
+    e[cCoeffTokenGroups.entries] = 1U;
+    for (uint32_t t = 0U; t < 3U; ++t)
+        for (uint32_t to = 0U; to < 4U; ++to)
+            for (uint32_t tc = to; tc <= 16U; ++tc)
+            {
+                const uint32_t size = cCoeffTokenSize[t][to][tc];
+                if (size == 0U)
+                    continue;
+                const uint32_t code = cCoeffTokenCode[t][to][tc];
+                const uint32_t lz = coeffTokenLeadingZeros(code << (16U - size));
+                const uint32_t rest = size - lz - 1U;
+                const uint32_t width = cCoeffTokenGroups.restBits[t][lz];
+                const uint32_t first = cCoeffTokenGroups.offset[t][lz] +
+                    ((code & ((1U << rest) - 1U)) << (width - rest));
+                for (uint32_t j = 0U; j < (1U << (width - rest)); ++j)
+                {
+                    if (e[first + j] != 0U)
+                        e[cCoeffTokenGroups.entries] = 0U;
+                    e[first + j] = static_cast<uint16_t>(size << 8U | to << 5U | tc);
+                }
+            }
+    return e;
+}
+
+inline constexpr CoeffTokenEntries cCoeffTokenEntries = makeCoeffTokenEntries();
+static_assert(cCoeffTokenEntries[cCoeffTokenGroups.entries] == 1U,
+              "coeff_token tables must be prefix-free");
+
+/** Same result and bit consumption as matchCoeffTokenTable(), by lookup. */
+inline CoeffToken lookupCoeffToken(BitReader& br, uint32_t tableIdx) noexcept
+{
+    const uint32_t window = br.peekBits(16U);
+#if defined(__GNUC__) || defined(__clang__)
+    const uint32_t lz = window ? static_cast<uint32_t>(__builtin_clz(window)) - 16U : 16U;
+#else
+    const uint32_t lz = coeffTokenLeadingZeros(window);
+#endif
+    const uint32_t rest = cCoeffTokenGroups.restBits[tableIdx][lz];
+    if (rest != CoeffTokenGroups::cNone)
+    {
+        // Bits after the first 1, left-aligned in the 16-bit window.
+        const uint32_t after = (window << (lz + 1U)) & 0xFFFFU;
+        const uint32_t index = rest ? after >> (16U - rest) : 0U;
+        const uint32_t entry = cCoeffTokenEntries[cCoeffTokenGroups.offset[tableIdx][lz] + index];
+        if (entry != 0U)
+        {
+            br.skipBits(entry >> 8U);
+            return { static_cast<uint8_t>(entry & 31U), static_cast<uint8_t>((entry >> 5U) & 3U) };
+        }
+    }
+    // Invalid coeff_token VLC: the same bounded fallback as the search.
+    br.skipBits(1U);
+    return { 0U, 0U };
+}
+
 /** Decode coeff_token from bitstream using context nC.
  *
  *  Uses full ITU-T H.264 Table 9-5 VLC lookup tables for spec-compliant decoding.
@@ -197,7 +322,7 @@ inline CoeffToken decodeCoeffToken(BitReader& br, int32_t nC) noexcept
     else if (nC < 4)  tableIdx = 1U;
     else              tableIdx = 2U;  // 4 <= nC < 8
 
-    return matchCoeffTokenTable(br, tableIdx);
+    return lookupCoeffToken(br, tableIdx);
 }
 
 // ── Level decoding — ITU-T H.264 §9.2.2 ────────────────────────────────

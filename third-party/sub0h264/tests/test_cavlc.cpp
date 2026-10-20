@@ -264,3 +264,30 @@ TEST_CASE("CAVLC tables: chroma QP mapping")
     // QP 30+ should saturate (chroma QP <= 39)
     CHECK(cChromaQpTable[51] == 39U);
 }
+
+TEST_CASE("CAVLC: coeff_token lookup matches the table search for every bit pattern")
+{
+    // All 16-bit windows of Tables 9-5(a)-(c), at every bit alignment within
+    // a byte: same TotalCoeff, TrailingOnes and number of bits consumed,
+    // including the one-bit fallback for patterns that are not a code.
+    uint32_t mismatches = 0U;
+    for (uint32_t table = 0U; table < 3U; ++table)
+        for (uint32_t window = 0U; window < 65536U; ++window)
+            for (uint32_t align = 0U; align < 8U; ++align)
+            {
+                const uint32_t field = window << (16U - align);
+                const uint8_t data[8] = { static_cast<uint8_t>(field >> 24U),
+                    static_cast<uint8_t>(field >> 16U), static_cast<uint8_t>(field >> 8U),
+                    static_cast<uint8_t>(field) };
+                BitReader search(data, sizeof data), lookup(data, sizeof data);
+                search.skipBits(align);
+                lookup.skipBits(align);
+                const CoeffToken a = matchCoeffTokenTable(search, table);
+                const CoeffToken b = lookupCoeffToken(lookup, table);
+                if (a.totalCoeff != b.totalCoeff || a.trailingOnes != b.trailingOnes ||
+                    search.bitOffset() != lookup.bitOffset())
+                    ++mismatches;
+            }
+    CHECK(mismatches == 0U);
+    CHECK(cCoeffTokenGroups.entries == 194U);
+}
