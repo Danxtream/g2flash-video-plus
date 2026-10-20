@@ -965,7 +965,8 @@ def main(argv=None):
         try:
             flash_lens(tp, img, segs, args.stop_before)
         except Exception as e:
-            print(f"!!! {side} lens flash failed: {e}")
+            # Some errors (a connection timeout) have an empty message; name the type.
+            print(f"!!! {side} lens flash failed: {type(e).__name__}: {e}")
             failures.append(side)
         finally:
             tp.close()
