@@ -62,7 +62,7 @@ int video_storage_admit(const video_storage *s) {
     return s && s->heap.view && video_storage_room(s, 0, 0, 0) == VIDEO_STORAGE_OK;
 }
 
-static video_allocation *video_storage_new(video_storage *s, uint32_t size,
+static video_allocation *video_storage_new_inner(video_storage *s, uint32_t size,
                                            uint32_t tag, int pending) {
     uint32_t raw_size, charge;
     s->refused_live = 0;
@@ -105,6 +105,15 @@ static video_allocation *video_storage_new(video_storage *s, uint32_t size,
     return entry;
 }
 
+static video_allocation *video_storage_new(video_storage *s, uint32_t size,
+                                           uint32_t tag, int pending) {
+    video_allocation *e = video_storage_new_inner(s, size, tag, pending);
+#ifdef VIDEO_STORAGE_REFUSED
+    if (!e) VIDEO_STORAGE_REFUSED();
+#endif
+    return e;
+}
+
 void *video_storage_alloc(video_storage *s, uint32_t size) {
     if (!s || !size) return 0;
     for (uint32_t i = 0; i < VIDEO_ALLOCATION_LIMIT; ++i) {
@@ -114,6 +123,9 @@ void *video_storage_alloc(video_storage *s, uint32_t size) {
         if (e->live && e->pending && e->requested == size) {
             s->refusal = video_storage_room(s, 0, 0, &s->refused_heap);
             if (s->refusal) {
+#ifdef VIDEO_STORAGE_REFUSED
+                VIDEO_STORAGE_REFUSED();
+#endif
                 s->refused_live = 0;
                 for (uint32_t j = 0; j < VIDEO_ALLOCATION_LIMIT; ++j) s->refused_live += s->entries[j].live != 0;
                 return 0;

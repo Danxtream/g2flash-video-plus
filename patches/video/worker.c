@@ -51,6 +51,21 @@ static int video_meter_heap_view(void *argument, uint32_t heap, video_heap_view 
     return valid;
 }
 
+#ifdef CFW_BRIDGE_ACTIVE
+static volatile uint32_t *video_bridge_active(uint8_t kind) {
+    customCfwContext *ctx = peekCustomCfwContext();
+    if (!ctx || !__atomic_load_n(&ctx->video_control.start_guard, __ATOMIC_ACQUIRE)) return 0;
+    return kind == 2 ? &ctx->video_heap.returns : kind == 3 ? &ctx->video_heap.replies : 0;
+}
+#endif
+#ifdef VIDEO_STORAGE_REFUSED
+static void video_storage_refused(void) {
+    customCfwContext *ctx = peekCustomCfwContext();
+    if (ctx && __atomic_load_n(&ctx->video_control.start_guard, __ATOMIC_ACQUIRE))
+        video_heap_meter_refused(&ctx->video_heap);
+}
+#endif
+
 static void video_failure_word(uint8_t *p, uint32_t value) {
     for (uint32_t i = 0; i < 4; ++i) p[i] = value >> (8 * i);
 }

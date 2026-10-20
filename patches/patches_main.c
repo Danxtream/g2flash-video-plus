@@ -30,6 +30,8 @@
 #include "texture_cache.c"
 #include "image_buffers.c"
 #include "zlib_glue.c"
+static volatile uint32_t *video_bridge_active(uint8_t kind);
+#define CFW_BRIDGE_ACTIVE(kind) video_bridge_active(kind)
 #include "message_transport.c"
 #include "compass.c"
 #include "ring_battery.c"
@@ -42,6 +44,8 @@
 #include "ancs_relay.c"
 #include "video/radio.c"
 #include "video/runtime_provider.c"
+static void video_storage_refused(void);
+#define VIDEO_STORAGE_REFUSED() video_storage_refused()
 #include "video/storage.c"
 #include "video/lifecycle.c"
 #include "video/queue.c"

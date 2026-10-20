@@ -326,6 +326,10 @@ static uint32_t mock_clock_reg(uint32_t address) { return address == 0xe0001000U
 #define VIDEO_CLOCK_CACHED() 2
 #define VIDEO_CLOCK_CYCLES (tick() * 250000u)
 #include "../../patches/video/telemetry.c"
+#define VIDEO_METER_READ(a) ((void)(a), 0u)
+#define VIDEO_METER_COUNT(q) ((void)(q), 0u)
+#define VIDEO_METER_TAKE(m) ((void)(m), -1)
+#define VIDEO_METER_GIVE(m) ((void)(m), 0)
 #include "../../patches/video/heap_meter.c"
 #include "../../patches/video/rate.c"
 #include "../../patches/video/timeline.c"

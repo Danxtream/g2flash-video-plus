@@ -94,7 +94,14 @@ static int cfw_message_bridge_send(uint8_t kind, uint8_t origin,
         for (uint32_t i = 0; i < 4; ++i) envelope[2 + i] = epoch >> (8 * i);
     }
     memcpy(envelope + header, body, length);
+#ifdef CFW_BRIDGE_ACTIVE
+    volatile uint32_t *active = CFW_BRIDGE_ACTIVE(kind);
+    if (active) __atomic_add_fetch(active, 1, __ATOMIC_RELAXED);
+#endif
     int result = CFW_BRIDGE_SEND(CFW_MESSAGE_SID, envelope, length + header, 0);
+#ifdef CFW_BRIDGE_ACTIVE
+    if (active) __atomic_sub_fetch(active, 1, __ATOMIC_RELAXED);
+#endif
     CFW_PROFILE_END(captured, VIDEO_PROFILE_BRIDGE, length + 2);
     return result;
 }
