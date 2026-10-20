@@ -534,7 +534,9 @@ class LocalBleTransport:
             pass
     def status(self):
         return f"local BLE {self.side or '?'} {self.address}" + (f" ({self.address_type})" if self.address_type else "")
-    def connect(self):
+    def connect(self, uncached=False):
+        """Scan, then connect. `uncached` makes Windows read the services again
+        instead of trusting its stored copy (other platforms ignore it)."""
         from bleak import BleakClient, BleakScanner
         async def _c():
             devs=await BleakScanner.discover(timeout=SCAN_TIMEOUT, return_adv=True)
@@ -557,7 +559,8 @@ class LocalBleTransport:
                 if DEBUG and not self._disconnect_requested:
                     detail=f"; {self.disconnect_detail}" if self.disconnect_detail else ""
                     print(f"    [BLE disconnected unexpectedly{detail}]")
-            self.client=BleakClient(dev, disconnected_callback=on_disconnect)
+            options={'winrt': {'use_cached_services': False}} if uncached and os.name=='nt' else {}
+            self.client=BleakClient(dev, disconnected_callback=on_disconnect, **options)
             await self.client.connect()
             self._install_disconnect_error_hook()
         self._call(_c())
@@ -743,6 +746,35 @@ def flash_component_with_retry(tp, i, seg, img, stop_before, recover_session=Non
     raise RuntimeError(f"component {fn} failed after {COMPONENT_RETRIES} attempts")
 
 # ---------------- flash one lens ----------------
+GATT_DATABASE_OUT_OF_SYNC = 0x12  # ATT error: the client's copy of the services is stale
+
+def gatt_database_out_of_sync(error):
+    """True for the ATT "Database Out Of Sync" error. After a firmware update a
+    lens may report a previously paired computer's copy of its GATT database as
+    stale, and Windows keeps using its stored copy until asked to refresh it."""
+    args=getattr(error, 'args', ())
+    return bool(args) and args[0]==GATT_DATABASE_OUT_OF_SYNC and 'Database Out Of Sync' in str(error)
+
+def enable_notifications(tp, sleep=time.sleep):
+    """Enable the data and control notify characteristics. On a stale-database
+    error, reconnect once with a fresh service read and try again; this runs
+    before login, so no firmware has been sent when the retry happens."""
+    def enable():
+        tp.set_notify(DATA[0],DATA[2],True)
+        tp.set_notify(CTRL[0],CTRL[2],True)
+    try:
+        enable()
+    except Exception as e:
+        if not gatt_database_out_of_sync(e) or not isinstance(tp, LocalBleTransport):
+            raise
+        print("GATT database out of sync (stale Windows copy); reconnecting with a fresh service read")
+        tp.disconnect()
+        sleep(1.0)
+        tp.connect(uncached=True)
+        if not tp.discover():
+            raise RuntimeError("service discovery failed after the fresh service read")
+        enable()
+
 def flash_lens(tp, img, segs, stop_before):
     _reset_seq()
     print("status:", tp.status())
@@ -756,8 +788,7 @@ def flash_lens(tp, img, segs, stop_before):
         print(f"[stop-before={stop_before}] discovery only; no writes."); return
 
     # enable notifications on the data + ctrl notify chars (give CCCD time to take)
-    tp.set_notify(DATA[0],DATA[2],True)
-    tp.set_notify(CTRL[0],CTRL[2],True)
+    enable_notifications(tp)
     time.sleep(2.5)
     while not tp.notes.empty(): tp.notes.get()
     authenticate(tp)
