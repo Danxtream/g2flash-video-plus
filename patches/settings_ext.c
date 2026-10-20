@@ -478,17 +478,21 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 // Text after the number and a space is a short build label (kept short: the
 // fields appended after it share the 256-byte response), so a phone log
 // shows which image is actually running. Parsers read only the integer.
+// The string lives in a fixed-size slot, so a new label moves no other code
+// or data in the image.
 //
 // The string is a normal rodata literal now that build.py emits/relocates .rodata
 // (earlier this had to be spelled out byte-by-byte to avoid a rodata section).
 #define SETTINGS_RESPONSE_CAPACITY 256u
+#define SETTINGS_REVISION_SLOT 24u
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "Faceclaw/16 1020a";
+        static const char caps[SETTINGS_REVISION_SLOT] = "Faceclaw/16 1020b";
+        unsigned caps_len = 0;
+        while (caps_len < SETTINGS_REVISION_SLOT && caps[caps_len]) ++caps_len;
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
-                                    100u, (const unsigned char *)caps,
-                                    (unsigned)sizeof(caps) - 1u);
+                                    100u, (const unsigned char *)caps, caps_len);
         len = mic_append_status(buf, len, SETTINGS_RESPONSE_CAPACITY);
         len = ring_battery_append_status(buf, len, SETTINGS_RESPONSE_CAPACITY);
     }
