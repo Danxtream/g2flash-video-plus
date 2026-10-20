@@ -135,6 +135,9 @@ class WorkerTests(unittest.TestCase):
     def test_dither_y8_admission_paired_modes_default_restart_and_refusal(self):
         self.check_case("dither-consumer")
 
+    def test_presenter_keeps_decoded_pictures_in_the_other_heap_when_it_fits(self):
+        self.check_case("spare-pixels")
+
     def test_both_presenter_sides_process_posted_wire_records_and_copies(self):
         self.check_case("paired-consumer")
 

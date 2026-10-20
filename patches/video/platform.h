@@ -123,6 +123,16 @@ static void video_platform_release(void *argument, void *memory) {
     (void)argument;
     FW_FREE(memory);
 }
+/* The other arena goes through the stock generic heap coordinator, like heap
+ * 13, so its descriptor mutex and byte counters stay valid. */
+static void *video_platform_allocate_other(uint32_t size) {
+    return FW_HEAP_MALLOC(VIDEO_OTHER_DESCRIPTOR, size);
+}
+static void video_platform_release_other(void *memory) {
+    FW_HEAP_FREE(VIDEO_OTHER_DESCRIPTOR, memory);
+}
+#define VIDEO_OTHER_ALLOC video_platform_allocate_other
+#define VIDEO_OTHER_FREE video_platform_release_other
 /* This donor's CMSIS block exposes no event-delete entry. Static groups have no
  * global registry: after all task-context users have drained, their empty
  * wait list and caller-owned flag permit reclaiming the supplied storage.

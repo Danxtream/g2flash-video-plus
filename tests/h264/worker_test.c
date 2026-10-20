@@ -29,7 +29,7 @@ static uint32_t cancel_new, expire_new, fail_publication, defer_reclaimed;
 static uint32_t feed, fed, stream_ok, corrupt_guard, suppress_park;
 static uint32_t consume_enabled, decoded_calls, consumed_frames, decode_paused, refuse_extension;
 static uint32_t upload_limit;
-static uint32_t queued_upload, dither_fixture, timed_upload;
+static uint32_t queued_upload, dither_fixture, timed_upload, spare_fixture;
 static uint32_t cycle_reads, clock_inits, calibrations, crc_calls, anomalous_clock;
 static uint32_t forced_cycles, force_cycles;
 static uint32_t evidence_drain, evidence_next, evidence_checked, evidence_was_full;
@@ -205,6 +205,21 @@ static void release(void *p) {
     assert(*raw <= cached_used && allocations_live);
     cached_used -= *raw; --allocations_live; ++release_calls; free(raw);
 }
+/* The other heap holds at most one block: the presenter's decoded pictures. */
+static void *other_block;
+static uint32_t other_bytes, other_allocations;
+static void *other_allocate(uint32_t n) {
+    assert(!other_block && n);
+    other_block = malloc(n); assert(other_block);
+    other_bytes = n; ++other_allocations;
+    return other_block;
+}
+static void other_release(void *p) {
+    assert(p && p == other_block);
+    free(p); other_block = 0; other_bytes = 0;
+}
+#define VIDEO_OTHER_ALLOC other_allocate
+#define VIDEO_OTHER_FREE other_release
 static int video_platform_heap_view(void *p, uint32_t heap, video_heap_view *out) {
     assert(!service_context && !p && !image_depth);
     if (heap_sample_hook) { void (*hook)(void) = heap_sample_hook; heap_sample_hook = 0; hook(); }
@@ -217,6 +232,10 @@ static int video_platform_heap_view(void *p, uint32_t heap, video_heap_view *out
     }
     if (i == 1) {
         out->free_bytes -= display_allocated;
+        if (out->max_alloc > out->free_bytes) out->max_alloc = out->free_bytes;
+    }
+    if (i == 2) {
+        out->free_bytes -= other_bytes;
         if (out->max_alloc > out->free_bytes) out->max_alloc = out->free_bytes;
     }
     return 1;
@@ -1628,6 +1647,7 @@ static void pace_step(video_owner *owner) {
 static void queued_consumer_mode(uint32_t mode, int with_pause) {
     configure(); request_next = 0; consume_enabled = queued_upload = 1;
     if (dither_fixture) views[0] = (video_heap_view){410024, 400000}; /* Admission model, not a hardware claim. */
+    if (spare_fixture) views[2] = (video_heap_view){149032, 147456};
     paired_fixture = mode == 3 ? 1 : mode; partner_anchor = 0; partner_native = mode == 3;
     uint32_t here = mode == 2 ? CFW_MESSAGE_RIGHT : CFW_MESSAGE_LEFT;
     assert(video_sync_init(&partner, 1, here ^ CFW_MESSAGE_BOTH));
@@ -1650,6 +1670,11 @@ static void queued_consumer_mode(uint32_t mode, int with_pause) {
     assert(owner->presenter && creates == 2 && owner->presenter->storage.used <=
            (dither_fixture ? VIDEO_PRESENTER_Y8_LIMIT : VIDEO_PRESENTER_A4_LIMIT));
     assert(owner->presenter->queue.format == (dither_fixture ? VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER : VIDEO_SOURCE_A4));
+    /* A4 fits the default other heap above its reserve; Y8 only with the spare fixture. */
+    int spare = spare_fixture || !dither_fixture;
+    assert((owner->presenter->spare_pixels != 0) == spare && (other_block != 0) == spare);
+    if (spare) assert((uint8_t *)owner->presenter->pixels >= (uint8_t *)other_block &&
+                      (uint8_t *)owner->presenter->pixels < (uint8_t *)other_block + 32);
     picture_relock_refusals = 3;
     playback_pause_fixture = with_pause; playback_pause_count = 0;
     uint32_t started = tick();
@@ -1830,6 +1855,14 @@ static void dither_consumer(void) {
     assert(!control_snapshot(p, 24, report)); pool_drain(); finish();
     assert(!allocations_live && !presenter_live && !radio_active && !context.video.published);
     puts("owned Y8 dither both roles/scales, default-off restart and fragmented admission refusal PASS");
+}
+static void spare_pixels(void) {
+    /* Dithered pictures in the other heap, freed with the presenter. */
+    dither_fixture = spare_fixture = 1;
+    queued_consumer_mode(0, 0);
+    assert(!other_block && other_allocations);
+    dither_fixture = spare_fixture = 0;
+    puts("presenter keeps decoded pictures in the other heap when it has room PASS");
 }
 static void paired_consumer(void) {
     queued_consumer_mode(1, 0); queued_consumer_mode(2, 0);
@@ -2939,6 +2972,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "timed-consumer")) timed_consumer();
     else if (!strcmp(argv[1], "timed-input")) timed_input();
     else if (!strcmp(argv[1], "dither-consumer")) dither_consumer();
+    else if (!strcmp(argv[1], "spare-pixels")) spare_pixels();
     else if (!strcmp(argv[1], "paired-consumer")) paired_consumer();
     else if (!strcmp(argv[1], "playback-controls")) playback_controls();
     else if (!strcmp(argv[1], "seek-controls")) seek_controls();
@@ -2960,6 +2994,6 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "gray-contract")) gray_contract();
     else if (!strcmp(argv[1], "radio-provenance")) radio_provenance();
     else assert(0);
-    assert(!allocations_live && !task_live && !image_depth);
+    assert(!allocations_live && !task_live && !image_depth && !other_block);
     printf("worker %s PASS\n", argv[1]);
 }

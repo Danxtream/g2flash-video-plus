@@ -375,6 +375,31 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
     video_presenter_park(p);
 }
 
+/* The decoded pictures are the presenter's largest buffer (two Y8 pictures
+ * with dithering). The cached heap is shared with stock work that can claim
+ * tens of KiB during playback, while the other heap stays idle, so keep the
+ * pictures there whenever it can hold them above its reserve. Only the
+ * presenter and worker touch them, by CPU. Return 0 to use the cached ledger. */
+__attribute__((noinline)) static void *video_presenter_spare_pixels(video_presenter *p, uint32_t bytes) {
+    video_heap_view view;
+    uint32_t raw_bytes = bytes + VIDEO_ALLOC_ALIGNMENT - 1u;
+    if (bytes > UINT32_MAX - VIDEO_ALLOC_ALIGNMENT ||
+        !video_meter_heap_view(0, VIDEO_HEAP_OTHER, &view) || view.free_bytes == UINT32_MAX ||
+        view.max_alloc > view.free_bytes || view.free_bytes < VIDEO_OTHER_RESERVE ||
+        raw_bytes > view.free_bytes - VIDEO_OTHER_RESERVE || raw_bytes > view.max_alloc) return 0;
+    void *raw = VIDEO_OTHER_ALLOC(raw_bytes);
+    if (!raw) return 0;
+    /* A racing stock allocation can consume the reserve after the snapshot. */
+    if (!video_meter_heap_view(0, VIDEO_HEAP_OTHER, &view) || view.free_bytes == UINT32_MAX ||
+        view.free_bytes < VIDEO_OTHER_RESERVE) {
+        VIDEO_OTHER_FREE(raw);
+        return 0;
+    }
+    p->spare_pixels = raw;
+    return (void *)(((uintptr_t)raw + VIDEO_ALLOC_ALIGNMENT - 1u) &
+                    ~(uintptr_t)(VIDEO_ALLOC_ALIGNMENT - 1u));
+}
+
 static int video_presenter_prepare(video_owner *owner) {
     uint32_t raw_bytes = sizeof(video_presenter) + VIDEO_ALLOC_ALIGNMENT - 1;
     if (!video_bootstrap_room(raw_bytes, owner->storage.display_allowance)) return 0;
@@ -406,7 +431,8 @@ static int video_presenter_prepare(video_owner *owner) {
     uint32_t pixels_bytes = VIDEO_DECODED_DEPTH * (dither ? VIDEO_DECODED_Y8_BYTES : VIDEO_DECODED_A4_BYTES);
     p->storage.limit = dither ? VIDEO_PRESENTER_Y8_LIMIT : VIDEO_PRESENTER_A4_LIMIT;
     p->storage.cached_allowance = 0; /* Input slots already admitted by decoder. */
-    p->pixels = video_storage_alloc(&p->storage, pixels_bytes);
+    p->pixels = video_presenter_spare_pixels(p, pixels_bytes);
+    if (!p->pixels) p->pixels = video_storage_alloc(&p->storage, pixels_bytes);
     p->stack_allocation = video_storage_alloc(&p->storage,
         VIDEO_PRESENTER_STACK_BYTES + 2 * VIDEO_STACK_GUARD_BYTES);
     if (!p->pixels || !p->stack_allocation ||
@@ -511,6 +537,8 @@ static void video_presenter_destroy(video_owner *owner) {
     video_presenter *p = owner->presenter;
     if (!p) return;
     video_storage_reclaim(&p->storage);
+    if (p->spare_pixels) VIDEO_OTHER_FREE(p->spare_pixels);
+    p->spare_pixels = 0;
     VIDEO_OWNER_FREE(p->raw);
     owner->presenter = 0;
 }

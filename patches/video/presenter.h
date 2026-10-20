@@ -41,6 +41,7 @@ struct video_owner;
 typedef struct {
     struct video_owner *decoder;
     void *raw, *stack_allocation, *pixels;
+    void *spare_pixels; /* Raw other-heap block holding `pixels`, or 0 when they are cached. */
     uint8_t *stack;
     uint32_t thread, wake, complete, armed, parked, generation, token;
     uint32_t shown, holds, fault, stack_used, guards_ok;
