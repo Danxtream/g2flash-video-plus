@@ -89,14 +89,23 @@ static inline uint8_t video_dither_tuned(uint8_t y, int tv, uint32_t x, uint32_t
     return (t >> 2) + ((t & 3) > threshold);
 }
 
-/* The 4x4 pattern for mid sizes. Same curve as video_quarter, level (Y + 8.5) / 17
- * held to 1..15, but in sixteenths: 225 tones instead of 57, and a flat area stays
- * within 0.19 of a level of the 2x2 average. Floors blend as in video_dither_quarter. */
-static inline uint8_t video_dither_4x4(uint8_t y, int tv, uint32_t x, uint32_t row, uint32_t style) {
-    static const uint8_t bayer[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+/* Thresholds by row, then column: video_dither_tuned's 2x2 cell repeated to four
+ * columns, and the 4x4 Bayer matrix. */
+static const uint8_t video_dither_cell2[2][4] = {{0, 2, 0, 2}, {3, 1, 3, 1}};
+static const uint8_t video_dither_cell4[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+
+/* The 4x4 pattern's target for mid sizes. Same curve as video_quarter, level
+ * (Y + 8.5) / 17 held to 1..15, but in sixteenths: 225 tones instead of 57, and a
+ * flat area stays within 0.19 of a level of the 2x2 average. Floors blend as in
+ * video_dither_quarter. */
+static inline uint32_t video_dither_sixteenth(uint8_t y, int tv, uint32_t style) {
     static const uint8_t floors[4] = {16, 0, 4, 8};
     uint32_t full = tv ? video_tv_full[y] : y;
     uint32_t floor = floors[style & 3], t = (32 * full + 289) / 34;
-    t = full < 7 ? floor + (16 - floor) * full / 7 : t < 16 ? 16 : t > 240 ? 240 : t;
-    return (t >> 4) + ((t & 15) > bayer[row & 3][x & 3]);
+    return full < 7 ? floor + (16 - floor) * full / 7 : t < 16 ? 16 : t > 240 ? 240 : t;
+}
+
+static inline uint8_t video_dither_4x4(uint8_t y, int tv, uint32_t x, uint32_t row, uint32_t style) {
+    uint32_t t = video_dither_sixteenth(y, tv, style);
+    return (t >> 4) + ((t & 15) > video_dither_cell4[row & 3][x & 3]);
 }

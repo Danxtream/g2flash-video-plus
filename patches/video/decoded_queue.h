@@ -28,6 +28,11 @@ typedef struct {
     uint32_t head, count, serial, accepted, released, cancelled;
     video_geometry geometry;
     video_decoded_slot slots[VIDEO_DECODED_DEPTH];
+    /* Dithered 4-bit slots: each Y's target in the pattern's steps (quarters for 2x2,
+     * sixteenths for 4x4). steps_range is 1 when built for full range, 2 for TV range,
+     * zero before the first copy. */
+    uint32_t steps_range;
+    uint8_t steps[256];
 } video_decoded_queue;
 
 /* Initialize only after full mode-specific heap admission; depth is explicit. */

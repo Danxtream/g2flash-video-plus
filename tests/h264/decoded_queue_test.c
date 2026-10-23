@@ -73,20 +73,30 @@ int main(void) {
     /* The 4x4 pattern is a choice for dithered 4-bit (mid-size) slots only. */
     assert(!video_decoded_init(&q, 7, 9, VIDEO_SOURCE_A4 | VIDEO_SOURCE_PATTERN4, 2, mid_pixels, 480 * 272));
     assert(!video_decoded_init(&q, 7, 9, VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER | VIDEO_SOURCE_PATTERN4, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
-    assert(video_decoded_init(&q, 7, 9, VIDEO_SOURCE_A4 | VIDEO_SOURCE_DITHER | VIDEO_SOURCE_PATTERN4 |
-                              (2 << VIDEO_SOURCE_STYLE_SHIFT), 2, mid_pixels, 480 * 272));
-    assert(video_decoded_geometry(&q, mid));
-    mid_serial = video_decoded_reserve(&q, 7, &mid_time);
+    /* Both patterns match their per-pixel definitions everywhere, for every floor style,
+     * as the range changes between pictures (the copy's step table follows it). */
     for (uint32_t i = 0; i < 480 * 272; ++i) mid_y[i] = (uint8_t)(i * 7 + i / 480);
-    assert(video_decoded_copy_range(&q, 7, mid_serial, mid_y, 480, 480 * 272, 0));
-    for (uint32_t row = 0; row < 272; ++row) for (uint32_t col = 0; col < 480; ++col) {
-        uint8_t pair = mid_pixels[row * 240 + col / 2];
-        assert(((col & 1) ? pair & 15 : pair >> 4) == video_dither_4x4(mid_y[row * 480 + col], 0, col, row, 2));
+    for (uint32_t fine = 0; fine < 2; ++fine) for (uint32_t style = 0; style < 4; ++style) {
+        assert(video_decoded_init(&q, 7, 9, VIDEO_SOURCE_A4 | VIDEO_SOURCE_DITHER | (fine ? VIDEO_SOURCE_PATTERN4 : 0) |
+                                  (style << VIDEO_SOURCE_STYLE_SHIFT), 2, mid_pixels, 480 * 272));
+        assert(video_decoded_geometry(&q, mid));
+        const uint32_t ranges[3] = {0, VIDEO_SOURCE_TV, 0};
+        for (uint32_t picture = 1; picture <= 3; ++picture) {
+            video_frame_time when = {picture, picture, 0};
+            uint32_t tv = ranges[picture - 1] != 0, serial = video_decoded_reserve(&q, 7, &when);
+            assert(video_decoded_copy_range(&q, 7, serial, mid_y, 480, 480 * 272, ranges[picture - 1]));
+            const uint8_t *slot = q.slots[(picture - 1) % 2].pixels;
+            for (uint32_t row = 0; row < 272; ++row) for (uint32_t col = 0; col < 480; ++col) {
+                uint8_t pair = slot[row * 240 + col / 2], v = mid_y[row * 480 + col];
+                assert(((col & 1) ? pair & 15 : pair >> 4) == (fine ? video_dither_4x4(v, tv, col, row, style) :
+                                                                       video_dither_tuned(v, tv, col, row, style)));
+            }
+            assert(video_decoded_publish(&q, 7, serial));
+            assert(video_decoded_claim(&q, 7, picture, VIDEO_SCALE_FULL_WIDTH, &mid_frame, &mid_media));
+            assert(mid_frame.format == (VIDEO_SOURCE_A4 | ranges[picture - 1]));
+            assert(video_decoded_release(&q, 7, picture));
+        }
     }
-    assert(video_decoded_publish(&q, 7, mid_serial));
-    assert(video_decoded_claim(&q, 7, 1, VIDEO_SCALE_FULL_WIDTH, &mid_frame, &mid_media));
-    assert(mid_frame.format == VIDEO_SOURCE_A4);
-    assert(video_decoded_release(&q, 7, 1));
     /* A flat area keeps the 2x2 brightness within 3/16 of a level, and the 4x4 cell
      * lights exactly the fraction its sixteenth asks for. */
     for (uint32_t tv = 0; tv < 2; ++tv) for (uint32_t style = 0; style < 4; ++style)
