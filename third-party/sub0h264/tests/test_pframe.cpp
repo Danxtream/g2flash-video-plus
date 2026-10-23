@@ -22,6 +22,15 @@ using namespace sub0h264;
 
 // ── P-frame bitstream parsing (confirmed via libavc bit alignment) ──────
 
+// These tests read motion vectors anywhere in a decoded picture, which the
+// decoder keeps only when asked (it otherwise holds three macroblock rows).
+static H264Decoder::Settings pictureContext()
+{
+    H264Decoder::Settings settings;
+    settings.keepPictureContext = true;
+    return settings;
+}
+
 TEST_CASE("P-frame: scrolling_texture decodes all 30 frames without crash")
 {
     // Verified via libavc trace: MB bit offsets for first 5 MBs of frame 1
@@ -141,7 +150,7 @@ TEST_CASE("P-frame REGRESSION: skip_run 7.3.4 MB after skip run is coded")
     std::vector<MbEvent> events;
     uint32_t fc = 0;
 
-    auto decoder = std::make_unique<H264Decoder>();
+    auto decoder = std::make_unique<H264Decoder>(pictureContext());
     decoder->trace().setCallback([&](const TraceEvent& e) {
         if (fc != 1) return;
         if (e.type == TraceEventType::MbStart)
@@ -333,7 +342,7 @@ TEST_CASE("P-frame: chroma MC verification for skip MB")
     auto data = getFixture("scrolling_texture_baseline.h264");
     REQUIRE_FALSE(data.empty());
 
-    auto decoder = std::make_unique<H264Decoder>();
+    auto decoder = std::make_unique<H264Decoder>(pictureContext());
     std::vector<NalBounds> bounds;
     findNalUnits(data.data(), static_cast<uint32_t>(data.size()), bounds);
 
@@ -562,7 +571,7 @@ TEST_CASE("P-frame 2: check MB(19,3) decode - zero-output investigation")
     auto data = getFixture("scrolling_texture_baseline.h264");
     REQUIRE_FALSE(data.empty());
 
-    auto decoder = std::make_unique<H264Decoder>();
+    auto decoder = std::make_unique<H264Decoder>(pictureContext());
     std::vector<NalBounds> bounds;
     findNalUnits(data.data(), static_cast<uint32_t>(data.size()), bounds);
 
@@ -645,7 +654,7 @@ TEST_CASE("P-frame: scrolling_texture frame 8 partition check")
     auto data = getFixture("scrolling_texture_baseline.h264");
     REQUIRE_FALSE(data.empty());
 
-    auto decoder = std::make_unique<H264Decoder>();
+    auto decoder = std::make_unique<H264Decoder>(pictureContext());
     std::vector<NalBounds> bounds;
     findNalUnits(data.data(), static_cast<uint32_t>(data.size()), bounds);
 
@@ -687,7 +696,7 @@ TEST_CASE("P-frame: pan_up frame 16 MV and chroma check")
     struct MbStartInfo { uint16_t mbX, mbY; uint32_t type, bit; };
     std::vector<MbStartInfo> mbStarts;
     uint32_t numRefActive = 0;
-    auto decoder = std::make_unique<H264Decoder>();
+    auto decoder = std::make_unique<H264Decoder>(pictureContext());
     decoder->trace().setCallback([&](const TraceEvent& e) {
         if (fc == 16 && e.type == TraceEventType::MvPrediction
             && e.mbX == 0 && e.mbY == 0 && e.data && e.dataLen >= 6)

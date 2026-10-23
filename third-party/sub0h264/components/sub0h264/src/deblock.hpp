@@ -274,9 +274,10 @@ inline void deblockChromaMb(Frame& frame, uint32_t mbX, uint32_t mbY,
                             const int32_t* mbQps, int32_t chromaQpIndexOffset,
                             uint16_t widthInMbs,
                             const uint8_t verticalBs[4][4],
-                            const uint8_t horizontalBs[4][4]) noexcept
+                            const uint8_t horizontalBs[4][4],
+                            uint32_t ctxFirstRow = 0U) noexcept
 {
-    uint32_t mbIdx = mbY * widthInMbs + mbX;
+    uint32_t mbIdx = (mbY - ctxFirstRow) * widthInMbs + mbX;
     uint32_t pixX = mbX * 16U, pixY = mbY * 16U;
     int32_t chromaQp = cChromaQpTable[clampQpIdx(mbQps[mbIdx] + chromaQpIndexOffset)];
     for (uint32_t edge = 0U; edge < 4U; edge += 2U)
@@ -386,6 +387,7 @@ inline void deblockChromaMb(Frame& frame, uint32_t mbX, uint32_t mbY,
  *  @param widthInMbs         Frame width in MBs
  *  @param heightInMbs        Frame height in MBs
  *  @param skipChroma         Filter only Y; U/V planes may be absent
+ *  @param ctxFirstRow        Picture row held first in the per-MB arrays (0 = whole picture)
  */
 inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
                        bool isIntra, int32_t alphaOffset, int32_t betaOffset,
@@ -395,9 +397,13 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
                        const uint8_t* mbTransform8x8,
                        int32_t chromaQpIndexOffset,
                        uint16_t widthInMbs, uint16_t heightInMbs,
-                       bool skipChroma = false) noexcept
+                       bool skipChroma = false,
+                       uint32_t ctxFirstRow = 0U) noexcept
 {
-    uint32_t mbIdx = mbY * widthInMbs + mbX;
+    // The per-MB arrays may hold only a window of rows starting at
+    // ctxFirstRow; pixel positions still use the picture row mbY.
+    const uint32_t ctxY = mbY - ctxFirstRow;
+    uint32_t mbIdx = ctxY * widthInMbs + mbX;
     (void)heightInMbs;
     bool qUses8x8 = (mbTransform8x8[mbIdx] != 0U);
 
@@ -454,7 +460,7 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
         int32_t edgeAlpha = alpha, edgeBeta = beta, edgeIndexA = indexA;
         if (edge == 0U)
         {
-            uint32_t leftMbIdx = mbY * widthInMbs + mbX - 1U;
+            uint32_t leftMbIdx = ctxY * widthInMbs + mbX - 1U;
             int32_t qpAvg = (qp + mbQps[leftMbIdx] + 1) >> 1;
             edgeIndexA = clampQpIdx(qpAvg + alphaOffset);
             edgeAlpha = cAlphaTable[edgeIndexA];
@@ -465,7 +471,7 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
         // BS only changes at 4-row boundaries, so we compute 4 values and reuse.
         auto& edgeBs = verticalBs[edge];
         {
-            uint32_t mbIdxP = (edge == 0U) ? (mbY * widthInMbs + mbX - 1U) : mbIdx;
+            uint32_t mbIdxP = (edge == 0U) ? (ctxY * widthInMbs + mbX - 1U) : mbIdx;
             for (uint32_t blkRow = 0U; blkRow < 4U; ++blkRow)
             {
                 uint32_t blkQ = edge + blkRow * 4U;
@@ -534,7 +540,7 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
         int32_t edgeAlpha = alpha, edgeBeta = beta, edgeIndexA = indexA;
         if (edge == 0U)
         {
-            uint32_t topMbIdx = (mbY - 1U) * widthInMbs + mbX;
+            uint32_t topMbIdx = (ctxY - 1U) * widthInMbs + mbX;
             int32_t qpAvg = (qp + mbQps[topMbIdx] + 1) >> 1;
             edgeIndexA = clampQpIdx(qpAvg + alphaOffset);
             edgeAlpha = cAlphaTable[edgeIndexA];
@@ -544,7 +550,7 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
         // Precompute BS for 4 block columns on this horizontal edge.
         auto& hEdgeBs = horizontalBs[edge];
         {
-            uint32_t mbIdxP = (edge == 0U) ? ((mbY - 1U) * widthInMbs + mbX) : mbIdx;
+            uint32_t mbIdxP = (edge == 0U) ? ((ctxY - 1U) * widthInMbs + mbX) : mbIdx;
             for (uint32_t blkCol = 0U; blkCol < 4U; ++blkCol)
             {
                 uint32_t blkQ = blkCol + edge * 4U;
@@ -607,7 +613,7 @@ inline void deblockMb(Frame& frame, uint32_t mbX, uint32_t mbY,
     if (!skipChroma)
         deblockChromaMb(frame, mbX, mbY, alphaOffset, betaOffset,
                         mbQps, chromaQpIndexOffset, widthInMbs,
-                        verticalBs, horizontalBs);
+                        verticalBs, horizontalBs, ctxFirstRow);
 #else
     (void)skipChroma;
 #endif

@@ -27,6 +27,7 @@
 #include "frame.hpp"
 #include "inter_pred.hpp"
 #include "intra_pred.hpp"
+#include "mb_window.hpp"
 #include "motion.hpp"
 #include "nal.hpp"
 #include "param_sets.hpp"
@@ -81,14 +82,18 @@ public:
     struct Settings
     {
         bool skipChroma = false; ///< Parse chroma syntax without rebuilding/storing U/V.
+        /// Hold per-MB context for the whole picture, for readers such as
+        /// motionAt4x4(); the default holds only the three rows decoding needs.
+        bool keepPictureContext = false;
     };
 
     H264Decoder() = default;
 
     /** Choose reconstruction before feeding any NAL; create a new decoder to change it. */
     explicit H264Decoder(Settings settings) noexcept
+        : keepPictureContext_(settings.keepPictureContext)
 #if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
-        : skipChroma_(settings.skipChroma)
+        , skipChroma_(settings.skipChroma)
 #endif
     {
 #if !SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
@@ -225,13 +230,15 @@ public:
     void setProfile(SectionProfile* profile) noexcept { profile_ = profile; }
 
     /** Read MV at a specific 4x4 block position (absolute 4x4 grid coords).
-     *  Public for test inspection of internal MV state. */
+     *  Public for test inspection of internal MV state. After a picture, rows
+     *  above its last three need Settings::keepPictureContext. */
     MbMotionInfo motionAt4x4(int32_t blk4x, int32_t blk4y) const noexcept
     {
         return getMotionAt4x4(blk4x, blk4y);
     }
 
 private:
+    bool keepPictureContext_ = false;
 #if SUB0H264_ENABLE_CHROMA_RECONSTRUCTION
     bool skipChroma_ = false;
 #endif
@@ -252,22 +259,23 @@ private:
     volatile uint32_t diagMbEntered_ = UINT32_MAX;
     volatile uint32_t diagMbCompleted_ = UINT32_MAX;
     volatile uint32_t diagBitOffset_ = 0U;
-    // Per-frame MB context: non-zero coefficient counts for CAVLC context
-    std::vector<uint8_t> nnzLuma_;    // [mbIdx * 16 + blkIdx]
-    std::vector<uint8_t> nnzCb_;      // [mbIdx * 4 + blkIdx]
-    std::vector<uint8_t> nnzCr_;      // [mbIdx * 4 + blkIdx]
+    // Per-MB context, held for a window of MB rows (see startMbRow()):
+    // non-zero coefficient counts for CAVLC context
+    MbRowWindow<uint8_t> nnzLuma_;    // [mbIdx * 16 + blkIdx]
+    MbRowWindow<uint8_t> nnzCb_;      // [mbIdx * 4 + blkIdx]
+    MbRowWindow<uint8_t> nnzCr_;      // [mbIdx * 4 + blkIdx]
 
     // Per-MB luma QP after mb_qp_delta accumulation — ITU-T H.264 §7.4.5.
     // Used by deblocking filter: boundary edges require QP averaging (§8.7.2.2).
-    std::vector<int32_t> mbQps_;      // [mbIdx]
+    MbRowWindow<int32_t> mbQps_;      // [mbIdx]
 
     // Per-MB transform_size_8x8_flag — ITU-T H.264 §7.3.5.
     // Used by deblocking (§8.7.2): MBs using 8x8 transform skip filtering of
     // internal 4x4 edges (vertical edges 1,3 and horizontal edges 1,3).
-    std::vector<uint8_t> mbTransform8x8_; // [mbIdx], 0 or 1
+    MbRowWindow<uint8_t> mbTransform8x8_; // [mbIdx], 0 or 1
 
     // Per-frame MV context for inter prediction
-    std::vector<MbMotionInfo> mbMotion_;  // [mbIdx]
+    MbRowWindow<MbMotionInfo> mbMotion_;  // [mbIdx]
 
     /// Per-slice resolved scaling lists in raster order (§7.4.2.1.1).
     /// Refreshed each slice; lists default to flat-16 when no SPS/PPS matrix.
@@ -276,7 +284,7 @@ private:
     // Per-MB intra 4x4 prediction modes for MPM derivation across MBs.
     // [mbIdx * 16 + blkIdx] — only valid for I_4x4 MBs.
     // For I_16x16 MBs, all entries set to DC(2) per spec §8.3.1.1.
-    std::vector<uint8_t> mbIntra4x4Modes_;  // [mbIdx * 16 + blkIdx]
+    MbRowWindow<uint8_t> mbIntra4x4Modes_;  // [mbIdx * 16 + blkIdx]
 
     // CABAC state
     uint32_t cabacSliceCount_ = 0U; ///< Counts CABAC slice inits for SliceStart event indexing
@@ -305,6 +313,18 @@ private:
     uint8_t openDeblockIdc_ = 0U; ///< deblocking parameters shared by every slice
     int32_t openAlphaOffset_ = 0;
     int32_t openBetaOffset_ = 0;
+    int32_t openChromaQpOffset_ = 0; ///< chroma_qp_index_offset, which deblocking also reads
+
+    // Deblocking runs one MB row behind decoding: intra prediction of a row
+    // reads the unfiltered samples of the row above (§8.3.1.2), and filtering
+    // a row reads the context of the row above it (§8.7.2). So the per-MB
+    // context needs only the rows mbY-2..mbY instead of the whole picture.
+    static constexpr uint32_t cMbContextRows = 3U;
+    uint32_t deblockNextRow_ = 0U; ///< first MB row of the picture not yet filtered
+    bool deblockPicture_ = false;  ///< the current picture is filtered
+    int32_t deblockAlphaOffset_ = 0;
+    int32_t deblockBetaOffset_ = 0;
+    int32_t deblockChromaQpOffset_ = 0;
 
     // Neighbours of the MB being decoded that are usable for prediction and
     // context (§6.4.8): inside the picture and in the current slice.
@@ -321,6 +341,55 @@ private:
         topInSlice_ = mbY > 0U && mbAddr - width >= sliceFirstMb_;
         topLeftInSlice_ = mbX > 0U && mbY > 0U && mbAddr - width - 1U >= sliceFirstMb_;
         topRightInSlice_ = mbY > 0U && mbX + 1U < width && mbAddr - width + 1U >= sliceFirstMb_;
+        if (mbX == 0U && mbY != 0U)
+            startMbRow(mbY);
+    }
+
+    /** Before decoding MB row @p mbY: filter every row whose row below is
+     *  fully decoded, then slide the context window to rows mbY-2..mbY. */
+    void startMbRow(uint32_t mbY) noexcept
+    {
+        while (deblockNextRow_ + 2U <= mbY)
+            deblockMbRow(deblockNextRow_++);
+        while (mbY >= nnzLuma_.endRow())
+            advanceMbContext();
+    }
+
+    /** Drop the oldest context row; the new one starts with the values every
+     *  MB has at the start of a picture. */
+    void advanceMbContext() noexcept
+    {
+        nnzLuma_.advance(0U);
+        nnzCb_.advance(0U);
+        nnzCr_.advance(0U);
+        mbQps_.advance(0);
+        mbTransform8x8_.advance(0U);
+        mbMotion_.advance(MbMotionInfo{});
+        mbIntra4x4Modes_.advance(2U); // DC(2)
+    }
+
+    /** Filter MB row @p my in raster order, as the whole-picture pass did. */
+    void deblockMbRow(uint32_t my) noexcept
+    {
+        if (!deblockPicture_)
+            return;
+        int64_t dbT0 = profile_ ? sub0h264TimerUs() : 0;
+        Frame& dbFrame = *activeFrame_;
+        for (uint32_t mx = 0U; mx < widthInMbs_; ++mx)
+        {
+            //TODO: We should reason about how to efficiently determine intra vs inter MBs for deblocking. Currently we check the reference index of the first 4x4 block's MV, which is a common heuristic since intra MBs have no references. However, this relies on the assumption that all blocks in an intra MB are marked with refIdx = -1, which should be true but we should verify this is always the case in our decoding logic. Alternatively, we could maintain a separate per-MB flag during decoding to explicitly track intra vs inter MBs, which might be more robust and slightly faster to check during deblocking.
+            //TODO: We should also consider the implications of this intra/inter check for edge cases, such as MBs with mixed intra/inter blocks (if such a thing is possible), or how this interacts with the I_NxN types in P-slices. We should verify that our decoding logic correctly sets the refIdx for all blocks in an intra MB to -1, and that we don't have any cases where an inter MB might have a block with refIdx = -1 that could cause a false positive for intra detection.
+            //TODO: We could also consider if there are any performance implications of this check, especially if we have a large number of MBs to deblock. If this becomes a bottleneck, we might want to optimize by maintaining an explicit intra/inter flag per MB during decoding, as mentioned above.
+            bool mbIsIntra = (mbMotion_[(my * widthInMbs_ + mx) * 16U].refIdx == -1);
+            deblockMb(dbFrame, mx, my,
+                      mbIsIntra, deblockAlphaOffset_, deblockBetaOffset_,
+                      nnzLuma_.data(), mbMotion_.data(),
+                      mbQps_.data(), mbTransform8x8_.data(),
+                      deblockChromaQpOffset_,
+                      widthInMbs_, heightInMbs_, skipChroma(),
+                      nnzLuma_.firstRow());
+        }
+        if (profile_) profile_->deblockUs += sub0h264TimerUs() - dbT0;
     }
 
     /** Get nC (CAVLC context) for a luma 4x4 block.
@@ -738,7 +807,8 @@ private:
                 pps->isCabac() || pps->transform8x8Mode_ != 0U ||
                 sh.disableDeblockingFilter_ != openDeblockIdc_ ||
                 sh.sliceAlphaC0Offset_ != openAlphaOffset_ ||
-                sh.sliceBetaOffset_ != openBetaOffset_)
+                sh.sliceBetaOffset_ != openBetaOffset_ ||
+                pps->chromaQpIndexOffset_ != openChromaQpOffset_)
             {
                 pictureOpen_ = false;
                 return DecodeStatus::Error;
@@ -781,9 +851,12 @@ private:
         // cleanly when the firmware heap cannot hold all of it concurrently.
         AllocationRequest contextRequests[7];
         size_t contextRequestCount = 0U;
-        const size_t lumaCount = static_cast<size_t>(totalMbs) * 16U;
-        const size_t chromaCount = static_cast<size_t>(totalMbs) * 4U;
-        const size_t motionCount = static_cast<size_t>(totalMbs) * 16U;
+        const uint32_t contextRows = keepPictureContext_ || heightInMbs_ < cMbContextRows ?
+            heightInMbs_ : cMbContextRows;
+        const size_t contextMbs = static_cast<size_t>(widthInMbs_) * contextRows;
+        const size_t lumaCount = contextMbs * 16U;
+        const size_t chromaCount = contextMbs * 4U;
+        const size_t motionCount = contextMbs * 16U;
 
         if (nnzLuma_.capacity() < lumaCount)
             contextRequests[contextRequestCount++] =
@@ -794,14 +867,12 @@ private:
         if (nnzCr_.capacity() < chromaCount)
             contextRequests[contextRequestCount++] =
                 { AllocationTag::NnzCr, chromaCount * sizeof(uint8_t) };
-        if (mbQps_.capacity() < totalMbs)
+        if (mbQps_.capacity() < contextMbs)
             contextRequests[contextRequestCount++] =
-                { AllocationTag::MbQps,
-                  static_cast<size_t>(totalMbs) * sizeof(int32_t) };
-        if (mbTransform8x8_.capacity() < totalMbs)
+                { AllocationTag::MbQps, contextMbs * sizeof(int32_t) };
+        if (mbTransform8x8_.capacity() < contextMbs)
             contextRequests[contextRequestCount++] =
-                { AllocationTag::MbTransform8x8,
-                  static_cast<size_t>(totalMbs) * sizeof(uint8_t) };
+                { AllocationTag::MbTransform8x8, contextMbs * sizeof(uint8_t) };
         if (mbMotion_.capacity() < motionCount)
             contextRequests[contextRequestCount++] =
                 { AllocationTag::MbMotion,
@@ -822,13 +893,13 @@ private:
         // TODO: we could optimize this by only resizing on resolution change
         // TODO: We should use a custom allocator or some more specific batch allocating approach so we can ensure memory locality of table allocations?
         // TODO: We could just allocate a static maximal-bounded size -embedded friendly.
-        nnzLuma_.resize(totalMbs * 16U, 0U);
-        nnzCb_.resize(totalMbs * 4U, 0U);
-        nnzCr_.resize(totalMbs * 4U, 0U);
-        mbQps_.resize(totalMbs, 0);
-        mbTransform8x8_.resize(totalMbs, 0U);
-        mbMotion_.resize(totalMbs * 16U); // 16 MVs per MB (per-4x4-block)
-        mbIntra4x4Modes_.resize(totalMbs * 16U, 2U); // Default DC(2)
+        nnzLuma_.resize(contextRows, widthInMbs_ * 16U);
+        nnzCb_.resize(contextRows, widthInMbs_ * 4U);
+        nnzCr_.resize(contextRows, widthInMbs_ * 4U);
+        mbQps_.resize(contextRows, widthInMbs_);
+        mbTransform8x8_.resize(contextRows, widthInMbs_);
+        mbMotion_.resize(contextRows, widthInMbs_ * 16U); // 16 MVs per MB (per-4x4-block)
+        mbIntra4x4Modes_.resize(contextRows, widthInMbs_ * 16U);
 
         // TODO; We should reason over if these all need to be zeroed - document if they do or don't etc.
         //TODO: We should consider using a more efficient way to clear these large context arrays, such as std::fill or memset, instead of a loop. For example, we could use std::fill(nnzLuma_.begin(), nnzLuma_.end(), 0U) to set all values to zero in one call, which is likely optimized and more efficient than a manual loop. This would also improve readability by clearly indicating that we are initializing the entire array to zero.
@@ -836,20 +907,33 @@ private:
         // which deblocking reads once the picture is complete.
         if (!continuesPicture)
         {
-            std::fill(nnzLuma_.begin(), nnzLuma_.end(), static_cast<uint8_t>(0U));
-            std::fill(nnzCb_.begin(), nnzCb_.end(), static_cast<uint8_t>(0U));
-            std::fill(nnzCr_.begin(), nnzCr_.end(), static_cast<uint8_t>(0U));
-            std::fill(mbQps_.begin(), mbQps_.end(), 0);
-            std::fill(mbTransform8x8_.begin(), mbTransform8x8_.end(), static_cast<uint8_t>(0U));
-            std::fill(mbMotion_.begin(), mbMotion_.end(), MbMotionInfo{});
-            std::fill(mbIntra4x4Modes_.begin(), mbIntra4x4Modes_.end(), static_cast<uint8_t>(2U));
+            nnzLuma_.reset(0U);
+            nnzCb_.reset(0U);
+            nnzCr_.reset(0U);
+            mbQps_.reset(0);
+            mbTransform8x8_.reset(0U);
+            mbMotion_.reset(MbMotionInfo{});
+            mbIntra4x4Modes_.reset(2U); // Default DC(2)
+            // Every slice of a picture shares these (checked above).
+            deblockNextRow_ = 0U;
+#ifndef SUB0H264_SKIP_DEBLOCK
+            deblockPicture_ = (pps->deblockingFilterControlPresent_ == 0U ||
+                               sh.disableDeblockingFilter_ != 1U) &&
+                              sh.disableDeblockingFilter_ != 2U;
+#else
+            deblockPicture_ = false;
+#endif
+            deblockAlphaOffset_ = sh.sliceAlphaC0Offset_;
+            deblockBetaOffset_ = sh.sliceBetaOffset_;
+            deblockChromaQpOffset_ = pps->chromaQpIndexOffset_;
         }
         else
         {
             // Earlier slices' MBs are unavailable for motion prediction (§6.4.8);
             // every reader checks .available, while deblocking still reads their
-            // motion vectors and references.
-            for (uint32_t i = 0U; i < sh.firstMbInSlice_ * 16U; ++i)
+            // motion vectors and references. Rows above the window are done.
+            for (uint32_t i = mbMotion_.firstRow() * widthInMbs_ * 16U;
+                 i < sh.firstMbInSlice_ * 16U; ++i)
                 mbMotion_[i].available = false;
         }
 
@@ -1212,6 +1296,7 @@ private:
             openDeblockIdc_ = sh.disableDeblockingFilter_;
             openAlphaOffset_ = sh.sliceAlphaC0Offset_;
             openBetaOffset_ = sh.sliceBetaOffset_;
+            openChromaQpOffset_ = pps->chromaQpIndexOffset_;
             return DecodeStatus::NeedMoreData;
         }
 
@@ -1228,37 +1313,17 @@ private:
                 "tracking §8.7");
             return DecodeStatus::Error;
         }
-#ifndef SUB0H264_SKIP_DEBLOCK
-        if (pps->deblockingFilterControlPresent_ == 0U ||
-            sh.disableDeblockingFilter_ != 1U)
-#else
-        if (false)
-#endif
+        // Filter the rows not yet filtered while decoding: the last rows, and
+        // after a failed MB the rest of the picture, whose context keeps the
+        // picture-start values exactly as the whole-picture pass saw them.
+        if (deblockPicture_)
         {
-            int64_t dbT0 = profile_ ? sub0h264TimerUs() : 0;
-            int32_t alphaOff = sh.sliceAlphaC0Offset_;
-            int32_t betaOff = sh.sliceBetaOffset_;
-
-            // activeFrame_ always points to the frame where all MBs were decoded.
-            Frame& dbFrame = *activeFrame_;
-
-            for (uint32_t my = 0U; my < heightInMbs_; ++my)
+            for (; deblockNextRow_ < heightInMbs_; ++deblockNextRow_)
             {
-                for (uint32_t mx = 0U; mx < widthInMbs_; ++mx)
-                {
-                    //TODO: We should reason about how to efficiently determine intra vs inter MBs for deblocking. Currently we check the reference index of the first 4x4 block's MV, which is a common heuristic since intra MBs have no references. However, this relies on the assumption that all blocks in an intra MB are marked with refIdx = -1, which should be true but we should verify this is always the case in our decoding logic. Alternatively, we could maintain a separate per-MB flag during decoding to explicitly track intra vs inter MBs, which might be more robust and slightly faster to check during deblocking.
-                    //TODO: We should also consider the implications of this intra/inter check for edge cases, such as MBs with mixed intra/inter blocks (if such a thing is possible), or how this interacts with the I_NxN types in P-slices. We should verify that our decoding logic correctly sets the refIdx for all blocks in an intra MB to -1, and that we don't have any cases where an inter MB might have a block with refIdx = -1 that could cause a false positive for intra detection.
-                    //TODO: We could also consider if there are any performance implications of this check, especially if we have a large number of MBs to deblock. If this becomes a bottleneck, we might want to optimize by maintaining an explicit intra/inter flag per MB during decoding, as mentioned above.
-                    bool mbIsIntra = (mbMotion_[(my * widthInMbs_ + mx) * 16U].refIdx == -1);
-                    deblockMb(dbFrame, mx, my,
-                              mbIsIntra, alphaOff, betaOff,
-                              nnzLuma_.data(), mbMotion_.data(),
-                              mbQps_.data(), mbTransform8x8_.data(),
-                              pps->chromaQpIndexOffset_,
-                              widthInMbs_, heightInMbs_, skipChroma());
-                }
+                while (deblockNextRow_ >= nnzLuma_.endRow())
+                    advanceMbContext();
+                deblockMbRow(deblockNextRow_);
             }
-            if (profile_) profile_->deblockUs += sub0h264TimerUs() - dbT0;
         }
 
         //TODO: Is this the right place for this? It needs to be after deblocking, but should it be here or at the end of the function?
