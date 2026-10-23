@@ -303,7 +303,6 @@ static g2_h264_result worker_decode(void *, const uint8_t *, uint32_t);
 #include "../../patches/video/pack.c"
 #include "../../patches/video/present.c"
 #include "../../patches/video/evidence.c"
-#include "../../patches/video/profile.c"
 static uint32_t radio_lost, radio_active, radio_acquires, radio_releases, radio_off, deny_radio;
 int video_radio_acquire(uint32_t generation, int off) {
     assert(!image_depth && !service_context && context.video_control.start_guard == generation);
@@ -340,10 +339,6 @@ static int worker_radio_refusal_snapshot(uint8_t *out) {
 }
 #define VIDEO_RADIO_REFUSAL_SNAPSHOT worker_radio_refusal_snapshot
 #include "../../patches/video/control.c"
-static uint32_t mock_clock_reg(uint32_t address) { return address == 0xe0001000U ? 1 : address; }
-#define VIDEO_CLOCK_READ32 mock_clock_reg
-#define VIDEO_CLOCK_CACHED() 2
-#define VIDEO_CLOCK_CYCLES (tick() * 250000u)
 #include "../../patches/video/telemetry.c"
 #define VIDEO_METER_READ(a) ((void)(a), 0u)
 #define VIDEO_METER_COUNT(q) ((void)(q), 0u)
@@ -1054,26 +1049,13 @@ static void receive_evidence(void) {
     assert(video_refused(&context, page, 9, &route, VIDEO_REFUSAL_LOCK, 0, 0, 0));
     assert(!video_refusal_snapshot(&context, 2, 1, out) && out[7] == 1 && video_read32(out + 12) == 1);
 
-    context.video_control.stream = 42; context.video_control.control_generation = 7;
-    context.video_control.owner_here = 1;
+    /* The clock snapshot is retired: subtype 5 is no longer answered as one. */
     uint32_t inits = clock_inits;
-    video_clock_start_locked(&context);
-    video_clock_state *s = &context.video_telemetry.clock;
-    assert(s->rows[0][7] & VIDEO_CLOCK_VALID);
-    s->anchor.tick -= 300; s->anchor.after -= 300; s->anchor.cycles -= 75000000u;
-    video_clock_step_locked(&context);
-    assert((s->rows[1][7] & (VIDEO_CLOCK_VALID | VIDEO_CLOCK_LONG | VIDEO_CLOCK_COUNTER)) == 7);
-    video_clock_stop_locked(&context, 6); assert(!s->rows[2][7]);
-    video_clock_stop_locked(&context, 7); assert(s->rows[2][7] & VIDEO_CLOCK_LONG);
-    assert(video_read32(s->rows[1] + 40) == 0x40021000 && video_read32(s->rows[1] + 76) == 2);
-    assert(clock_inits == inits); /* Sampling never enables or changes a clock. */
-    control_command(command, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_CLOCK_DIAGNOSTICS); command[9] = 2;
-    assert(!control_response(command, 12, out, sizeof(out)) && out[3] == 5 && out[4] == 2 && video_read32(out + 8) == 42);
-    video_clock_pair wrapped = {VIDEO_TICK - 300, (uint32_t)VIDEO_CLOCK_CYCLES - 75000000u, VIDEO_TICK - 300, 0};
-    video_clock_capture(&context, 1, wrapped); assert(s->rows[1][7] & VIDEO_CLOCK_CHANGED);
-    wrapped.tick = wrapped.after = VIDEO_TICK - 1001;
-    video_clock_capture(&context, 1, wrapped); assert(!(s->rows[1][7] & VIDEO_CLOCK_LONG));
-    puts("per-origin refusal evidence, contention drops, read-only bracketed clocks and heap-free replies PASS");
+    control_command(command, VIDEO_CONTROL_DIAGNOSTICS, 5); command[9] = 2;
+    control_response(command, 12, out, sizeof(out));
+    assert(out[1] != VIDEO_CONTROL_DIAGNOSTICS || out[3] != 5);
+    assert(clock_inits == inits);
+    puts("per-origin refusal evidence, contention drops, retired clock subtype and heap-free replies PASS");
 }
 static void rate_contract(void) {
     configure(); request_next = 0;
@@ -1835,7 +1817,7 @@ static void timed_input(void) {
     control_command(p, VIDEO_PLAYBACK_CAPABILITIES, 0);
     memset(snapshot, 0, sizeof(snapshot));
     assert(control_response(p, VIDEO_CONTROL_HEADER_BYTES, snapshot, VIDEO_PLAYBACK_CAPABILITIES_BYTES) ==
-           VIDEO_CONTROL_ACCEPTED && snapshot[7] == 255);
+           VIDEO_CONTROL_ACCEPTED && snapshot[7] == (255 & ~16));
     control_command(p, VIDEO_CONTROL_STOP, 1);
     assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
     timed_record(record, 4, 3, 125, 0x41);
@@ -2230,67 +2212,6 @@ static void status_copy_tuple(void) {
     assert(!control_snapshot(command, 12, report)); pool_drain(); finish();
     assert(video_read32(report + 80) == 2 && !video_read32(report + 88));
     puts("STATUS before first copy, pending/callback/fold, genuine zero wrap and menu tuple PASS");
-}
-
-static void profile_mailboxes(void) {
-    configure();
-    video_owner owner = {.context = &context, .token = 3};
-    video_presenter presenter = {.decoder = &owner, .token = 3, .generation = 7};
-    presenter.sync.stream = 11;
-    context.video_control.start_guard = context.video_control.control_generation = 7;
-    context.video_control.owner_origin = context.video_control.owner_here = CFW_MESSAGE_LEFT;
-    video_profile_start_locked(&presenter);
-    video_profile_state *s = &context.video_profile;
-    force_cycles = 1; forced_cycles = 4;
-    video_profile_capture captured = video_profile_begin();
-    captured.cycles = UINT32_MAX - 5;
-    for (uint32_t i = 0; i < VIDEO_PROFILE_SLOTS + 1; ++i)
-        video_profile_end(captured, VIDEO_PROFILE_PACK, 17);
-    assert(!s->rows[VIDEO_PROFILE_PACK].count && s->dropped == 1);
-    assert(s->flags & VIDEO_PROFILE_DROPPED);
-    video_profile_fold_locked(s);
-    assert(s->rows[VIDEO_PROFILE_PACK].count == 4 && s->rows[VIDEO_PROFILE_PACK].bytes == 68);
-    assert(s->rows[VIDEO_PROFILE_PACK].cycles_lo == 40 && !s->rows[VIDEO_PROFILE_PACK].cycles_hi);
-    s->rows[VIDEO_PROFILE_DECODE].cycles_lo = UINT32_MAX - 5;
-    video_profile_end(captured, VIDEO_PROFILE_DECODE, 0); video_profile_fold_locked(s);
-    assert(s->rows[VIDEO_PROFILE_DECODE].cycles_lo == 4 && s->rows[VIDEO_PROFILE_DECODE].cycles_hi == 1);
-    captured.tick = VIDEO_TICK - 1002;
-    video_profile_end(captured, VIDEO_PROFILE_QUEUE_WAIT, 0); video_profile_fold_locked(s);
-    assert(s->flags & VIDEO_PROFILE_SPAN);
-    assert(!s->rows[VIDEO_PROFILE_QUEUE_WAIT].cycles_lo && s->rows[VIDEO_PROFILE_QUEUE_WAIT].ticks >= 1002);
-    s->rows[VIDEO_PROFILE_PACK].bytes = UINT32_MAX;
-    video_profile_end(captured, VIDEO_PROFILE_PACK, 1); video_profile_fold_locked(s);
-    assert(s->rows[VIDEO_PROFILE_PACK].bytes == UINT32_MAX && (s->flags & VIDEO_PROFILE_SATURATED));
-    uint8_t out[VIDEO_DIAGNOSTICS_BYTES] = {0}, again[VIDEO_DIAGNOSTICS_BYTES] = {0};
-    assert(!video_profile_snapshot_locked(&context, 0, CFW_MESSAGE_LEFT, out));
-    assert(out[3] == 3 && out[5] == 1 && video_read32(out + 8) == 7 && video_read32(out + 16) == 3);
-    video_profile_state before = *s;
-    assert(!video_profile_snapshot_locked(&context, 0, CFW_MESSAGE_LEFT, again));
-    assert(!memcmp(out, again, sizeof(out)) && !memcmp(s, &before, sizeof(before)));
-    assert(video_profile_snapshot_locked(&context, 2, CFW_MESSAGE_LEFT, out) == VIDEO_CONTROL_FORMAT);
-    assert(video_profile_snapshot_locked(&context, 0, CFW_MESSAGE_RIGHT, out) == VIDEO_CONTROL_STALE);
-    uint8_t command[VIDEO_START_BYTES], frozen[VIDEO_STATUS_BYTES], replayed[VIDEO_STATUS_BYTES];
-    request_next = 0;
-    control_command(command, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_PROFILE_DIAGNOSTICS);
-    assert(!control_response(command, 12, frozen, VIDEO_DIAGNOSTICS_BYTES));
-    assert(frozen[3] == 3 && video_read32(frozen + 8) == 7);
-    s->rows[VIDEO_PROFILE_DECODE].count += 1;
-    assert(!control_response(command, 12, replayed, VIDEO_DIAGNOSTICS_BYTES));
-    assert(!memcmp(frozen, replayed, VIDEO_DIAGNOSTICS_BYTES));
-    control_command(command, VIDEO_CONTROL_DIAGNOSTICS, VIDEO_PROFILE_DIAGNOSTICS);
-    command[9] = 1;
-    assert(!control_response(command, 12, replayed, VIDEO_DIAGNOSTICS_BYTES) && replayed[4] == 1);
-    s->mail[0][0].phase = 1; /* A producer owns this slot across a generation transition. */
-    presenter.generation = context.video_control.start_guard = context.video_control.control_generation = 8;
-    video_profile_start_locked(&presenter);
-    assert(s->mail[0][0].phase == 1);
-    s->mail[0][0].generation = 7; s->mail[0][0].phase = 2;
-    video_profile_fold_locked(s);
-    assert(!s->rows[0].count && !s->mail[0][0].phase);
-    video_profile_end(captured, 0, 1); assert(!s->mail[0][0].phase);
-    context.video_control.start_guard = 0;
-    assert(!video_profile_begin().generation);
-    puts("bounded profile posts, cycle carry, long-span uncertainty, saturation, stale mail and read-only pages PASS");
 }
 
 static void recovery(void) {
@@ -2994,7 +2915,6 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "evidence-replays")) evidence_replays();
     else if (!strcmp(argv[1], "presentation-failures")) presentation_failures();
     else if (!strcmp(argv[1], "status-copy")) status_copy_tuple();
-    else if (!strcmp(argv[1], "profile")) profile_mailboxes();
     else if (!strcmp(argv[1], "original-display")) original_display();
     else if (!strcmp(argv[1], "inactivity")) inactivity();
     else if (!strcmp(argv[1], "cleanup")) cleanup();

@@ -144,8 +144,6 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         VIDEO_OS_EVENT_WAIT(p->wake, VIDEO_WAKE_ALL, 0, VIDEO_WAIT_FOREVER);
     }
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) video_presenter_fault(owner, VIDEO_FAULT_OWNERSHIP);
-    video_profile_start_locked(p);
-    video_clock_start_locked(ctx);
     const uint32_t fps = ctx->video_control.timeline.fps;
     /* A STOP between arming and this lock zeroes the timeline; the loop below then exits
      * as cancelled, so only avoid the divide. */
@@ -158,8 +156,6 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS))
             video_presenter_fault(owner, VIDEO_FAULT_OWNERSHIP);
         uint32_t control_op = 0, control_serial = 0, control_boundary = 0;
-        video_profile_fold_locked(&ctx->video_profile);
-        video_clock_step_locked(ctx);
         uint32_t control_now = VIDEO_TICK;
         video_rate_present(&ctx->video_rate, control_now,
             p->queue.count && p->queue.slots[p->queue.head].state == VIDEO_DECODED_READY, p->paused);
@@ -367,8 +363,6 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
             video_presenter_fault(owner, VIDEO_FAULT_DISPLAY);
     }
     if (video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) {
-        video_profile_fold_locked(&ctx->video_profile);
-        video_clock_stop_locked(ctx, p->generation);
         video_rate_stop(&ctx->video_rate, VIDEO_TICK);
         video_control_give(ctx);
     }
@@ -469,7 +463,6 @@ static int video_presenter_produce(video_owner *owner, const video_frame_descrip
     customCfwContext *ctx = owner->context;
     video_frame_time media;
     uint32_t serial = 0, slot = 0;
-    video_profile_capture waiting = video_profile_begin();
     while (!video_lifecycle_cancelled(&ctx->video, owner->token)) {
         if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) return 0;
         int room = p->queue.count < p->queue.depth;
@@ -493,12 +486,9 @@ static int video_presenter_produce(video_owner *owner, const video_frame_descrip
         VIDEO_OS_EVENT_WAIT(owner->wake, VIDEO_WAKE_ALL, 0, 100);
     }
     if (!serial) return 0;
-    video_profile_end(waiting, VIDEO_PROFILE_QUEUE_WAIT, 0);
-    video_profile_capture copying = video_profile_begin();
     int copied = video_decoded_copy_range(&p->queue, p->generation, serial,
         frame->pixels, frame->stride, frame->bytes,
         frame->format & (VIDEO_SOURCE_TV | VIDEO_SOURCE_UNSIGNALLED));
-    video_profile_end(copying, VIDEO_PROFILE_QUEUE_COPY, frame->bytes);
     if (!video_control_wait(ctx, VIDEO_STOP_LIMIT_MS)) return 0;
     int published = copied && video_decoded_publish(&p->queue, p->generation, serial);
     if (published) p->queued_ticks[slot] = VIDEO_TICK;

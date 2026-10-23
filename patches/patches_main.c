@@ -55,7 +55,6 @@ static void video_storage_refused(void);
 #include "video/radio_lifecycle.c"
 #include "video/present.c"
 #include "video/evidence.c"
-#include "video/profile.c"
 #include "video/power.c"
 #include "video/handoff.c"
 #include "video/controller.c"

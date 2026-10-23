@@ -431,7 +431,9 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             entry->snapshot[4] = VIDEO_DECODED_DEPTH | VIDEO_PLAYBACK_GEOMETRY | VIDEO_PLAYBACK_PICTURE_STYLE;
             entry->snapshot[5] = VIDEO_TIMELINE_RATE_MASK;
             entry->snapshot[6] = 255; /* Maximum explicit decoded seek prefix. */
-            entry->snapshot[7] = 255; /* Adds timed NAL records and timeline credits; 8 marks multi-slice pictures. */
+            /* Adds timed NAL records and timeline credits; 8 marks multi-slice
+             * pictures. Bit 16 (stage profile) is retired and stays clear. */
+            entry->snapshot[7] = 255 & ~16;
             video_write32(entry->snapshot + 8, VIDEO_PRESENTER_A4_LIMIT);
             video_write32(entry->snapshot + 12, VIDEO_PRESENTER_STACK_BYTES);
         }
@@ -446,27 +448,11 @@ static int video_control_command(const uint8_t *data, uint16_t size,
             entry->snapshot[1] = data[1];
             entry->snapshot[2] = entry->result;
         }
-        int profile = size == VIDEO_CONTROL_HEADER_BYTES + 4 && data[8] == VIDEO_PROFILE_DIAGNOSTICS &&
-            data[9] < 2 && !data[10] && !data[11];
-        if (data[1] == VIDEO_CONTROL_DIAGNOSTICS && profile) {
-            bzero(entry->snapshot, VIDEO_DIAGNOSTICS_BYTES);
-            entry->snapshot_bytes = VIDEO_DIAGNOSTICS_BYTES;
-            entry->result = video_profile_snapshot_locked(ctx, data[9], route->origin, entry->snapshot);
-            entry->snapshot[0] = VIDEO_PROTOCOL_VERSION; entry->snapshot[1] = VIDEO_CONTROL_DIAGNOSTICS;
-            entry->snapshot[2] = entry->result;
-        }
         if (data[1] == VIDEO_CONTROL_DIAGNOSTICS && size == 12 && !data[10] && !data[11] &&
-            (data[8] == VIDEO_REFUSAL_DIAGNOSTICS || data[8] == VIDEO_CLOCK_DIAGNOSTICS)) {
+            data[8] == VIDEO_REFUSAL_DIAGNOSTICS) {
             bzero(entry->snapshot, VIDEO_DIAGNOSTICS_BYTES);
             entry->snapshot_bytes = VIDEO_DIAGNOSTICS_BYTES;
-            if (data[8] == VIDEO_REFUSAL_DIAGNOSTICS)
-                entry->result = data[9] < 2 ? video_refusal_snapshot(ctx, data[9] + 1, route->here, entry->snapshot) : VIDEO_CONTROL_FORMAT;
-            else {
-                entry->result = data[9] < 3 ? VIDEO_CONTROL_ACCEPTED : VIDEO_CONTROL_FORMAT;
-                if (data[9] < 3) memcpy(entry->snapshot, ctx->video_telemetry.clock.rows[data[9]], VIDEO_DIAGNOSTICS_BYTES);
-                entry->snapshot[3] = VIDEO_CLOCK_DIAGNOSTICS; entry->snapshot[4] = data[9];
-                entry->snapshot[5] = 1; entry->snapshot[6] = route->here;
-            }
+            entry->result = data[9] < 2 ? video_refusal_snapshot(ctx, data[9] + 1, route->here, entry->snapshot) : VIDEO_CONTROL_FORMAT;
             entry->snapshot[0] = VIDEO_PROTOCOL_VERSION; entry->snapshot[1] = VIDEO_CONTROL_DIAGNOSTICS;
             entry->snapshot[2] = entry->result;
         }

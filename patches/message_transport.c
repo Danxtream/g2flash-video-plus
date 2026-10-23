@@ -2,7 +2,6 @@
 #include "memory.h"
 #include "video/power.h"
 #include "video/sync.h"
-#include "video/profile.h"
 #include "video/radio.h"
 
 #ifndef CFW_STOCK_RECEIVE
@@ -41,14 +40,8 @@ static void *cfw_video_message_allocate(uint32_t size) {
 }
 #define CFW_MESSAGE_MALLOC cfw_video_message_allocate
 #define CFW_MESSAGE_FREE cfw_heap13_free
-#define CFW_PROFILE_BEGIN video_profile_begin
-#define CFW_PROFILE_END video_profile_end
 #endif
 
-#ifndef CFW_PROFILE_BEGIN
-#define CFW_PROFILE_BEGIN() ((video_profile_capture){0})
-#define CFW_PROFILE_END(c, s, n) ((void)(c), (void)(s), (void)(n))
-#endif
 #ifndef CFW_CONNECTION_EPOCH
 #define CFW_CONNECTION_EPOCH video_radio_transport_epoch
 #endif
@@ -87,7 +80,6 @@ static int cfw_message_bridge_send(uint8_t kind, uint8_t origin,
     uint8_t envelope[269]; /* Maximum TPL packet plus origin and connection epoch. */
     uint16_t header = kind == CFW_BRIDGE_REQUEST ? 6 : 2;
     if (length > sizeof(envelope) - header) return -1;
-    video_profile_capture captured = CFW_PROFILE_BEGIN();
     envelope[0] = kind;
     envelope[1] = origin;
     if (header == 6) {
@@ -102,7 +94,6 @@ static int cfw_message_bridge_send(uint8_t kind, uint8_t origin,
 #ifdef CFW_BRIDGE_ACTIVE
     if (active) __atomic_sub_fetch(active, 1, __ATOMIC_RELAXED);
 #endif
-    CFW_PROFILE_END(captured, VIDEO_PROFILE_BRIDGE, length + 2);
     return result;
 }
 
@@ -308,7 +299,6 @@ uint32_t cfw_receive_packet(uint8_t pipe, const uint8_t *packet, uint16_t length
     uint8_t here = cfw_message_lens();
     if (!here) return 6;
     uint32_t epoch = CFW_CONNECTION_EPOCH();
-    video_profile_capture captured = CFW_PROFILE_BEGIN();
     if (packet[8] & (here ^ CFW_MESSAGE_BOTH))
         if (cfw_message_bridge_send(CFW_BRIDGE_REQUEST, here, packet, length, epoch) != 0) status = 6;
     /* A failed peer enqueue does not prevent the selected local lens processing. */
@@ -316,7 +306,6 @@ uint32_t cfw_receive_packet(uint8_t pipe, const uint8_t *packet, uint16_t length
         uint32_t local_status = cfw_message_process(packet, length, here, here, epoch);
         if (local_status) status = local_status;
     }
-    CFW_PROFILE_END(captured, VIDEO_PROFILE_INGRESS, length);
     return status;
 }
 
@@ -343,9 +332,7 @@ uint32_t cfw_message_bridge_received(uint32_t app_id, const uint8_t *data,
             cfw_message_abort(CFW_STREAM_STATE(origin), here, origin);
             return status;
         }
-        video_profile_capture captured = CFW_PROFILE_BEGIN();
         status = (data[14] & here) ? cfw_message_process(data + 6, length - 6, here, origin, epoch) : 0;
-        CFW_PROFILE_END(captured, VIDEO_PROFILE_INGRESS, length - 2);
         return status;
     }
     if (data[0] == CFW_BRIDGE_RETURN) {
