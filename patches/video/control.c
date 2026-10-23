@@ -41,6 +41,7 @@ __attribute__((noinline)) static void video_queue_snapshot(video_control_replay 
     out[0] = 1; out[1] = VIDEO_CONTROL_DIAGNOSTICS; out[2] = entry->result;
     out[3] = VIDEO_QUEUE_DIAGNOSTICS; out[4] = VIDEO_QUEUE_INITIAL;
     out[5] = VIDEO_QUEUE_MAX; out[6] = VIDEO_TIMELINE_RECORDS; out[7] = here;
+    out[8] = 1; /* Full-width mid frame sizes. */
 }
 
 static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
@@ -217,6 +218,9 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         } else if (geometry.width != VIDEO_FRAME_WIDTH || geometry.height != VIDEO_FRAME_HEIGHT)
             return VIDEO_CONTROL_FORMAT;
         if (!video_geometry_valid(geometry)) return VIDEO_CONTROL_FORMAT;
+        /* Only the queued presenter stretches mid sizes to the panel width. */
+        if (video_geometry_full_width(geometry) && !(p[18] & VIDEO_QUEUED_PRESENTATION))
+            return VIDEO_CONTROL_FORMAT;
         uint32_t stream = video_read32(p + 8), interval = video_read32(p + 20);
         if (!stream || stream <= s->stream_high || interval < VIDEO_INTERVAL_MIN ||
             interval > VIDEO_INTERVAL_MAX) return VIDEO_CONTROL_FORMAT;

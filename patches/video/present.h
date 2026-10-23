@@ -19,6 +19,7 @@ enum {
     VIDEO_SOURCE_STYLE_MASK = 96,
     VIDEO_SCALE_NATIVE = 1,
     VIDEO_SCALE_DOUBLE = 2,
+    VIDEO_SCALE_FULL_WIDTH = 3, /* Mid sizes: stretched to the panel width. */
     VIDEO_PRESENT_NATIVE = 1,
     VIDEO_DISPLAY_IDLE = 0,
     VIDEO_DISPLAY_QUEUED,

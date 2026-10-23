@@ -6,7 +6,9 @@ int main(void) {
     assert(!video_pacing_deadline(&p, 1, 1, &tick));
     assert(!video_pacing_anchor(&p, 0, 1, 0, 15));
     assert(!video_pacing_anchor(&p, 7, 1, 0, 16));
-    for (uint32_t fps = 10; fps <= 20; fps += 5) {
+    const uint32_t rates[] = {10, 15, 20, 24};
+    for (uint32_t r = 0; r < 4; ++r) {
+        uint32_t fps = rates[r];
         assert(video_pacing_anchor(&p, 7, 1, UINT32_MAX - 30, fps));
         for (uint32_t i = 0; i < 100000; ++i) {
             assert(video_pacing_deadline(&p, 7, i + 1, &tick));

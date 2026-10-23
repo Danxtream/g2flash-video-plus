@@ -102,6 +102,11 @@ static void shadow_free(void *pointer) {
 #define VIDEO_DISPLAY_SIGNAL display_signal
 #define VIDEO_SHADOW_ALLOC shadow_allocate
 #define VIDEO_SHADOW_FREE shadow_free
+static uint32_t extension_live;
+static void *extension_allocate(uint32_t size) { ++extension_live; return malloc(size); }
+static void extension_free(void *p) { assert(extension_live); --extension_live; free(p); }
+#define VIDEO_EXTENSION_ALLOC extension_allocate
+#define VIDEO_EXTENSION_FREE extension_free
 
 static void test_zero(uint8_t *p, uint32_t n) { memset(p, 0, n); }
 static customCfwContext *peekCustomCfwContext(void) { return &context; }
@@ -1817,7 +1822,7 @@ static void timed_input(void) {
     control_command(p, VIDEO_PLAYBACK_CAPABILITIES, 0);
     memset(snapshot, 0, sizeof(snapshot));
     assert(control_response(p, VIDEO_CONTROL_HEADER_BYTES, snapshot, VIDEO_PLAYBACK_CAPABILITIES_BYTES) ==
-           VIDEO_CONTROL_ACCEPTED && snapshot[7] == (255 & ~16));
+           VIDEO_CONTROL_ACCEPTED && snapshot[7] == (255 & ~16) && snapshot[5] == 15 /* 10/15/20/24 fps */);
     control_command(p, VIDEO_CONTROL_STOP, 1);
     assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED);
     timed_record(record, 4, 3, 125, 0x41);
@@ -1959,7 +1964,8 @@ static void consumer(void) {
     assert(control_snapshot(p, 12, snapshot) == VIDEO_CONTROL_ACCEPTED &&
            snapshot[1] == VIDEO_CONTROL_DIAGNOSTICS && snapshot[3] == VIDEO_QUEUE_DIAGNOSTICS &&
            snapshot[4] == VIDEO_QUEUE_INITIAL && snapshot[5] == VIDEO_QUEUE_MAX &&
-           snapshot[6] == VIDEO_TIMELINE_RECORDS && (snapshot[7] == 1 || snapshot[7] == 2));
+           snapshot[6] == VIDEO_TIMELINE_RECORDS && (snapshot[7] == 1 || snapshot[7] == 2) &&
+           snapshot[8] == 1 /* Full-width mid frame sizes. */);
     control_command(p, VIDEO_CONTROL_START, 2);
     assert(control_snapshot(p, VIDEO_START_BYTES, snapshot) == VIDEO_CONTROL_ACCEPTED && !context.video_failure.valid);
     pool_drain(); await_ready();
@@ -2814,6 +2820,22 @@ static void geometry_contract(void) {
         if (bad == 2) p[30] = 0;
         if (bad == 3) p[24] = 2;
         assert(control_snapshot(p, bad == 0 ? 24 : bad == 4 ? 31 : 32, snapshot) == VIDEO_CONTROL_FORMAT);
+        assert(!context.video_control.stream_high && !pool_pending());
+        finish();
+    }
+    /* Mid sizes are accepted only for the queued presenter, which stretches them. */
+    const video_geometry mids[] = {
+        {384,224,{0,4,384,216}}, {448,256,{0,2,448,252}}, {480,272,{0,1,480,270}}, {512,288,{0,0,512,288}}
+    };
+    for (uint32_t i = 0; i < 4; ++i) {
+        configure();
+        uint8_t p[VIDEO_START_GEOMETRY_BYTES] = {0}, snapshot[VIDEO_STATUS_BYTES];
+        control_command(p, VIDEO_CONTROL_START, 1);
+        const video_geometry g = mids[i];
+        p[12] = g.width; p[13] = g.width >> 8; p[14] = g.height; p[15] = g.height >> 8;
+        uint16_t rect[] = {g.picture.x,g.picture.y,g.picture.width,g.picture.height};
+        for (uint32_t j = 0; j < 4; ++j) { p[24+2*j] = rect[j]; p[25+2*j] = rect[j] >> 8; }
+        assert(control_snapshot(p, sizeof(p), snapshot) == VIDEO_CONTROL_FORMAT);
         assert(!context.video_control.stream_high && !pool_pending());
         finish();
     }

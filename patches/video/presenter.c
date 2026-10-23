@@ -283,6 +283,7 @@ __attribute__((section(".text.presenter"))) static void video_presenter_entry(vo
         }
         int claim = due &&
             video_decoded_claim(q, p->generation, ordinal,
+                video_geometry_full_width(q->geometry) ? VIDEO_SCALE_FULL_WIDTH :
                 (p->paired ? p->flight_native : p->scale_requested) ? VIDEO_SCALE_NATIVE : VIDEO_SCALE_DOUBLE,
                 &frame, &media);
         if (claim) {
@@ -420,10 +421,18 @@ static int video_presenter_prepare(video_owner *owner) {
                             owner->storage.display_allowance)) return 0;
     video_storage_bind_counter(&p->storage, &owner->context->video_heap.presenter);
     int dither = (owner->context->video_control.options & VIDEO_DITHER_PRESENTATION) != 0;
-    uint32_t format = dither ? VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER : VIDEO_SOURCE_A4;
+    video_geometry geometry = owner->context->video_control.geometry.width ?
+        owner->context->video_control.geometry : video_geometry_default();
+    /* Mid sizes keep 4-bit slots even with dithering: 8-bit copies would need
+     * about twice the memory, so the pattern is applied when a slot is filled. */
+    int full_width = video_geometry_full_width(geometry);
+    uint32_t format = full_width ? VIDEO_SOURCE_A4 | (dither ? VIDEO_SOURCE_DITHER : 0) :
+        dither ? VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER : VIDEO_SOURCE_A4;
     format |= owner->context->video_control.picture_style << VIDEO_SOURCE_STYLE_SHIFT;
-    uint32_t pixels_bytes = VIDEO_DECODED_DEPTH * (dither ? VIDEO_DECODED_Y8_BYTES : VIDEO_DECODED_A4_BYTES);
-    p->storage.limit = dither ? VIDEO_PRESENTER_Y8_LIMIT : VIDEO_PRESENTER_A4_LIMIT;
+    uint32_t pixels_bytes = VIDEO_DECODED_DEPTH * (full_width ? geometry.width * geometry.height / 2 :
+        dither ? VIDEO_DECODED_Y8_BYTES : VIDEO_DECODED_A4_BYTES);
+    p->storage.limit = full_width ? VIDEO_PRESENTER_A4_LIMIT - VIDEO_DECODED_DEPTH * VIDEO_DECODED_A4_BYTES + pixels_bytes :
+        dither ? VIDEO_PRESENTER_Y8_LIMIT : VIDEO_PRESENTER_A4_LIMIT;
     p->storage.cached_allowance = 0; /* Input slots already admitted by decoder. */
     p->pixels = video_presenter_spare_pixels(p, pixels_bytes);
     if (!p->pixels) p->pixels = video_storage_alloc(&p->storage, pixels_bytes);
@@ -433,8 +442,7 @@ static int video_presenter_prepare(video_owner *owner) {
         !video_decoded_init(&p->queue, p->generation, p->token,
                             format,
                             VIDEO_DECODED_DEPTH, p->pixels, pixels_bytes) ||
-        !video_decoded_geometry(&p->queue, owner->context->video_control.geometry.width ?
-            owner->context->video_control.geometry : video_geometry_default()) ||
+        !video_decoded_geometry(&p->queue, geometry) ||
         !video_decoded_skip_prefix(&p->queue, p->generation, p->preroll)) return 0;
     uint8_t *base = p->stack_allocation;
     for (uint32_t i = 0; i < VIDEO_PRESENTER_STACK_BYTES + 2 * VIDEO_STACK_GUARD_BYTES; ++i)

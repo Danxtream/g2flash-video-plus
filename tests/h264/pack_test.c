@@ -272,6 +272,52 @@ static void picture_styles(void) {
     }
 }
 
+/* Mid sizes fill the panel width: every panel pixel shows the source pixel under
+ * its centre, the bars above and below stay unlit, and nothing else is accepted. */
+static void full_width(void) {
+    const uint32_t sizes[4][3] = {{384, 224, 216}, {448, 256, 252}, {480, 272, 270}, {512, 288, 288}};
+    for (uint32_t i = 0; i < 4; ++i) {
+        uint32_t width = sizes[i][0], height = sizes[i][1], lit = sizes[i][2], stride = width / 2 + 9;
+        uint32_t bytes = stride * height;
+        uint8_t *source = malloc(bytes), *shadow = malloc(VIDEO_PANEL_BYTES);
+        assert(source && shadow);
+        for (uint32_t y = 0; y < height; ++y)
+            for (uint32_t x = 0; x < width; x += 2)
+                source[y * stride + x / 2] = (video_gray_level(brightness(x, y), 0) << 4) |
+                                             video_gray_level(brightness(x + 1, y), 0);
+        video_picture_rect r = {0, (height - lit) / 2, width, lit};
+        video_frame_descriptor frame = {3, 9, 17, width, height, stride, bytes, VIDEO_SOURCE_A4,
+                                        VIDEO_SCALE_FULL_WIDTH, source, r};
+        memset(shadow, 0xef, VIDEO_PANEL_BYTES);
+        assert(video_pack_frame(shadow, VIDEO_PANEL_BYTES, &frame));
+        uint32_t out = lit * 640 / width, top = (480 - out) / 2;
+        assert(out == 360);
+        for (uint32_t y = 0; y < 480; ++y)
+            for (uint32_t x = 0; x < 640; ++x) {
+                uint8_t actual = shadow[y * 320 + x / 2];
+                actual = x % 2 ? actual & 15 : actual >> 4;
+                uint8_t expected = 0;
+                if (y >= top && y < top + out) {
+                    uint32_t sx = r.x + ((2 * x + 1) * r.width) / 1280;
+                    uint32_t sy = r.y + ((2 * (y - top) + 1) * r.height) / (2 * out);
+                    expected = video_gray_level(brightness(sx, sy), 0);
+                }
+                assert(actual == expected);
+            }
+        video_frame_descriptor y8 = frame, dithered = frame, narrow = frame;
+        y8.format = VIDEO_SOURCE_Y8; y8.stride = width; y8.bytes = width * height;
+        dithered.format = VIDEO_SOURCE_A4 | VIDEO_SOURCE_DITHER;
+        narrow.picture.width = 300;
+        memset(shadow, 0xef, VIDEO_PANEL_BYTES);
+        assert(!video_pack_frame(shadow, VIDEO_PANEL_BYTES, &y8));
+        assert(!video_pack_frame(shadow, VIDEO_PANEL_BYTES, &dithered));
+        assert(!video_pack_frame(shadow, VIDEO_PANEL_BYTES, &narrow));
+        for (uint32_t b = 0; b < VIDEO_PANEL_BYTES; ++b) assert(shadow[b] == 0xef);
+        free(source); free(shadow);
+    }
+    puts("full-width mid sizes: centre sampling, unlit bars and refusals PASS");
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (!strcmp(argv[1], "pixels")) {
@@ -295,7 +341,8 @@ int main(int argc, char **argv) {
     } else if (!strcmp(argv[1], "dump-gray")) {
         for (uint32_t y = 0; y < 256; ++y)
             printf("%u %u %u\n", y, video_gray_level(y, 0), video_gray_level(y, 1));
-    } else if (!strcmp(argv[1], "picture-styles")) picture_styles();
+    } else if (!strcmp(argv[1], "full-width")) full_width();
+    else if (!strcmp(argv[1], "picture-styles")) picture_styles();
     else if (!strcmp(argv[1], "picture-margins")) picture_margins();
     else if (!strcmp(argv[1], "margins")) mode_changes();
     else if (!strcmp(argv[1], "plain-cells")) plain_cells();

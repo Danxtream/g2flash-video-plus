@@ -15,7 +15,7 @@ static int video_pacing_span(uint32_t fps, uint32_t delta, uint32_t *span) {
 }
 
 int video_pacing_anchor(video_pacing *p, uint32_t generation, uint32_t ordinal, uint32_t tick, uint32_t fps) {
-    if (!p || !generation || !ordinal || (fps != 10 && fps != 15 && fps != 20)) return 0;
+    if (!p || !generation || !ordinal || (fps != 10 && fps != 15 && fps != 20 && fps != 24)) return 0;
     *p = (video_pacing){tick, ordinal, generation, fps};
     return 1;
 }
@@ -23,7 +23,7 @@ int video_pacing_anchor(video_pacing *p, uint32_t generation, uint32_t ordinal, 
 int video_pacing_retime(video_pacing *p, uint32_t generation, uint32_t ordinal, uint32_t tick,
                         uint32_t next, uint32_t fps) {
     uint32_t span;
-    if (!p || !next || (fps != 10 && fps != 15 && fps != 20) ||
+    if (!p || !next || (fps != 10 && fps != 15 && fps != 20 && fps != 24) ||
         !video_pacing_span(fps, next >= ordinal ? next - ordinal : ordinal - next, &span)) return 0;
     return video_pacing_anchor(p, generation, next, next >= ordinal ? tick + span : tick - span, fps);
 }

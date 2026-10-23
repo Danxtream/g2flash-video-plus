@@ -7,7 +7,9 @@ int main(void) {
     _Static_assert(VIDEO_TIMELINE_RECORDS == 12, "Twelve independent picture records");
     video_timeline s = {0};
     video_frame_time out = {0};
-    for (uint32_t fps = 10; fps <= 20; fps += 5) {
+    const uint16_t rates[] = {10, 15, 20, 24};
+    for (uint32_t r = 0; r < 4; ++r) {
+        uint16_t fps = rates[r];
         assert(video_timeline_configure(&s, 1, 1000, 0, fps, 1));
         assert(s.fps == fps);
     }

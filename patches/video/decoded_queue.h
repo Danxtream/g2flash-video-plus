@@ -24,7 +24,7 @@ typedef struct {
  * Reservation/publication/claim/release run under the owner's publication lock.
  * Producer copying runs unlocked while its single filling slot is reserved. */
 typedef struct {
-    uint32_t generation, token, format, depth, slot_bytes;
+    uint32_t generation, token, format, depth, slot_bytes, bytes;
     uint32_t head, count, serial, accepted, released, cancelled;
     video_geometry geometry;
     video_decoded_slot slots[VIDEO_DECODED_DEPTH];
@@ -33,7 +33,8 @@ typedef struct {
 /* Initialize only after full mode-specific heap admission; depth is explicit. */
 int video_decoded_init(video_decoded_queue *, uint32_t generation, uint32_t token,
                        uint32_t format, uint32_t depth, uint8_t *, uint32_t bytes);
-/* Configure only an empty, unpublished queue; never resize an admitted buffer. */
+/* Configure only an empty, unpublished queue; never grow past the admitted buffer.
+ * A mid size lays its slots out at its own 4-bit size. */
 int video_decoded_geometry(video_decoded_queue *, video_geometry);
 /* Initialize media high marks for an explicit hidden seek prefix, not copies. */
 int video_decoded_skip_prefix(video_decoded_queue *, uint32_t generation, uint32_t prefix);

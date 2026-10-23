@@ -6,7 +6,7 @@ enum {
     VIDEO_TIMELINE_VERSION = 1,
     VIDEO_TIMELINE_RECORDS = 12, /* Matches the NAL queue; room reports cap at 6. */
     VIDEO_TIMELINE_BYTES = 24,
-    VIDEO_TIMELINE_RATE_MASK = 7 /* Bits 0/1/2: 10/15/20 pictures per second. */
+    VIDEO_TIMELINE_RATE_MASK = 15 /* Bits 0/1/2/3: 10/15/20/24 pictures per second. */
 };
 
 typedef struct {

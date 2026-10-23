@@ -14,6 +14,20 @@
  * This preserves the C flags and lets the linker resolve cross-section PIC. */
 #pragma clang section text=".text.video"
 
+#ifndef VIDEO_EXTENSION_ALLOC
+#define VIDEO_EXTENSION_ALLOC cfw_heap13_malloc
+#define VIDEO_EXTENSION_FREE cfw_heap13_free
+#endif
+enum {
+    /* Per-macroblock decoder context (Sub0h264 decoder.hpp): 16 + 4 + 4 nonzero
+     * counts, 4 QP, 1 transform flag, 16 intra modes and 16 * 10 motion. */
+    VIDEO_MB_CONTEXT_BYTES = 205,
+    /* The decoder holds that context for three macroblock rows (mb_window.hpp). */
+    VIDEO_MB_CONTEXT_ROWS = 3,
+    /* Free display heap a mid size leaves after taking its extra NAL slots. */
+    VIDEO_EXTENSION_DISPLAY_FLOOR = 65536
+};
+
 typedef struct video_owner {
     customCfwContext *context;
     uint32_t token, thread, ingress_allowance, shadow_missing;
@@ -21,6 +35,7 @@ typedef struct video_owner {
     uint32_t control_generation, extension_attempted, decode_pin;
     volatile uint32_t armed;
     void *raw, *object_allocation, *object, *decoder, *stack_allocation;
+    void *extension_display; /* Mid sizes: extra NAL slots in the display heap. */
     uint8_t *stack;
     uint8_t tcb[VIDEO_THREAD_CONTROL_BYTES] __attribute__((aligned(8)));
     uint8_t wake_control[VIDEO_EVENT_CONTROL_BYTES] __attribute__((aligned(8)));
@@ -526,6 +541,7 @@ static void video_free_owner(video_owner *owner) {
     void *raw = owner->raw;
     video_presenter_destroy(owner);
     video_storage_reclaim(&owner->storage);
+    if (owner->extension_display) VIDEO_EXTENSION_FREE(owner->extension_display);
     VIDEO_OWNER_FREE(raw);
 }
 static int video_stop_token(uint32_t token, uint32_t timeout_ms);
@@ -587,6 +603,11 @@ int video_worker_start_guarded(uint32_t ingress_allowance, uint32_t generation) 
         VIDEO_OWNER_FREE(raw); return 0;
     }
     video_storage_bind_counter(&owner->storage, &ctx->video_heap.decoder);
+    /* A mid size needs two bigger decoder pictures and a wider context window. */
+    video_geometry geometry = ctx->video_control.geometry;
+    if (video_geometry_full_width(geometry))
+        owner->storage.limit += 2 * (geometry.width * geometry.height - VIDEO_FRAME_WIDTH * VIDEO_FRAME_HEIGHT) +
+            VIDEO_MB_CONTEXT_ROWS * VIDEO_MB_CONTEXT_BYTES * (geometry.width - VIDEO_FRAME_WIDTH) / 16;
     video_event_attr event = {"video-wake", 0, owner->wake_control,
                               sizeof(owner->wake_control)};
     owner->wake = VIDEO_OS_EVENT_NEW(&event);
@@ -711,6 +732,32 @@ int video_worker_receive_nal_locked(uint32_t stream, uint32_t sequence,
     return copied;
 }
 
+/* A mid size needs the cached heap for its bigger decoder pictures, so its
+ * eight extra NAL slots come from the display heap, as long as that leaves
+ * VIDEO_EXTENSION_DISPLAY_FLOOR plus the transport's allowance free there.
+ * Otherwise the queue simply stays at four slots. The caller is the worker. */
+static void video_worker_extend_display(video_owner *owner, uint32_t token) {
+    customCfwContext *ctx = owner->context;
+    uint32_t raw_bytes = (VIDEO_QUEUE_MAX - VIDEO_QUEUE_INITIAL) * VIDEO_SLOT_BYTES + VIDEO_ALLOC_ALIGNMENT - 1u;
+    uint32_t floor = VIDEO_EXTENSION_DISPLAY_FLOOR + owner->storage.display_allowance;
+    video_heap_view view;
+    if (!video_meter_heap_view(0, VIDEO_HEAP_DISPLAY, &view) || view.free_bytes == UINT32_MAX ||
+        view.max_alloc > view.free_bytes || raw_bytes > view.max_alloc ||
+        view.free_bytes < floor || raw_bytes > view.free_bytes - floor) return;
+    void *raw = VIDEO_EXTENSION_ALLOC(raw_bytes);
+    if (!raw) return;
+    uint8_t *slots = (uint8_t *)(((uintptr_t)raw + VIDEO_ALLOC_ALIGNMENT - 1u) &
+                                 ~(uintptr_t)(VIDEO_ALLOC_ALIGNMENT - 1u));
+    int published = 0;
+    if (video_control_take(ctx)) {
+        if (!video_lifecycle_cancelled(&ctx->video, token) && video_lease_valid(ctx))
+            published = video_queue_extend(&owner->queue, slots);
+        video_control_give(ctx);
+    }
+    if (published) owner->extension_display = raw;
+    else VIDEO_EXTENSION_FREE(raw);
+}
+
 int video_worker_picture_complete(uint32_t token, int dpb_full) {
     video_owner *owner = video_current_owner();
     if (!owner || token != owner->token || !owner->control_generation || !owner->thread ||
@@ -727,6 +774,10 @@ int video_worker_picture_complete(uint32_t token, int dpb_full) {
     if (attempt) owner->extension_attempted = 1;
     video_control_give(ctx);
     if (!attempt) return 1;
+    if (video_geometry_full_width(ctx->video_control.geometry)) {
+        video_worker_extend_display(owner, token);
+        return 1;
+    }
     uint32_t original_limit = owner->storage.limit;
     owner->storage.limit += (VIDEO_QUEUE_MAX - VIDEO_QUEUE_INITIAL) * VIDEO_SLOT_BYTES;
     /* The caller is the worker at a decoder boundary. It cannot acknowledge

@@ -53,6 +53,9 @@ class PackTests(unittest.TestCase):
     def test_four_floors_keep_default_and_bright_curve_and_dark_bars_for_both_scales(self):
         subprocess.run([str(self.exe), "picture-styles"], check=True)
 
+    def test_mid_sizes_fill_the_panel_width_with_centre_sampling_and_unlit_bars(self):
+        subprocess.run([str(self.exe), "full-width"], check=True)
+
 
 if __name__ == "__main__":
     unittest.main()

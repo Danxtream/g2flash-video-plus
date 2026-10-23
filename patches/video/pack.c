@@ -11,6 +11,43 @@ uint32_t video_source_from_side(uint32_t side) {
     return side == 2 ? 1 : side == 1 ? 2 : 0;
 }
 
+/* Mid sizes fill the panel width: output pixel x shows the source pixel under its
+ * centre, r.x + (2x + 1) * r.width / 1280, and rows likewise, so the picture keeps
+ * its shape (some source pixels become two panel pixels). Only owned 4-bit slots
+ * reach here; their dithering, if any, was applied when they were copied. */
+static int video_pack_full_width(uint8_t *shadow, const video_frame_descriptor *frame,
+                                 video_picture_rect r) {
+    if ((frame->format & VIDEO_SOURCE_TYPE_MASK) != VIDEO_SOURCE_A4 ||
+        (frame->format & (VIDEO_SOURCE_DITHER | VIDEO_SOURCE_STYLE_MASK)) ||
+        r.width < VIDEO_PANEL_WIDTH / 2 || r.width > VIDEO_PANEL_WIDTH) return 0;
+    uint32_t height = (r.height * VIDEO_PANEL_WIDTH + r.width / 2) / r.width;
+    if (!height || height > VIDEO_PANEL_HEIGHT) return 0;
+    uint32_t top = (VIDEO_PANEL_HEIGHT - height) / 2;
+    uint16_t map[VIDEO_PANEL_WIDTH];
+    uint8_t levels[VIDEO_PANEL_WIDTH];
+    for (uint32_t x = 0; x < VIDEO_PANEL_WIDTH; ++x)
+        map[x] = (uint16_t)(r.x + ((2 * x + 1) * r.width) / (2 * VIDEO_PANEL_WIDTH));
+    for (uint32_t i = 0; i < top * VIDEO_PANEL_STRIDE; ++i) shadow[i] = 0;
+    for (uint32_t i = (top + height) * VIDEO_PANEL_STRIDE; i < VIDEO_PANEL_BYTES; ++i) shadow[i] = 0;
+    uint32_t last = UINT32_MAX;
+    for (uint32_t row = 0; row < height; ++row) {
+        uint32_t source = r.y + ((2 * row + 1) * r.height) / (2 * height);
+        uint8_t *out = shadow + (top + row) * VIDEO_PANEL_STRIDE;
+        if (source == last) { /* A repeated source row: copy the panel row above. */
+            const uint8_t *above = out - VIDEO_PANEL_STRIDE;
+            for (uint32_t i = 0; i < VIDEO_PANEL_STRIDE; ++i) out[i] = above[i];
+            continue;
+        }
+        last = source;
+        const uint8_t *in = frame->pixels + source * frame->stride;
+        for (uint32_t col = r.x; col < r.x + r.width; ++col)
+            levels[col] = col & 1 ? in[col / 2] & 15 : in[col / 2] >> 4;
+        for (uint32_t x = 0; x < VIDEO_PANEL_WIDTH; x += 2)
+            out[x / 2] = (uint8_t)(levels[map[x]] << 4 | levels[map[x + 1]]);
+    }
+    return 1;
+}
+
 int video_pack_frame(uint8_t *shadow, uint32_t bytes,
                      const video_frame_descriptor *frame) {
     if (!frame) return 0;
@@ -22,14 +59,16 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
     uint32_t style = (frame->format & VIDEO_SOURCE_STYLE_MASK) >> VIDEO_SOURCE_STYLE_SHIFT;
     if (!shadow || bytes < VIDEO_PANEL_BYTES || !frame->pixels ||
         !frame->width || !frame->height || frame->width % 4 ||
-        (frame->scale != VIDEO_SCALE_NATIVE && frame->scale != VIDEO_SCALE_DOUBLE) ||
+        (frame->scale != VIDEO_SCALE_NATIVE && frame->scale != VIDEO_SCALE_DOUBLE &&
+         frame->scale != VIDEO_SCALE_FULL_WIDTH) ||
         (type != VIDEO_SOURCE_Y8 && type != VIDEO_SOURCE_A4) ||
         (frame->format & ~(VIDEO_SOURCE_TYPE_MASK | VIDEO_SOURCE_TV | VIDEO_SOURCE_UNSIGNALLED | VIDEO_SOURCE_DITHER | VIDEO_SOURCE_STYLE_MASK)) ||
         (dither && type != VIDEO_SOURCE_Y8) ||
         (style && !dither) ||
         ((frame->format & VIDEO_SOURCE_UNSIGNALLED) && !tv) ||
-        frame->width > VIDEO_PANEL_WIDTH / frame->scale ||
-        frame->height > VIDEO_PANEL_HEIGHT / frame->scale) return 0;
+        (frame->scale != VIDEO_SCALE_FULL_WIDTH && (frame->width > VIDEO_PANEL_WIDTH / frame->scale ||
+         frame->height > VIDEO_PANEL_HEIGHT / frame->scale)) ||
+        frame->width > VIDEO_PANEL_WIDTH || frame->height > VIDEO_PANEL_HEIGHT) return 0;
     uint32_t row_bytes = type == VIDEO_SOURCE_Y8 ? frame->width : frame->width / 2;
     if (frame->stride < row_bytes ||
         frame->height - 1 > (UINT32_MAX - row_bytes) / frame->stride) return 0;
@@ -43,6 +82,7 @@ int video_pack_frame(uint8_t *shadow, uint32_t bytes,
         r = (video_picture_rect){0, 0, frame->width, frame->height};
     if (!r.width || !r.height ||
         r.x + r.width > frame->width || r.y + r.height > frame->height) return 0;
+    if (frame->scale == VIDEO_SCALE_FULL_WIDTH) return video_pack_full_width(shadow, frame, r);
     uint32_t x = (VIDEO_PANEL_WIDTH - frame->width * frame->scale) / 2;
     uint32_t y = (VIDEO_PANEL_HEIGHT - frame->height * frame->scale) / 2;
     /* The entire byte-aligned picture is overwritten below. Only margins can

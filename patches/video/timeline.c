@@ -6,7 +6,7 @@
 int video_timeline_configure(video_timeline *s, uint32_t stream, uint32_t duration,
                              uint32_t pts, uint16_t numerator, uint16_t denominator) {
     if (!s || s->active || !stream || !duration || pts > duration ||
-        (numerator != 10 && numerator != 15 && numerator != 20) || denominator != 1) return 0;
+        (numerator != 10 && numerator != 15 && numerator != 20 && numerator != 24) || denominator != 1) return 0;
     *s = (video_timeline){.stream = stream, .duration = duration,
                            .start_pts = pts, .fps = numerator, .configured = 1};
     return 1;

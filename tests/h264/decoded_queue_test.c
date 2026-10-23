@@ -43,7 +43,34 @@ int main(void) {
     video_decoded_queue q = {0};
     assert(!video_decoded_init(&q, 7, 9, VIDEO_SOURCE_Y8 | VIDEO_SOURCE_STYLE_MASK, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
     assert(video_decoded_init(&q, 7, 9, VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER | VIDEO_SOURCE_STYLE_MASK, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
-    assert(!video_decoded_init(&q, 7, 9, VIDEO_SOURCE_A4 | VIDEO_SOURCE_DITHER, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
+    /* Dithered 4-bit slots exist only for the full-width mid sizes: they take the
+     * pattern while copying and lay their slots out at their own 4-bit size. */
+    assert(video_decoded_init(&q, 7, 9, VIDEO_SOURCE_A4 | VIDEO_SOURCE_DITHER, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
+    assert(!video_decoded_geometry(&q, video_geometry_default()));
+    video_geometry mid = {480, 272, {0, 1, 480, 270}};
+    assert(!video_decoded_geometry(&q, mid)); /* Two 65,280 B slots exceed this buffer. */
+    uint8_t *mid_y = malloc(480 * 272), *mid_pixels = malloc(480 * 272);
+    assert(mid_y && mid_pixels);
+    assert(video_decoded_init(&q, 7, 9, VIDEO_SOURCE_A4 | VIDEO_SOURCE_DITHER, 2, mid_pixels, 480 * 272));
+    assert(video_decoded_geometry(&q, mid) && q.slot_bytes == 480 * 272 / 2);
+    assert(q.slots[1].pixels == mid_pixels + 480 * 272 / 2);
+    video_frame_time mid_time = {1, 1, 0};
+    uint32_t mid_serial = video_decoded_reserve(&q, 7, &mid_time);
+    memset(mid_y, 128, 480 * 272);
+    assert(video_decoded_copy_range(&q, 7, mid_serial, mid_y, 480, 480 * 272, 0));
+    for (uint32_t row = 0; row < 2; ++row) { /* The 2x2 pattern sits on source pixels. */
+        uint8_t pair = mid_pixels[row * 240];
+        assert((pair >> 4) == video_dither_tuned(128, 0, 0, row, 0) && (pair & 15) == video_dither_tuned(128, 0, 1, row, 0));
+    }
+    assert(video_decoded_publish(&q, 7, mid_serial));
+    video_frame_descriptor mid_frame;
+    video_frame_time mid_media;
+    assert(!video_decoded_claim(&q, 7, 1, VIDEO_SCALE_DOUBLE, &mid_frame, &mid_media));
+    assert(video_decoded_claim(&q, 7, 1, VIDEO_SCALE_FULL_WIDTH, &mid_frame, &mid_media));
+    assert(mid_frame.format == VIDEO_SOURCE_A4 && mid_frame.stride == 240 && mid_frame.bytes == 480 * 272 / 2 &&
+           mid_frame.picture.y == 1 && mid_frame.picture.height == 270);
+    assert(video_decoded_release(&q, 7, 1));
+    free(mid_y); free(mid_pixels);
     assert(!video_decoded_init(&q, 7, 9, VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER, 2, pixels, 2 * VIDEO_DECODED_A4_BYTES));
     assert(video_decoded_init(&q, 7, 9, VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER, 2, pixels, 2 * VIDEO_DECODED_Y8_BYTES));
     video_frame_time dither_time = {1, 1, 0};
@@ -64,6 +91,7 @@ int main(void) {
         uint32_t serial = video_decoded_reserve(&q, 7, &media);
         assert(serial && video_decoded_copy(&q, 7, serial, y, 320, VIDEO_DECODED_Y8_BYTES));
         assert(video_decoded_publish(&q, 7, serial));
+        assert(!video_decoded_claim(&q, 7, ordinal, VIDEO_SCALE_FULL_WIDTH, &frame, &media));
         assert(video_decoded_claim(&q, 7, ordinal, VIDEO_SCALE_NATIVE, &frame, &media));
         assert(video_decoded_release(&q, 7, ordinal));
     }
