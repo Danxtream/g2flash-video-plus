@@ -41,7 +41,7 @@ __attribute__((noinline)) static void video_queue_snapshot(video_control_replay 
     out[0] = 1; out[1] = VIDEO_CONTROL_DIAGNOSTICS; out[2] = entry->result;
     out[3] = VIDEO_QUEUE_DIAGNOSTICS; out[4] = VIDEO_QUEUE_INITIAL;
     out[5] = VIDEO_QUEUE_MAX; out[6] = VIDEO_TIMELINE_RECORDS; out[7] = here;
-    out[8] = 1; /* Full-width mid frame sizes. */
+    out[8] = 1 | 2; /* Full-width mid frame sizes; their 4x4 dither pattern. */
 }
 
 static void video_snapshot(customCfwContext *ctx, video_control_replay *entry) {
@@ -209,7 +209,8 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         video_geometry geometry = {p[12] | (uint16_t)p[13] << 8, p[14] | (uint16_t)p[15] << 8,
             {0, 0, p[12] | (uint16_t)p[13] << 8, p[14] | (uint16_t)p[15] << 8}};
         uint32_t style = n == VIDEO_START_PICTURE_BYTES ? p[32] : 0;
-        if (style > 3 || (n == VIDEO_START_PICTURE_BYTES && (p[33] || p[34] || p[35])) ||
+        if (style > (VIDEO_START_STYLE_FLOOR | VIDEO_START_STYLE_PATTERN4) ||
+            (n == VIDEO_START_PICTURE_BYTES && (p[33] || p[34] || p[35])) ||
             (style && !(p[18] & VIDEO_DITHER_PRESENTATION))) return VIDEO_CONTROL_FORMAT;
         if (n >= VIDEO_START_GEOMETRY_BYTES) {
             geometry.picture = (video_picture_rect){p[24] | (uint16_t)p[25] << 8,
@@ -218,8 +219,10 @@ static int video_control_apply(customCfwContext *ctx, const uint8_t *p,
         } else if (geometry.width != VIDEO_FRAME_WIDTH || geometry.height != VIDEO_FRAME_HEIGHT)
             return VIDEO_CONTROL_FORMAT;
         if (!video_geometry_valid(geometry)) return VIDEO_CONTROL_FORMAT;
-        /* Only the queued presenter stretches mid sizes to the panel width. */
-        if (video_geometry_full_width(geometry) && !(p[18] & VIDEO_QUEUED_PRESENTATION))
+        /* Only the queued presenter stretches mid sizes to the panel width, and only
+         * mid sizes take the 4x4 pattern: 2x shows each 320 pixel as a 2x2 cell. */
+        if (video_geometry_full_width(geometry) ? !(p[18] & VIDEO_QUEUED_PRESENTATION) :
+            (style & VIDEO_START_STYLE_PATTERN4) != 0)
             return VIDEO_CONTROL_FORMAT;
         uint32_t stream = video_read32(p + 8), interval = video_read32(p + 20);
         if (!stream || stream <= s->stream_high || interval < VIDEO_INTERVAL_MIN ||

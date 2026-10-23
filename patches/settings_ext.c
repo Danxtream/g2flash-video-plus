@@ -488,7 +488,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[SETTINGS_REVISION_SLOT] = "Faceclaw/16 1023a";
+        static const char caps[SETTINGS_REVISION_SLOT] = "Faceclaw/16 1023b";
         unsigned caps_len = 0;
         while (caps_len < SETTINGS_REVISION_SLOT && caps[caps_len]) ++caps_len;
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,

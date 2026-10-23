@@ -1965,7 +1965,7 @@ static void consumer(void) {
            snapshot[1] == VIDEO_CONTROL_DIAGNOSTICS && snapshot[3] == VIDEO_QUEUE_DIAGNOSTICS &&
            snapshot[4] == VIDEO_QUEUE_INITIAL && snapshot[5] == VIDEO_QUEUE_MAX &&
            snapshot[6] == VIDEO_TIMELINE_RECORDS && (snapshot[7] == 1 || snapshot[7] == 2) &&
-           snapshot[8] == 1 /* Full-width mid frame sizes. */);
+           snapshot[8] == 3 /* Full-width mid frame sizes and their 4x4 pattern. */);
     control_command(p, VIDEO_CONTROL_START, 2);
     assert(control_snapshot(p, VIDEO_START_BYTES, snapshot) == VIDEO_CONTROL_ACCEPTED && !context.video_failure.valid);
     pool_drain(); await_ready();
@@ -2859,6 +2859,31 @@ static void picture_style_contract(void) {
         pool_drain(); await_ready();
         assert(state() == VIDEO_READY && video_current_owner()->presenter->queue.format ==
             (VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER | (style << VIDEO_SOURCE_STYLE_SHIFT)));
+        finish();
+    }
+    /* Bit 2 picks the 4x4 pattern: mid sizes only, with dithering, beside a floor style. */
+    for (uint32_t variant = 0; variant < 3; ++variant) {
+        configure();
+        assert(video_timeline_configure(&context.video_control.timeline,1,2000,0,15,1));
+        context.video_control.owner_origin = 1;
+        uint8_t p[VIDEO_START_PICTURE_BYTES] = {0}, snapshot[VIDEO_STATUS_BYTES];
+        control_command(p,VIDEO_CONTROL_START,1);
+        p[18] = VIDEO_QUEUED_PRESENTATION | VIDEO_DITHER_PRESENTATION;
+        const video_geometry g = variant == 1 ? video_geometry_default() : (video_geometry){480,272,{0,1,480,270}};
+        p[12] = g.width; p[13] = g.width >> 8; p[14] = g.height; p[15] = g.height >> 8;
+        uint16_t rect[] = {g.picture.x,g.picture.y,g.picture.width,g.picture.height};
+        for (uint32_t j = 0; j < 4; ++j) { p[24+2*j] = rect[j]; p[25+2*j] = rect[j] >> 8; }
+        p[32] = variant == 2 ? 8 : VIDEO_START_STYLE_PATTERN4 | 2;
+        if (variant) {
+            assert(control_snapshot(p,sizeof(p),snapshot) == VIDEO_CONTROL_FORMAT);
+            assert(!context.video_control.stream_high && !pool_pending()); finish();
+            continue;
+        }
+        assert(!control_snapshot(p,sizeof(p),snapshot));
+        assert(context.video_control.picture_style == (VIDEO_START_STYLE_PATTERN4 | 2));
+        pool_drain(); await_ready();
+        assert(state() == VIDEO_READY && video_current_owner()->presenter->queue.format ==
+            (VIDEO_SOURCE_A4 | VIDEO_SOURCE_DITHER | VIDEO_SOURCE_PATTERN4 | (2 << VIDEO_SOURCE_STYLE_SHIFT)));
         finish();
     }
     for (uint32_t variant = 0; variant < 3; ++variant) {

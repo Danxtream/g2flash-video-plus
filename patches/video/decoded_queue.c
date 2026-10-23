@@ -11,8 +11,9 @@ int video_decoded_init(video_decoded_queue *q, uint32_t generation, uint32_t tok
                     type == VIDEO_SOURCE_Y8 ? VIDEO_DECODED_Y8_BYTES : 0;
     if (!q || !generation || !token || !pixels || !slot || !depth ||
         depth > VIDEO_DECODED_DEPTH || bytes < depth * slot ||
-        (format & ~(VIDEO_SOURCE_TYPE_MASK | VIDEO_SOURCE_DITHER | VIDEO_SOURCE_STYLE_MASK)) ||
-        ((format & VIDEO_SOURCE_STYLE_MASK) && !(format & VIDEO_SOURCE_DITHER))) return 0;
+        (format & ~(VIDEO_SOURCE_TYPE_MASK | VIDEO_SOURCE_DITHER | VIDEO_SOURCE_STYLE_MASK | VIDEO_SOURCE_PATTERN4)) ||
+        ((format & VIDEO_SOURCE_STYLE_MASK) && !(format & VIDEO_SOURCE_DITHER)) ||
+        ((format & VIDEO_SOURCE_PATTERN4) && (type != VIDEO_SOURCE_A4 || !(format & VIDEO_SOURCE_DITHER)))) return 0;
     /* Dithered 4-bit slots (mid sizes) take the pattern when copied; see copy_range. */
     *q = (video_decoded_queue){.generation = generation, .token = token, .format = format,
         .depth = depth, .slot_bytes = slot, .bytes = bytes, .geometry = video_geometry_default()};
@@ -88,12 +89,18 @@ int video_decoded_copy_range(video_decoded_queue *q, uint32_t generation, uint32
         uint8_t *dst = slot->pixels + row * ((q->format & VIDEO_SOURCE_TYPE_MASK) == VIDEO_SOURCE_A4 ? width / 2 : width);
         if ((q->format & VIDEO_SOURCE_TYPE_MASK) == VIDEO_SOURCE_A4 && (q->format & VIDEO_SOURCE_DITHER)) {
             /* The pattern sits on source pixels; the full-width stretch then widens
-             * some of them, which the 2x2 cells tolerate. */
+             * some of them, which both cell sizes tolerate. */
             uint32_t style = (q->format & VIDEO_SOURCE_STYLE_MASK) >> VIDEO_SOURCE_STYLE_SHIFT;
             int tv = (range & VIDEO_SOURCE_TV) != 0;
-            for (uint32_t col = 0; col < width / 2; ++col)
-                dst[col] = (video_dither_tuned(src[2 * col], tv, 2 * col, row, style) << 4) |
-                            video_dither_tuned(src[2 * col + 1], tv, 2 * col + 1, row, style);
+            if (q->format & VIDEO_SOURCE_PATTERN4) {
+                for (uint32_t col = 0; col < width / 2; ++col)
+                    dst[col] = (video_dither_4x4(src[2 * col], tv, 2 * col, row, style) << 4) |
+                                video_dither_4x4(src[2 * col + 1], tv, 2 * col + 1, row, style);
+            } else {
+                for (uint32_t col = 0; col < width / 2; ++col)
+                    dst[col] = (video_dither_tuned(src[2 * col], tv, 2 * col, row, style) << 4) |
+                                video_dither_tuned(src[2 * col + 1], tv, 2 * col + 1, row, style);
+            }
         } else if ((q->format & VIDEO_SOURCE_TYPE_MASK) == VIDEO_SOURCE_A4) {
             for (uint32_t col = 0; col < width / 2; ++col)
                 dst[col] = (video_gray_level(src[2 * col], range & VIDEO_SOURCE_TV) << 4) |
@@ -124,7 +131,7 @@ int video_decoded_claim(video_decoded_queue *q, uint32_t generation, uint32_t or
     *frame = (video_frame_descriptor){q->token, generation, ordinal, q->geometry.width, q->geometry.height,
         (q->format & VIDEO_SOURCE_TYPE_MASK) == VIDEO_SOURCE_A4 ? q->geometry.width / 2 : q->geometry.width,
         q->slot_bytes, ((q->format & VIDEO_SOURCE_TYPE_MASK) == VIDEO_SOURCE_A4 ?
-            q->format & ~(VIDEO_SOURCE_DITHER | VIDEO_SOURCE_STYLE_MASK) : q->format) | slot->range,
+            q->format & ~(VIDEO_SOURCE_DITHER | VIDEO_SOURCE_STYLE_MASK | VIDEO_SOURCE_PATTERN4) : q->format) | slot->range,
         scale, slot->pixels, q->geometry.picture};
     *media = slot->media;
     slot->state = VIDEO_DECODED_PRESENTING;

@@ -428,7 +428,9 @@ static int video_presenter_prepare(video_owner *owner) {
     int full_width = video_geometry_full_width(geometry);
     uint32_t format = full_width ? VIDEO_SOURCE_A4 | (dither ? VIDEO_SOURCE_DITHER : 0) :
         dither ? VIDEO_SOURCE_Y8 | VIDEO_SOURCE_DITHER : VIDEO_SOURCE_A4;
-    format |= owner->context->video_control.picture_style << VIDEO_SOURCE_STYLE_SHIFT;
+    uint32_t style = owner->context->video_control.picture_style;
+    format |= (style & VIDEO_START_STYLE_FLOOR) << VIDEO_SOURCE_STYLE_SHIFT |
+        (style & VIDEO_START_STYLE_PATTERN4 ? VIDEO_SOURCE_PATTERN4 : 0);
     uint32_t pixels_bytes = VIDEO_DECODED_DEPTH * (full_width ? geometry.width * geometry.height / 2 :
         dither ? VIDEO_DECODED_Y8_BYTES : VIDEO_DECODED_A4_BYTES);
     p->storage.limit = full_width ? VIDEO_PRESENTER_A4_LIMIT - VIDEO_DECODED_DEPTH * VIDEO_DECODED_A4_BYTES + pixels_bytes :

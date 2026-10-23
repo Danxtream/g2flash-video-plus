@@ -17,6 +17,7 @@ enum {
     VIDEO_SOURCE_DITHER = 16,
     VIDEO_SOURCE_STYLE_SHIFT = 5,
     VIDEO_SOURCE_STYLE_MASK = 96,
+    VIDEO_SOURCE_PATTERN4 = 128, /* Dithered mid sizes: the 4x4 pattern instead of 2x2. */
     VIDEO_SCALE_NATIVE = 1,
     VIDEO_SCALE_DOUBLE = 2,
     VIDEO_SCALE_FULL_WIDTH = 3, /* Mid sizes: stretched to the panel width. */
